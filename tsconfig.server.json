@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "esModuleInterop": true,
+    "strict": true,
+    "alwaysStrict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noImplicitAny": true,
+    "outDir": "./dist-server",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["server/**/*", "prisma.config.ts"],
+  "exclude": ["node_modules"]
+}

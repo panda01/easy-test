@@ -1,0 +1,35 @@
+// Prisma 7 datasource blocks carry ONLY the provider. The connection string is
+// supplied by the project-root `prisma.config.ts` (`datasource.url`), which
+// reads DATABASE_URL after `server/bootEnv.ts` has loaded .env.local / .env.
+// This matches what `prisma init` itself generates on Prisma 7.
+datasource db {
+  provider = "postgresql"
+}
+
+// `prisma-client` (NOT the legacy `prisma-client-js`) is the Prisma 7 ESM
+// generator: it emits TypeScript sources into `output` instead of writing into
+// node_modules. `output` is relative to THIS file, so the client lands at
+// `server/generated/prisma/`. Never import from there in app code - go through
+// `../services/dbService.ts`. See `./README.md`.
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+/// A website a user wants to test.
+///
+/// Field names are intentionally camelCase and are the names app code uses.
+/// Only the TABLE name is mapped, to the snake_case plural this project uses
+/// for tables. Because the fields are not individually @map'd, Postgres stores
+/// them as quoted mixed-case columns - hand-written SQL must quote them:
+///   select "createdAt" from websites;
+model Website {
+  id          String   @id @default(cuid())
+  url         String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("websites")
+}

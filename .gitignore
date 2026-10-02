@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-server
+server/generated
+coverage
+.env.local
+*.log
+
+.DS_Store
+claude_tmp
+claude_temp
+test-results
+.playwright-mcp/
