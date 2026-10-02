@@ -15,8 +15,7 @@ import { useHealth } from "../hooks/useHealth";
  * The three render branches are mutually exclusive AND all reachable, on
  * purpose: `useHealth` clears `health` whenever it sets an error, so no state
  * combination here is dead code.
- *
- * @returns {ReactElement} The rendered homepage
+ * @returns The rendered homepage
  */
 export default function HomePage(): ReactElement {
   const { health, isLoading, errorMessage } = useHealth();

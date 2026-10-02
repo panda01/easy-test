@@ -7,6 +7,9 @@ import cookieParser from "cookie-parser";
 import type { Server } from "node:http";
 import { resolveServerPort } from "./utils/resolveServerPort.js";
 import { registerHealthRoutes } from "./controllers/health.js";
+import { registerWebsiteRoutes } from "./controllers/websites.js";
+import { registerUseCaseRoutes } from "./controllers/useCases.js";
+import { registerActionRoutes } from "./controllers/actions.js";
 
 const app = express();
 const PORT = resolveServerPort();
@@ -34,6 +37,9 @@ app.use(cookieParser());
 // `register<Section>Routes(app)` that declares full literal paths, so grepping
 // for "/api/health" finds the route in one hop.
 registerHealthRoutes(app);
+registerWebsiteRoutes(app);
+registerUseCaseRoutes(app);
+registerActionRoutes(app);
 
 /**
  * Binds the Express app to a TCP port and logs the resolved URL.
@@ -42,10 +48,9 @@ registerHealthRoutes(app);
  * assert the socket really came up, and close it again. The module-body call
  * below is skipped under NODE_ENV=test, so importing `app` into supertest
  * never grabs a socket.
- *
- * @param {Express} expressApp - The app to bind
- * @param {number} port - TCP port to listen on; 0 asks the OS for a free one
- * @returns {Server} The Node HTTP server, so callers can close it
+ * @param expressApp - The app to bind
+ * @param port - TCP port to listen on; 0 asks the OS for a free one
+ * @returns The Node HTTP server, so callers can close it
  */
 export function startListening(expressApp: Express, port: number): Server {
   return expressApp.listen(port, () => {

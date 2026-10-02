@@ -28,16 +28,49 @@ The generator is `prisma-client` (the ESM generator), **not** the legacy
 
 | Model | Table | Purpose |
 |---|---|---|
-| `Website` | `websites` | A website a user wants to test: url, name, description. |
+| `Website` | `websites` | A website a user wants to test: url, name, optional description. |
+| `UseCase` | `use_cases` | A scenario to test on one website: title, description (both required). |
+| `Action` | `actions` | A reusable step on one website, e.g. "Log in": title, description (both required). |
 
-`Website`'s fields are camelCase and are **not** individually `@map`'d — only
-the table name is mapped. Postgres therefore stores quoted mixed-case columns,
-so hand-written SQL must quote them:
+`UseCase` and `Action` each belong to exactly one `Website` (`websiteId`,
+indexed). The foreign keys use Prisma's default `onDelete: Restrict`, which is
+fine because rows are never hard deleted.
+
+Fields are camelCase and are **not** individually `@map`'d — only table names
+are mapped. Postgres therefore stores quoted mixed-case columns, so
+hand-written SQL must quote them:
 
 ```sql
 select "createdAt" from websites;   -- works
 select createdAt from websites;     -- fails
 ```
+
+## Soft delete
+
+All three models have a nullable `deletedAt`. Deleting sets it instead of
+removing the row, and every `dbService` query filters `deletedAt: null`.
+Deleting a website also stamps its active use cases and actions, in one
+transaction, with the **same** timestamp — so that batch can be identified
+together later.
+
+## The partial unique index on `Website.url`
+
+```prisma
+@@unique([url], where: { deletedAt: null })
+```
+
+A URL may appear on any number of soft-deleted websites but on at most one
+active website, so a deleted website's URL can be added again. This needs the
+**`partialIndexes` preview feature** (enabled in the generator block). In
+Postgres it is `websites_url_key ... WHERE "deletedAt" IS NULL`.
+
+Prisma still lists `url` in `WebsiteWhereUniqueInput`, but because several
+deleted rows can share a URL, URL lookups use `findFirst` with
+`deletedAt: null`, never `findUnique`.
+
+URLs are normalized with `new URL(input).href` before they are stored (see
+`../utils/validateRequestBodies.ts`), so `HTTPS://Example.COM` and
+`https://example.com/` collide on this index instead of becoming two websites.
 
 ## Workflow
 
@@ -49,4 +82,6 @@ npx prisma db push
 npx prisma generate
 ```
 
-`npm install` runs both automatically via `postinstall`.
+`npm install` runs both automatically via `postinstall`. A change that adds a
+unique index makes `db push` ask for `--accept-data-loss`, because the index
+cannot be created if duplicates exist.

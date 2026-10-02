@@ -6,6 +6,12 @@ The homepage says Hello World and displays the live result of `GET /api/health`,
 which doubles as the end-to-end proof that the Vite `/api` proxy and the Express
 server are both up.
 
+`/websites` manages the websites to test. Each website has its own page, with
+its **use cases** (scenarios to test) and **actions** (reusable steps such as
+"Log in"), and each of those has its own page too. All three support create,
+view, edit, and (soft) delete; see `server/prisma/README.md` and
+`src/pages/README.md`.
+
 **This project is development-only.** There is no production build, no PM2, no
 Docker, and no CI.
 
@@ -17,7 +23,7 @@ Docker, and no CI.
 | Client | React 19 + Vite 7 + MUI 7 |
 | Database | PostgreSQL 18 via Prisma 7 + `@prisma/adapter-pg` |
 | Tests | Vitest (two projects: backend/node, frontend/jsdom) |
-| Lint | ESLint flat config in TypeScript, `strictTypeChecked` |
+| Lint | ESLint flat config in TypeScript, `strictTypeChecked` + eslint-plugin-jsdoc `recommended-tsdoc-error` |
 
 ## First-time setup
 
@@ -89,7 +95,7 @@ and are not individually `@map`'d, so hand-written SQL must quote them:
 | `dev` | Express + Vite together, log lines prefixed `[server]` / `[vite]` |
 | `dev:server` / `dev:client` | Either half on its own |
 | `stop-dev` | Kill only this project's listeners |
-| `lint` | `eslint server` |
+| `lint` | `eslint server src` — TypeScript rules plus JSDoc rules (TSDoc style: no `{Type}` braces; `@route` is a registered tag) |
 | `tsc` / `tsc:client` | Typecheck the server / client projects |
 | `test` / `test:backend` / `test:frontend` / `test:watch` | Vitest |
 | `test:coverage` | Vitest with v8 coverage and global thresholds |

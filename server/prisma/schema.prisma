@@ -11,9 +11,14 @@ datasource db {
 // node_modules. `output` is relative to THIS file, so the client lands at
 // `server/generated/prisma/`. Never import from there in app code - go through
 // `../services/dbService.ts`. See `./README.md`.
+//
+// `partialIndexes` is a PREVIEW feature. It is what lets `Website.url` be
+// unique among ACTIVE (not soft-deleted) websites only - see the
+// `@@unique(..., where: ...)` on `Website` below.
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider        = "prisma-client"
+  output          = "../generated/prisma"
+  previewFeatures = ["partialIndexes"]
 }
 
 /// A website a user wants to test.
@@ -23,13 +28,55 @@ generator client {
 /// for tables. Because the fields are not individually @map'd, Postgres stores
 /// them as quoted mixed-case columns - hand-written SQL must quote them:
 ///   select "createdAt" from websites;
+///
+/// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
+/// timestamp on the website's active use cases and actions) instead of removing
+/// the row. Every dbService query filters `deletedAt: null`.
 model Website {
-  id          String   @id @default(cuid())
-  url         String   @unique
+  id          String    @id @default(cuid())
+  url         String
   name        String
   description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  useCases    UseCase[]
+  actions     Action[]
 
+  // Partial unique index: a URL may appear on any number of soft-deleted rows
+  // but on at most one active row, so a deleted website's URL can be re-added.
+  @@unique([url], where: { deletedAt: null })
   @@map("websites")
+}
+
+/// A scenario to test on a website, e.g. "Sign up and create a project".
+/// Belongs to exactly one website. Soft deleted like `Website`.
+model UseCase {
+  id          String    @id @default(cuid())
+  websiteId   String
+  title       String
+  description String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  website     Website   @relation(fields: [websiteId], references: [id])
+
+  @@index([websiteId])
+  @@map("use_cases")
+}
+
+/// A reusable step on a website, e.g. "Log in". Belongs to exactly one
+/// website. Soft deleted like `Website`.
+model Action {
+  id          String    @id @default(cuid())
+  websiteId   String
+  title       String
+  description String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  website     Website   @relation(fields: [websiteId], references: [id])
+
+  @@index([websiteId])
+  @@map("actions")
 }

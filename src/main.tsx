@@ -18,7 +18,15 @@ const theme = createTheme({
   },
 });
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+// index.html always ships `<div id="root">`, so a missing element means that
+// file was broken - fail with a message that says so rather than with React's
+// generic "Target container is not a DOM element".
+const rootElement = document.getElementById("root");
+if (rootElement === null) {
+  throw new Error('index.html is missing the <div id="root"> mount point');
+}
+
+ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <ThemeProvider theme={theme}>
       <CssBaseline />

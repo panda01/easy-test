@@ -17,10 +17,9 @@ export interface HealthStatus {
  *
  * The `cancelled` flag is what stops a response that resolves after unmount
  * from calling setState on a dead component.
- *
- * @returns {{ health: HealthStatus | null; isLoading: boolean; errorMessage: string | null }}
- *   `health` is null until a successful response arrives; `errorMessage` is
- *   non-null only when the request failed or returned a non-2xx status.
+ * @returns `{ health, isLoading, errorMessage }`: `health` is null until a
+ *   successful response arrives; `errorMessage` is non-null only when the
+ *   request failed or returned a non-2xx status.
  */
 export function useHealth(): {
   health: HealthStatus | null;
@@ -34,12 +33,17 @@ export function useHealth(): {
   useEffect(() => {
     let cancelled = false;
 
+    /**
+     * Performs the GET and records its outcome, unless the component has
+     * unmounted in the meantime.
+     * @returns Resolves once the outcome is recorded (or discarded when cancelled)
+     */
     const loadHealth = async (): Promise<void> => {
       try {
         const response = await fetch("/api/health");
         const responseIsOk = response.ok;
         if (!responseIsOk) {
-          throw new Error(`Server responded with ${response.status}`);
+          throw new Error(`Server responded with ${String(response.status)}`);
         }
         const data = (await response.json()) as HealthStatus;
         if (cancelled) return;

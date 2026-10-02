@@ -1,7 +1,15 @@
 import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
+import jsdoc from "eslint-plugin-jsdoc";
 import { defineConfig } from "eslint/config";
+
+/**
+ * eslint-plugin-jsdoc's TSDoc-flavoured preset, with every rule as an error.
+ * TypeScript already holds the types, so `{Type}` braces in a comment are
+ * rejected (jsdoc/no-types), and `@param` / `@returns` need descriptions.
+ */
+const jsdocTsdocPreset = jsdoc.configs["flat/recommended-tsdoc-error"];
 
 export default defineConfig([
   {
@@ -36,6 +44,18 @@ export default defineConfig([
       "@typescript-eslint/restrict-template-expressions": "off",
       "max-depth": ["error", { max: 4 }],
       "max-nested-callbacks": ["error", { max: 3 }],
+    },
+  },
+  {
+    files: ["./server/**/*.{ts,js}", "./src/**/*.{ts,tsx}"],
+    ...jsdocTsdocPreset,
+    rules: {
+      ...jsdocTsdocPreset.rules,
+      // `@route METHOD /path` is this project's tag for documenting an API
+      // route (see server/controllers/README.md). It has to be registered as a
+      // rule option: the `settings.jsdoc.definedTags` form is not honoured by
+      // check-tag-names. `typed: true` is the preset's own option, kept as is.
+      "jsdoc/check-tag-names": ["error", { typed: true, definedTags: ["route"] }],
     },
   },
 ]);
