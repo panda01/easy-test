@@ -11,6 +11,10 @@ export interface WebsiteRecord {
   url: string;
   name: string;
   description: string | null;
+  /** How long a screenshot waits for network requests to finish, in ms; 0 = don't wait. */
+  networkIdleTimeoutMs: number;
+  /** A screenshot is never taken sooner than this after the page loads, in ms. */
+  screenshotMinimumWaitMs: number;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -21,6 +25,10 @@ export interface WebsiteRequestBody {
   url: string;
   name: string;
   description: string;
+  /** Whole milliseconds, 0-30000, and not lower than `screenshotMinimumWaitMs`. */
+  networkIdleTimeoutMs: number;
+  /** Whole milliseconds, 0-30000. */
+  screenshotMinimumWaitMs: number;
 }
 
 /**

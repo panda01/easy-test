@@ -30,18 +30,31 @@ generator client {
 ///   select "createdAt" from websites;
 ///
 /// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
-/// timestamp on the website's active use cases and actions) instead of removing
-/// the row. Every dbService query filters `deletedAt: null`.
+/// timestamp on the website's active use cases, actions, and screenshot runs)
+/// instead of removing the row. Every dbService query filters `deletedAt: null`.
+///
+/// Two per-website settings control WHEN the Playwright controller takes a
+/// screenshot, after the page's `load` event:
+/// - `networkIdleTimeoutMs`: how long to wait for network requests to finish
+///   (Playwright's "networkidle"). If they are still running when it runs out,
+///   the screenshot is taken immediately. 0 means "don't wait for idle".
+/// - `screenshotMinimumWaitMs`: a FLOOR on the time from `load` to the
+///   screenshot. After idle + paint, only the remainder (if any) is waited.
+/// Both are whole milliseconds from 0 to 30000, and the cap may not be lower
+/// than the minimum (enforced by `validateWebsiteInput`).
 model Website {
-  id          String    @id @default(cuid())
-  url         String
-  name        String
-  description String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
-  useCases    UseCase[]
-  actions     Action[]
+  id                      String          @id @default(cuid())
+  url                     String
+  name                    String
+  description             String?
+  networkIdleTimeoutMs    Int             @default(5000)
+  screenshotMinimumWaitMs Int             @default(1)
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  deletedAt               DateTime?
+  useCases                UseCase[]
+  actions                 Action[]
+  screenshotRuns          ScreenshotRun[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -79,4 +92,41 @@ model Action {
 
   @@index([websiteId])
   @@map("actions")
+}
+
+/// One visit the Playwright controller made to a website: a headless browser
+/// loaded the URL, and (when the page answered at all) a viewport screenshot
+/// was written to disk. Belongs to exactly one website. Soft deleted like
+/// `Website`, and soft deleted together with it.
+///
+/// `requestedUrl` is a snapshot of the website's URL at run time, because the
+/// website's URL can be edited afterwards.
+///
+/// `succeeded` is true only when navigation completed AND the page answered
+/// with an HTTP status below 400. A 404/500 page is a failed run that still
+/// has a screenshot; a DNS error, refused connection, or timeout is a failed
+/// run with `screenshotFileName` null.
+///
+/// `screenshotFileName` is RELATIVE to the configured screenshot directory
+/// (`SCREENSHOT_DIR`), e.g. `<websiteId>/<uuid>.png`, so moving the directory
+/// or the repo does not break stored rows.
+///
+/// `durationMs` measures the navigation only (not browser launch or the
+/// screenshot itself).
+model ScreenshotRun {
+  id                 String    @id @default(cuid())
+  websiteId          String
+  requestedUrl       String
+  succeeded          Boolean
+  httpStatus         Int?
+  errorMessage       String?
+  screenshotFileName String?
+  durationMs         Int
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+  website            Website   @relation(fields: [websiteId], references: [id])
+
+  @@index([websiteId])
+  @@map("screenshot_runs")
 }

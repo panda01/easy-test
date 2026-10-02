@@ -12,6 +12,18 @@ its **use cases** (scenarios to test) and **actions** (reusable steps such as
 view, edit, and (soft) delete; see `server/prisma/README.md` and
 `src/pages/README.md`.
 
+A website's page also has a **Take screenshot** button. The server's
+Playwright controller launches a headless Chromium **on this machine**, visits
+the website's URL in a 1280x720 viewport, saves a PNG, and records the run:
+succeeded (HTTP < 400) or failed (HTTP 400+ with a screenshot, or a DNS error /
+refused connection / timeout with none). Every run is kept and listed under
+"Run history". Before each screenshot it waits for the page's network
+requests to finish and for it to paint, using two per-website settings on the
+website form: a network idle cap (default 5000 ms) and a minimum wait
+(default 1 ms). The browser can reach anything this machine can — localhost and
+LAN addresses included — and an invalid TLS certificate counts as a failed
+visit. See `server/controllers/README.md` and `server/services/README.md`.
+
 **This project is development-only.** There is no production build, no PM2, no
 Docker, and no CI.
 
@@ -33,6 +45,7 @@ Requires Node 25.4.0 and a local PostgreSQL server.
 createdb easy_test_dev
 cp .env.example .env.local     # then edit if your postgres user is not your OS user
 npm install                    # postinstall runs: prisma generate && prisma db push
+npx playwright install chromium   # the browser the screenshot feature launches
 ```
 
 ## Running
@@ -65,6 +78,12 @@ silently drifting to another port.
 `.env` holds committed non-secret defaults. `.env.local` is gitignored and
 **wins** — `server/bootEnv.ts` loads it first, and dotenv never overwrites a key
 that is already set. `.env.example` documents every key.
+
+| Key | Used for |
+|---|---|
+| `SERVER_PORT` / `VITE_PORT` | The two dev ports (see above). |
+| `DATABASE_URL` | PostgreSQL connection string. |
+| `SCREENSHOT_DIR` | Where screenshot PNGs are written and served from. Required; default `screenshots` (gitignored). A relative path resolves against the project root; `~` is not expanded. |
 
 ## Database
 
@@ -108,6 +127,10 @@ which is the honest classification for a dev-only project. **Move them back to
 `dependencies` the day a production deploy is added** — a prod install runs
 `npm ci --omit=dev`, but the `postinstall` hook (`prisma generate && prisma db
 push`) still runs and would fail without the Prisma CLI.
+
+`playwright` is already in `dependencies`, because the server imports it at
+runtime. Its browser is not part of the npm package: a production machine also
+needs `npx playwright install chromium`.
 
 The production `express.static(dist)` mount and SPA fallback are also omitted; a
 comment in `server/server.ts` marks the exact insertion point.

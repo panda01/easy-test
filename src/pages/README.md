@@ -7,7 +7,7 @@ One component per route. Routes are declared in `../App.tsx`.
 | `HomePage.tsx` | `/` | "Hello World" plus the live `/api/health` status. |
 | `WebsiteListPage.tsx` | `/websites` | Every active website, newest first, plus "New website". |
 | `WebsiteCreatePage.tsx` | `/websites/new` | The website form. |
-| `WebsiteDetailPage.tsx` | `/websites/:websiteId` | One website, Edit/Delete, and its Use cases and Actions sections. |
+| `WebsiteDetailPage.tsx` | `/websites/:websiteId` | One website, Take screenshot/Edit/Delete, its Screenshots section, and its Use cases and Actions sections. |
 | `WebsiteEditPage.tsx` | `/websites/:websiteId/edit` | The website form, pre-filled. |
 | `WebsiteItemCreatePage.tsx` | `/websites/:websiteId/use-cases/new`, `.../actions/new` | The title/description form. |
 | `WebsiteItemDetailPage.tsx` | `/websites/:websiteId/use-cases/:itemId`, `.../actions/:itemId` | One use case or action, Edit/Delete. |

@@ -6,13 +6,18 @@ import express, { type Express } from "express";
 import cookieParser from "cookie-parser";
 import type { Server } from "node:http";
 import { resolveServerPort } from "./utils/resolveServerPort.js";
+import { resolveScreenshotDirectory } from "./utils/resolveScreenshotDirectory.js";
 import { registerHealthRoutes } from "./controllers/health.js";
 import { registerWebsiteRoutes } from "./controllers/websites.js";
 import { registerUseCaseRoutes } from "./controllers/useCases.js";
 import { registerActionRoutes } from "./controllers/actions.js";
+import { registerPlaywrightRoutes } from "./controllers/playwright.js";
 
 const app = express();
 const PORT = resolveServerPort();
+// Resolved once at boot so a missing SCREENSHOT_DIR is a startup error, not a
+// 500 on the first screenshot. Passed to the Playwright routes explicitly.
+const SCREENSHOT_DIRECTORY = resolveScreenshotDirectory();
 
 // === Express middleware ===
 // Order is deliberate: body parsing, then cookies, then (once this project has
@@ -40,6 +45,7 @@ registerHealthRoutes(app);
 registerWebsiteRoutes(app);
 registerUseCaseRoutes(app);
 registerActionRoutes(app);
+registerPlaywrightRoutes(app, SCREENSHOT_DIRECTORY);
 
 /**
  * Binds the Express app to a TCP port and logs the resolved URL.

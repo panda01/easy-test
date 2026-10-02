@@ -12,8 +12,19 @@ import {
   websiteDetailPath,
 } from "../utils/routePaths";
 
-/** A blank website form. */
-const EMPTY_WEBSITE_VALUES: WebsiteRequestBody = { url: "", name: "", description: "" };
+/**
+ * A new website's form: blank text fields, and the screenshot timing settings
+ * at their defaults. The two numbers mirror the server's defaults
+ * (`DEFAULT_NETWORK_IDLE_TIMEOUT_MS` / `DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS` in
+ * `server/utils/validateRequestBodies.ts`); the client never imports server code.
+ */
+const NEW_WEBSITE_VALUES: WebsiteRequestBody = {
+  url: "",
+  name: "",
+  description: "",
+  networkIdleTimeoutMs: 5000,
+  screenshotMinimumWaitMs: 1,
+};
 
 /**
  * The create-website page (`/websites/new`).
@@ -32,7 +43,7 @@ export default function WebsiteCreatePage(): ReactElement {
    * POSTs the new website and, when the server accepts it, moves on to the
    * created website's page. On failure the form stays put and shows the
    * server's reason.
-   * @param values - The form's URL, name, and description
+   * @param values - The form's URL, name, description, and screenshot timing settings
    * @returns Resolves once the request (and any navigation) is done
    */
   const createWebsite = async (values: WebsiteRequestBody): Promise<void> => {
@@ -45,7 +56,7 @@ export default function WebsiteCreatePage(): ReactElement {
   /**
    * Hands the form values to `createWebsite` without returning its promise,
    * because the form's `onSubmit` prop expects a plain void callback.
-   * @param values - The form's URL, name, and description
+   * @param values - The form's URL, name, description, and screenshot timing settings
    */
   const handleSubmit = (values: WebsiteRequestBody): void => {
     void createWebsite(values);
@@ -65,7 +76,7 @@ export default function WebsiteCreatePage(): ReactElement {
         New website
       </Typography>
       <WebsiteForm
-        initialValues={EMPTY_WEBSITE_VALUES}
+        initialValues={NEW_WEBSITE_VALUES}
         submitLabel="Create website"
         isSubmitting={isSubmitting}
         errorMessage={errorMessage}

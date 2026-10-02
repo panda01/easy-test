@@ -51,6 +51,7 @@ function stubEveryPageRequest(): FetchStub {
       status: 200,
       body: [buildWebsiteItemRecord({ id: "action-1", title: "Submit credentials" })],
     },
+    "GET /api/websites/website-1/screenshot-runs": { status: 200, body: [] },
     "GET /api/websites/website-1/use-cases/use-case-1": {
       status: 200,
       body: buildWebsiteItemRecord({ id: "use-case-1", title: "Log in" }),

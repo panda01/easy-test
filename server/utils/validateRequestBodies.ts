@@ -1,6 +1,21 @@
 import type { WebsiteInput, TitleDescriptionInput } from "../services/dbService.js";
 
 /**
+ * The network idle cap a website gets when the request leaves it out. Mirrors
+ * the `@default(5000)` on `Website.networkIdleTimeoutMs` in the Prisma schema.
+ */
+export const DEFAULT_NETWORK_IDLE_TIMEOUT_MS = 5000;
+
+/**
+ * The minimum wait a website gets when the request leaves it out. Mirrors the
+ * `@default(1)` on `Website.screenshotMinimumWaitMs` in the Prisma schema.
+ */
+export const DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS = 1;
+
+/** The largest value either screenshot timing setting may have, in milliseconds. */
+export const MAX_TIMING_SETTING_MS = 30_000;
+
+/**
  * The outcome of validating a request body. Exactly one of `input` or
  * `errorMessage` is present, selected by `isValid`.
  */
@@ -39,6 +54,28 @@ function readTrimmedString(body: Record<string, unknown>, fieldName: string): st
 }
 
 /**
+ * Reads an optional screenshot timing setting in milliseconds.
+ *
+ * Only a JSON number is accepted - a numeric string such as "5000" is
+ * rejected, so the client must send real numbers.
+ * @param rawValue - The field's value as it arrived in the body
+ * @param defaultMs - What a missing or null value stands for
+ * @returns The setting in milliseconds, or null when the value is not a whole number from 0 to `MAX_TIMING_SETTING_MS`
+ */
+function readOptionalMilliseconds(rawValue: unknown, defaultMs: number): number | null {
+  const valueWasOmitted = rawValue === undefined || rawValue === null;
+  if (valueWasOmitted) {
+    return defaultMs;
+  }
+  const valueIsAWholeNumber = typeof rawValue === "number" && Number.isInteger(rawValue);
+  if (!valueIsAWholeNumber) {
+    return null;
+  }
+  const valueIsWithinRange = rawValue >= 0 && rawValue <= MAX_TIMING_SETTING_MS;
+  return valueIsWithinRange ? rawValue : null;
+}
+
+/**
  * Parses a URL string and returns its normalized form, but only for http and
  * https addresses.
  *
@@ -68,6 +105,11 @@ function normalizeHttpUrl(rawUrl: string): string | null {
  * - `url` is required, must be an http/https address, and is normalized.
  * - `name` is required.
  * - `description` is optional; a missing, null, or blank value is stored as null.
+ * - `networkIdleTimeoutMs` and `screenshotMinimumWaitMs` are optional whole
+ *   numbers of milliseconds from 0 to 30000; a missing or null value becomes
+ *   the default (5000 and 1). The cap may not be lower than the minimum
+ *   wait - when the cap runs out the screenshot is taken at once, so the
+ *   minimum must already have passed by then.
  * @param body - The parsed request body
  * @returns The cleaned input, or the first problem found as a message
  */
@@ -105,7 +147,44 @@ export function validateWebsiteInput(body: unknown): ValidationResult<WebsiteInp
   const descriptionIsBlank = trimmedDescription === "";
   const description = descriptionIsBlank ? null : trimmedDescription;
 
-  return { isValid: true, input: { url: normalizedUrl, name, description } };
+  const networkIdleTimeoutMs = readOptionalMilliseconds(
+    body.networkIdleTimeoutMs,
+    DEFAULT_NETWORK_IDLE_TIMEOUT_MS,
+  );
+  if (networkIdleTimeoutMs === null) {
+    return {
+      isValid: false,
+      errorMessage: `The network idle cap must be a whole number of milliseconds from 0 to ${MAX_TIMING_SETTING_MS}`,
+    };
+  }
+  const screenshotMinimumWaitMs = readOptionalMilliseconds(
+    body.screenshotMinimumWaitMs,
+    DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS,
+  );
+  if (screenshotMinimumWaitMs === null) {
+    return {
+      isValid: false,
+      errorMessage: `The minimum wait must be a whole number of milliseconds from 0 to ${MAX_TIMING_SETTING_MS}`,
+    };
+  }
+  const capIsLowerThanMinimumWait = networkIdleTimeoutMs < screenshotMinimumWaitMs;
+  if (capIsLowerThanMinimumWait) {
+    return {
+      isValid: false,
+      errorMessage: "The network idle cap cannot be lower than the minimum wait",
+    };
+  }
+
+  return {
+    isValid: true,
+    input: {
+      url: normalizedUrl,
+      name,
+      description,
+      networkIdleTimeoutMs,
+      screenshotMinimumWaitMs,
+    },
+  };
 }
 
 /**

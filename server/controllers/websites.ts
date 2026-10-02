@@ -44,7 +44,7 @@ export function registerWebsiteRoutes(app: Express): void {
    * Creates a website. The URL is normalized (lowercased host, root slash
    * added) before it is stored, and must not match another ACTIVE website.
    * @route POST /api/websites
-   * @param body - JSON `{ url, name, description? }`; `url` must be http/https
+   * @param body - JSON `{ url, name, description?, networkIdleTimeoutMs?, screenshotMinimumWaitMs? }`; `url` must be http/https; the two settings are whole milliseconds 0-30000 (defaults 5000 and 1) and the cap may not be lower than the minimum
    * @returns 201 with the created website; 400 with `{ error }` for an invalid body; 409 with `{ error }` when another active website has the URL; 500 with `{ error }` otherwise
    */
   app.post("/api/websites", async (req, res) => {
@@ -86,10 +86,10 @@ export function registerWebsiteRoutes(app: Express): void {
   });
 
   /**
-   * Replaces an active website's URL, name, and description.
+   * Replaces an active website's URL, name, description, and screenshot timing settings.
    * @route PUT /api/websites/:websiteId
    * @param websiteId - Path parameter: the website's cuid
-   * @param body - JSON `{ url, name, description? }`; same rules as POST
+   * @param body - JSON `{ url, name, description?, networkIdleTimeoutMs?, screenshotMinimumWaitMs? }`; same rules as POST (an omitted setting goes back to its default)
    * @returns 200 with the updated website; 400 with `{ error }` for an invalid body; 404 with `{ error }` when it does not exist or was deleted; 409 with `{ error }` when another active website has the URL; 500 with `{ error }` otherwise
    */
   app.put("/api/websites/:websiteId", async (req, res) => {

@@ -8,6 +8,7 @@ Route registrars. One file per API section.
 | `websites.ts` | `GET`/`POST /api/websites`, `GET`/`PUT`/`DELETE /api/websites/:websiteId` |
 | `useCases.ts` | `GET`/`POST /api/websites/:websiteId/use-cases`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/use-cases/:useCaseId` |
 | `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` |
+| `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
 
 ## The convention
 
@@ -43,10 +44,41 @@ braces** - TypeScript already holds the types.
   query runs. Handlers pass `req.body` whole (it is `any`, and may be
   `undefined` in Express 5) rather than reading fields off it.
 - **Deletes are soft.** See `../prisma/README.md`.
-- **Nested routes check the parent first.** Use case and action routes look up
-  the website and answer `404 "Website not found"` before touching the child.
+- **Nested routes check the parent first.** Use case, action, and screenshot
+  run routes look up the website and answer `404 "Website not found"` before
+  touching the child.
 - **Handlers leave `req`/`res` unannotated.** Express infers
   `req.params.websiteId` as `string` from the literal path; an explicit
   `Request` annotation widens params to `string | string[]`.
 - **Errors go through `describeError`** (`../utils/describeError.ts`), so the
   "is it an Error?" branch lives in one tested place.
+
+## The Playwright controller (`playwright.ts`)
+
+`registerPlaywrightRoutes(app, screenshotDirectory)` takes a **second
+argument**: the absolute screenshot directory, resolved once at boot by
+`resolveScreenshotDirectory()` in `server.ts` (from `SCREENSHOT_DIR`), so tests
+can point it at a fixture directory. The browser work itself lives in
+`../services/playwrightService.ts`.
+
+- **`POST .../screenshot-runs` answers `201` for a failed visit too.** An HTTP
+  400+ page, a DNS error, a refused connection, or a timeout is still a
+  successfully *recorded* run, with `succeeded: false`. That keeps the run's
+  details in the response body (the client's `useJsonMutation` discards the body
+  of any non-2xx response). Only infrastructure failures answer `500`: the
+  directory cannot be created, the browser cannot launch, or a query fails.
+  The request lasts as long as the visit — up to the 30 second navigation
+  timeout plus the website's network idle cap.
+- **The website row's timing settings drive the wait.** The POST passes the
+  found website's `networkIdleTimeoutMs` and `screenshotMinimumWaitMs` to the
+  service: wait for network idle (capped), then paint, and never screenshot
+  sooner than the minimum after `load`. See `../services/README.md`.
+- **File names come from the database row**, never the URL:
+  `<website.id>/<random uuid>.png`, relative to the screenshot directory.
+- **`GET .../screenshot` answers `image/png`** (errors are still JSON
+  `{ error }`). It uses `res.sendFile(name, { root: screenshotDirectory }, cb)`:
+  `root` makes `send` refuse a name that climbs out with `..`, and keeps a
+  screenshot directory under a dot-folder working. Send errors arrive in the
+  callback *after* the async handler returned, so the callback answers them
+  itself: `404 "Screenshot file not found"` when the file is gone, `500`
+  otherwise, and nothing at all when the response had already started.

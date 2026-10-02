@@ -4,6 +4,8 @@ import {
   WEBSITE_LIST_PATH,
   WEBSITES_API_URL,
   newWebsiteItemPath,
+  screenshotRunImageApiUrl,
+  screenshotRunsApiUrl,
   websiteApiUrl,
   websiteDetailPath,
   websiteEditPath,
@@ -86,6 +88,27 @@ describe("routePaths: API urls", () => {
     );
     expect(websiteItemApiUrl(USE_CASE_KIND, UNSAFE_ID, UNSAFE_ID)).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/use-cases/${ENCODED_UNSAFE_ID}`,
+    );
+  });
+});
+
+describe("routePaths: screenshot run API urls", () => {
+  it("builds a website's screenshot run collection url", () => {
+    expect(screenshotRunsApiUrl("website-1")).toBe("/api/websites/website-1/screenshot-runs");
+  });
+
+  it("builds one screenshot run's image url", () => {
+    expect(screenshotRunImageApiUrl("website-1", "run-1")).toBe(
+      "/api/websites/website-1/screenshot-runs/run-1/screenshot",
+    );
+  });
+
+  it("encodes both ids in screenshot run urls", () => {
+    expect(screenshotRunsApiUrl(UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/screenshot-runs`,
+    );
+    expect(screenshotRunImageApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/screenshot-runs/${ENCODED_UNSAFE_ID}/screenshot`,
     );
   });
 });

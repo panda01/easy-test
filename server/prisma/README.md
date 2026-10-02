@@ -28,13 +28,20 @@ The generator is `prisma-client` (the ESM generator), **not** the legacy
 
 | Model | Table | Purpose |
 |---|---|---|
-| `Website` | `websites` | A website a user wants to test: url, name, optional description. |
+| `Website` | `websites` | A website a user wants to test: url, name, optional description, and two screenshot timing settings — `networkIdleTimeoutMs` (default 5000) and `screenshotMinimumWaitMs` (default 1). |
 | `UseCase` | `use_cases` | A scenario to test on one website: title, description (both required). |
 | `Action` | `actions` | A reusable step on one website, e.g. "Log in": title, description (both required). |
+| `ScreenshotRun` | `screenshot_runs` | One visit the Playwright controller made to a website: the URL visited, whether it succeeded, the HTTP status, the failure reason, the screenshot's file name, and how long navigation took. |
 
-`UseCase` and `Action` each belong to exactly one `Website` (`websiteId`,
-indexed). The foreign keys use Prisma's default `onDelete: Restrict`, which is
+`UseCase`, `Action`, and `ScreenshotRun` each belong to exactly one `Website`
+(`websiteId`, indexed). The foreign keys use Prisma's default `onDelete: Restrict`, which is
 fine because rows are never hard deleted.
+
+`ScreenshotRun.screenshotFileName` is **relative** to the configured
+screenshot directory (`SCREENSHOT_DIR`), e.g. `<websiteId>/<uuid>.png`, and is
+null when the visit never reached a page. The PNG itself lives on disk, not in
+the database. `requestedUrl` is a snapshot, because the website's URL can be
+edited after the run.
 
 Fields are camelCase and are **not** individually `@map`'d — only table names
 are mapped. Postgres therefore stores quoted mixed-case columns, so
@@ -47,11 +54,11 @@ select createdAt from websites;     -- fails
 
 ## Soft delete
 
-All three models have a nullable `deletedAt`. Deleting sets it instead of
+All four models have a nullable `deletedAt`. Deleting sets it instead of
 removing the row, and every `dbService` query filters `deletedAt: null`.
-Deleting a website also stamps its active use cases and actions, in one
-transaction, with the **same** timestamp — so that batch can be identified
-together later.
+Deleting a website also stamps its active use cases, actions, and screenshot
+runs, in one transaction, with the **same** timestamp — so that batch can be
+identified together later. A soft-deleted run's PNG stays on disk.
 
 ## The partial unique index on `Website.url`
 

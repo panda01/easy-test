@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  DEFAULT_NETWORK_IDLE_TIMEOUT_MS,
+  DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS,
   validateWebsiteInput,
   validateTitleDescriptionInput,
 } from "../../../server/utils/validateRequestBodies.js";
@@ -11,6 +13,14 @@ const NAME_REQUIRED_MESSAGE = "A name is required";
 const DESCRIPTION_NOT_TEXT_MESSAGE = "The description must be text";
 const TITLE_REQUIRED_MESSAGE = "A title is required";
 const DESCRIPTION_REQUIRED_MESSAGE = "A description is required";
+const NETWORK_IDLE_CAP_INVALID_MESSAGE =
+  "The network idle cap must be a whole number of milliseconds from 0 to 30000";
+const MINIMUM_WAIT_INVALID_MESSAGE =
+  "The minimum wait must be a whole number of milliseconds from 0 to 30000";
+const CAP_BELOW_MINIMUM_MESSAGE = "The network idle cap cannot be lower than the minimum wait";
+
+/** The timing settings a website gets when the body leaves them out. */
+const DEFAULT_TIMING_SETTINGS = { networkIdleTimeoutMs: 5000, screenshotMinimumWaitMs: 1 };
 
 /**
  * Bodies that are not a plain JSON object. Express 5 leaves `req.body`
@@ -79,7 +89,7 @@ describe("validateWebsiteInput", () => {
 
     expect(result).toEqual({
       isValid: true,
-      input: { url: "https://example.com/", name: "Example", description: null },
+      input: { url: "https://example.com/", name: "Example", description: null, ...DEFAULT_TIMING_SETTINGS },
     });
   });
 
@@ -91,7 +101,7 @@ describe("validateWebsiteInput", () => {
 
     expect(result).toEqual({
       isValid: true,
-      input: { url: "http://example.com/login?next=/home", name: "Example", description: null },
+      input: { url: "http://example.com/login?next=/home", name: "Example", description: null, ...DEFAULT_TIMING_SETTINGS },
     });
   });
 
@@ -113,7 +123,7 @@ describe("validateWebsiteInput", () => {
 
     expect(result).toEqual({
       isValid: true,
-      input: { url: "https://example.com/", name: "Example", description: null },
+      input: { url: "https://example.com/", name: "Example", description: null, ...DEFAULT_TIMING_SETTINGS },
     });
   });
 
@@ -131,7 +141,7 @@ describe("validateWebsiteInput", () => {
 
     expect(result).toEqual({
       isValid: true,
-      input: { url: "https://example.com/", name: "Example", description: null },
+      input: { url: "https://example.com/", name: "Example", description: null, ...DEFAULT_TIMING_SETTINGS },
     });
   });
 
@@ -158,7 +168,7 @@ describe("validateWebsiteInput", () => {
 
     expect(result).toEqual({
       isValid: true,
-      input: { url: "https://example.com/", name: "Example", description: "a site to test" },
+      input: { url: "https://example.com/", name: "Example", description: "a site to test", ...DEFAULT_TIMING_SETTINGS },
     });
   });
 
@@ -172,8 +182,92 @@ describe("validateWebsiteInput", () => {
 
     expect(result).toEqual({
       isValid: true,
-      input: { url: "https://example.com/", name: "Example", description: null },
+      input: { url: "https://example.com/", name: "Example", description: null, ...DEFAULT_TIMING_SETTINGS },
     });
+  });
+
+  it("fills in the default timing settings when they are omitted or null", () => {
+    const result = validateWebsiteInput({
+      url: "https://example.com",
+      name: "Example",
+      networkIdleTimeoutMs: null,
+      screenshotMinimumWaitMs: null,
+    });
+
+    expect(result).toEqual({
+      isValid: true,
+      input: {
+        url: "https://example.com/",
+        name: "Example",
+        description: null,
+        networkIdleTimeoutMs: DEFAULT_NETWORK_IDLE_TIMEOUT_MS,
+        screenshotMinimumWaitMs: DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS,
+      },
+    });
+    expect(DEFAULT_TIMING_SETTINGS).toEqual({
+      networkIdleTimeoutMs: DEFAULT_NETWORK_IDLE_TIMEOUT_MS,
+      screenshotMinimumWaitMs: DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS,
+    });
+  });
+
+  it.each([
+    { label: "both 0 (don't wait for idle, no minimum)", networkIdleTimeoutMs: 0, screenshotMinimumWaitMs: 0 },
+    { label: "the largest allowed values", networkIdleTimeoutMs: 30000, screenshotMinimumWaitMs: 30000 },
+    { label: "a cap equal to the minimum", networkIdleTimeoutMs: 1500, screenshotMinimumWaitMs: 1500 },
+    { label: "a cap above the minimum", networkIdleTimeoutMs: 8000, screenshotMinimumWaitMs: 250 },
+  ])("keeps timing settings that are $label", ({ networkIdleTimeoutMs, screenshotMinimumWaitMs }) => {
+    const result = validateWebsiteInput({
+      url: "https://example.com",
+      name: "Example",
+      networkIdleTimeoutMs,
+      screenshotMinimumWaitMs,
+    });
+
+    expect(result).toEqual({
+      isValid: true,
+      input: {
+        url: "https://example.com/",
+        name: "Example",
+        description: null,
+        networkIdleTimeoutMs,
+        screenshotMinimumWaitMs,
+      },
+    });
+  });
+
+  it.each([
+    { label: "negative", value: -1 },
+    { label: "above 30000", value: 30001 },
+    { label: "a fraction", value: 1.5 },
+    { label: "a numeric string", value: "5000" },
+    { label: "a boolean", value: true },
+    { label: "not a number", value: Number.NaN },
+  ])("rejects a network idle cap that is $label", ({ value }) => {
+    expect(
+      validateWebsiteInput({ url: "https://example.com", name: "Example", networkIdleTimeoutMs: value }),
+    ).toEqual({ isValid: false, errorMessage: NETWORK_IDLE_CAP_INVALID_MESSAGE });
+  });
+
+  it.each([
+    { label: "negative", value: -1 },
+    { label: "above 30000", value: 30001 },
+    { label: "a fraction", value: 0.5 },
+    { label: "a numeric string", value: "300" },
+    { label: "an object", value: { ms: 300 } },
+  ])("rejects a minimum wait that is $label", ({ value }) => {
+    expect(
+      validateWebsiteInput({ url: "https://example.com", name: "Example", screenshotMinimumWaitMs: value }),
+    ).toEqual({ isValid: false, errorMessage: MINIMUM_WAIT_INVALID_MESSAGE });
+  });
+
+  it.each([
+    { label: "explicitly below the minimum", body: { networkIdleTimeoutMs: 200, screenshotMinimumWaitMs: 300 } },
+    { label: "omitted (5000) with a minimum above it", body: { screenshotMinimumWaitMs: 6000 } },
+    { label: "0 with the default minimum (1)", body: { networkIdleTimeoutMs: 0 } },
+  ])("rejects a network idle cap that is $label", ({ body }) => {
+    expect(
+      validateWebsiteInput({ url: "https://example.com", name: "Example", ...body }),
+    ).toEqual({ isValid: false, errorMessage: CAP_BELOW_MINIMUM_MESSAGE });
   });
 });
 

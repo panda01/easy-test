@@ -6,13 +6,20 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * evaluated. `vi.hoisted` runs ahead of the hoisted imports, which is the only
  * hook early enough to do it.
  */
-const { mockWebsiteDelegate, mockUseCaseDelegate, mockActionDelegate, mockTransaction } = vi.hoisted(
+const {
+  mockWebsiteDelegate,
+  mockUseCaseDelegate,
+  mockActionDelegate,
+  mockScreenshotRunDelegate,
+  mockTransaction,
+} = vi.hoisted(
   () => {
     process.env.DATABASE_URL = "postgresql://tester@localhost:5432/easy_test_unit?schema=public";
 
     /**
      * Builds a stand-in for one Prisma model delegate (`prisma.website`,
-     * `prisma.useCase`, `prisma.action`) carrying every method dbService calls.
+     * `prisma.useCase`, `prisma.action`, `prisma.screenshotRun`) carrying
+     * every method dbService calls.
      * @returns An object whose query methods are bare vitest mocks
      */
     function createMockModelDelegate() {
@@ -28,18 +35,21 @@ const { mockWebsiteDelegate, mockUseCaseDelegate, mockActionDelegate, mockTransa
     const websiteDelegate = createMockModelDelegate();
     const useCaseDelegate = createMockModelDelegate();
     const actionDelegate = createMockModelDelegate();
+    const screenshotRunDelegate = createMockModelDelegate();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
       website: websiteDelegate,
       useCase: useCaseDelegate,
       action: actionDelegate,
+      screenshotRun: screenshotRunDelegate,
     };
 
     return {
       mockWebsiteDelegate: websiteDelegate,
       mockUseCaseDelegate: useCaseDelegate,
       mockActionDelegate: actionDelegate,
+      mockScreenshotRunDelegate: screenshotRunDelegate,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
@@ -64,6 +74,7 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     website = mockWebsiteDelegate;
     useCase = mockUseCaseDelegate;
     action = mockActionDelegate;
+    screenshotRun = mockScreenshotRunDelegate;
     $transaction = mockTransaction;
   },
 }));
@@ -87,6 +98,9 @@ import {
   createActionForWebsite,
   updateActionForWebsite,
   softDeleteActionForWebsite,
+  listScreenshotRunsForWebsite,
+  findScreenshotRunForWebsite,
+  createScreenshotRunForWebsite,
 } from "../../../server/services/dbService.js";
 
 const sampleWebsite = {
@@ -116,6 +130,20 @@ const sampleAction = {
   description: "Enter credentials and submit",
   createdAt: new Date("2026-01-03T00:00:00.000Z"),
   updatedAt: new Date("2026-01-03T00:00:00.000Z"),
+  deletedAt: null,
+};
+
+const sampleScreenshotRun = {
+  id: "screenshot-run-1",
+  websiteId: "cuid-1",
+  requestedUrl: "https://example.com",
+  succeeded: true,
+  httpStatus: 200,
+  errorMessage: null,
+  screenshotFileName: "cuid-1/run.png",
+  durationMs: 840,
+  createdAt: new Date("2026-01-04T00:00:00.000Z"),
+  updatedAt: new Date("2026-01-04T00:00:00.000Z"),
   deletedAt: null,
 };
 
@@ -335,10 +363,11 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, and its actions inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, and screenshot runs inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
+      mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 4 });
 
       const websiteWasDeleted = await softDeleteWebsite("cuid-1");
 
@@ -357,12 +386,17 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockScreenshotRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
     });
 
-    it("softDeleteWebsite writes one shared deletedAt timestamp to all three tables", async () => {
+    it("softDeleteWebsite writes one shared deletedAt timestamp to all four tables", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       const millisecondsBeforeCall = Date.now();
 
       await softDeleteWebsite("cuid-1");
@@ -371,10 +405,12 @@ describe("dbService", () => {
       const websiteDeletedAt = readDeletedAtWrittenBy(mockWebsiteDelegate.updateMany);
       const useCaseDeletedAt = readDeletedAtWrittenBy(mockUseCaseDelegate.updateMany);
       const actionDeletedAt = readDeletedAtWrittenBy(mockActionDelegate.updateMany);
+      const screenshotRunDeletedAt = readDeletedAtWrittenBy(mockScreenshotRunDelegate.updateMany);
 
       expect(websiteDeletedAt).toBeInstanceOf(Date);
       expect(useCaseDeletedAt).toBe(websiteDeletedAt);
       expect(actionDeletedAt).toBe(websiteDeletedAt);
+      expect(screenshotRunDeletedAt).toBe(websiteDeletedAt);
       const deletedAtMilliseconds = (websiteDeletedAt as Date).getTime();
       expect(deletedAtMilliseconds).toBeGreaterThanOrEqual(millisecondsBeforeCall);
       expect(deletedAtMilliseconds).toBeLessThanOrEqual(millisecondsAfterCall);
@@ -389,6 +425,7 @@ describe("dbService", () => {
       expect(mockTransaction).toHaveBeenCalledTimes(1);
       expect(mockUseCaseDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockScreenshotRunDelegate.updateMany).not.toHaveBeenCalled();
     });
 
     it("softDeleteWebsite propagates a failure inside the transaction", async () => {
@@ -598,6 +635,56 @@ describe("dbService", () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
 
       expect(await softDeleteActionForWebsite("cuid-1", "already-deleted")).toBe(false);
+    });
+  });
+
+  describe("screenshot runs", () => {
+    it("listScreenshotRunsForWebsite returns the website's active runs, newest first", async () => {
+      mockScreenshotRunDelegate.findMany.mockResolvedValue([sampleScreenshotRun]);
+
+      const screenshotRuns = await listScreenshotRunsForWebsite("cuid-1");
+
+      expect(mockScreenshotRunDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(screenshotRuns).toEqual([sampleScreenshotRun]);
+    });
+
+    it("findScreenshotRunForWebsite scopes the lookup to the website and to active rows", async () => {
+      mockScreenshotRunDelegate.findFirst.mockResolvedValue(sampleScreenshotRun);
+
+      const found = await findScreenshotRunForWebsite("cuid-1", "screenshot-run-1");
+
+      expect(mockScreenshotRunDelegate.findFirst).toHaveBeenCalledWith({
+        where: { id: "screenshot-run-1", websiteId: "cuid-1", deletedAt: null },
+      });
+      expect(found).toBe(sampleScreenshotRun);
+    });
+
+    it("findScreenshotRunForWebsite returns null when no active run of that website matches", async () => {
+      mockScreenshotRunDelegate.findFirst.mockResolvedValue(null);
+
+      expect(await findScreenshotRunForWebsite("cuid-1", "run-of-another-site")).toBeNull();
+    });
+
+    it("createScreenshotRunForWebsite inserts the run's outcome under the website", async () => {
+      mockScreenshotRunDelegate.create.mockResolvedValue(sampleScreenshotRun);
+      const runInput = {
+        requestedUrl: "https://example.com",
+        succeeded: false,
+        httpStatus: null,
+        errorMessage: "page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com",
+        screenshotFileName: null,
+        durationMs: 12,
+      };
+
+      const created = await createScreenshotRunForWebsite("cuid-1", runInput);
+
+      expect(mockScreenshotRunDelegate.create).toHaveBeenCalledWith({
+        data: { ...runInput, websiteId: "cuid-1" },
+      });
+      expect(created).toBe(sampleScreenshotRun);
     });
   });
 });

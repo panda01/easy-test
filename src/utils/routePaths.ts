@@ -113,3 +113,23 @@ export function websiteItemApiUrl(
 ): string {
   return `${websiteItemsApiUrl(itemKind, websiteId)}/${encodeURIComponent(itemId)}`;
 }
+
+/**
+ * Builds the API url of a website's screenshot run collection: GET lists the
+ * recorded runs, POST visits the website and records a new run.
+ * @param websiteId - The owning website's cuid
+ * @returns `/api/websites/<websiteId>/screenshot-runs`
+ */
+export function screenshotRunsApiUrl(websiteId: string): string {
+  return `${websiteApiUrl(websiteId)}/screenshot-runs`;
+}
+
+/**
+ * Builds the API url of one screenshot run's PNG, for an `<img src>`.
+ * @param websiteId - The owning website's cuid
+ * @param screenshotRunId - The screenshot run's cuid
+ * @returns `/api/websites/<websiteId>/screenshot-runs/<screenshotRunId>/screenshot`
+ */
+export function screenshotRunImageApiUrl(websiteId: string, screenshotRunId: string): string {
+  return `${screenshotRunsApiUrl(websiteId)}/${encodeURIComponent(screenshotRunId)}/screenshot`;
+}

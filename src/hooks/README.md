@@ -9,6 +9,7 @@ than inline in a component.
 | `useJsonResource` | `{ data, isLoading, errorMessage }` for any `GET` url; `data` is `unknown` |
 | `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website |
 | `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them |
+| `useScreenshotRuns` | `{ runs, isLoading, errorMessage, addTakenRun }` for a website's screenshot runs; see below |
 | `useJsonMutation` | `{ sendJsonRequest, isSubmitting, errorMessage }` for `POST`/`PUT`/`DELETE` |
 | `useRequiredRouteParam` | A `:param` the matched route is guaranteed to have, as `string` |
 | `useReturnNavigation` / `useReturnToHereState` | History-aware exits from forms and deleted pages; see `../pages/README.md` |
@@ -38,3 +39,19 @@ normalised with `describeError` — a rejection is not guaranteed to be an
 The generic hooks return `unknown` rather than taking a type parameter that
 would appear only in their return type (`no-unnecessary-type-parameters`); the
 typed wrappers state the response shape in one place each.
+
+## `useScreenshotRuns`: showing a new run without refetching
+
+"Take screenshot" POSTs a new run, and the POST's response already is the
+saved row. So rather than giving `useJsonResource` a `reload()` (an extra GET,
+and a spinner flash, on a hook every page shares), `useScreenshotRuns` keeps
+the runs taken on this visit in local state and returns them ahead of the
+fetched list:
+
+- taken runs are filtered by `websiteId`, because React Router reuses the page
+  when navigating straight from one website to another, and a slow POST can
+  resolve after that navigation;
+- a fetched run whose id was also taken is dropped, so no run is listed twice.
+
+`runs` is never null — it is empty while loading or after a failed fetch,
+apart from any runs taken in the meantime.

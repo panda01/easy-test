@@ -97,6 +97,8 @@ describe("WebsiteEditPage", () => {
     expect(await screen.findByRole("textbox", { name: "URL" })).toHaveValue("https://example.com");
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Example");
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("The example site");
+    expect(screen.getByRole("spinbutton", { name: "Network idle cap (ms)" })).toHaveValue(5000);
+    expect(screen.getByRole("spinbutton", { name: "Minimum wait (ms)" })).toHaveValue(1);
     expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
     expect(readBreadcrumbTrail()).toEqual([
       { label: "Websites", href: LIST_PATH },
@@ -148,6 +150,8 @@ describe("WebsiteEditPage", () => {
         url: "https://example.com",
         name: "Renamed",
         description: "The example site",
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
       }),
     });
 

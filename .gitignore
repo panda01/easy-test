@@ -11,3 +11,6 @@ claude_tmp
 claude_temp
 test-results
 .playwright-mcp/
+
+# Default SCREENSHOT_DIR (see .env.example) - Playwright screenshot PNGs
+/screenshots/

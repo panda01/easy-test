@@ -34,7 +34,7 @@ export default function WebsiteEditPage(): ReactElement {
   /**
    * PUTs the edited website and, when the server accepts it, returns to its
    * detail page. On failure the form stays put and shows the server's reason.
-   * @param values - The form's URL, name, and description
+   * @param values - The form's URL, name, description, and screenshot timing settings
    * @returns Resolves once the request (and any navigation) is done
    */
   const saveWebsite = async (values: WebsiteRequestBody): Promise<void> => {
@@ -46,7 +46,7 @@ export default function WebsiteEditPage(): ReactElement {
   /**
    * Hands the form values to `saveWebsite` without returning its promise,
    * because the form's `onSubmit` prop expects a plain void callback.
-   * @param values - The form's URL, name, and description
+   * @param values - The form's URL, name, description, and screenshot timing settings
    */
   const handleSubmit = (values: WebsiteRequestBody): void => {
     void saveWebsite(values);
@@ -83,6 +83,8 @@ export default function WebsiteEditPage(): ReactElement {
             url: website.url,
             name: website.name,
             description: website.description ?? "",
+            networkIdleTimeoutMs: website.networkIdleTimeoutMs,
+            screenshotMinimumWaitMs: website.screenshotMinimumWaitMs,
           }}
           submitLabel="Save changes"
           isSubmitting={isSubmitting}

@@ -62,6 +62,8 @@ describe("WebsiteCreatePage", () => {
     expect(screen.getByRole("textbox", { name: "URL" })).toHaveValue("");
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("");
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("");
+    expect(screen.getByRole("spinbutton", { name: "Network idle cap (ms)" })).toHaveValue(5000);
+    expect(screen.getByRole("spinbutton", { name: "Minimum wait (ms)" })).toHaveValue(1);
     expect(screen.getByRole("button", { name: "Create website" })).toBeDisabled();
   });
 
@@ -93,7 +95,13 @@ describe("WebsiteCreatePage", () => {
     expect(fetchStub).toHaveBeenCalledWith("/api/websites", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: "https://example.com", name: "Example", description: "Notes" }),
+      body: JSON.stringify({
+        url: "https://example.com",
+        name: "Example",
+        description: "Notes",
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
+      }),
     });
 
     // The form's entry is gone, so Back goes straight to the list.

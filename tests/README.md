@@ -31,6 +31,13 @@ Stubs for classes instantiated with `new` (`PrismaClient`, `PrismaPg`) must be
 declared as a `class` — an arrow function is not constructible and vitest
 rejects it.
 
+**No unit test ever launches a real browser.** `playwrightService.test.ts`
+mocks the `playwright` module (`chromium.launch` returns a fake browser whose
+`newPage` returns a fake page) and `node:fs/promises`; every spec that loads a
+controller mocks `../services/playwrightService.js` outright.
+`backend/fixtures/screenshot-files/` holds a tiny committed PNG that the
+Playwright controller spec serves through the real `res.sendFile`.
+
 ## Coverage
 
 Global thresholds: **lines 80 / branches 70 / functions 80 / statements 80.**

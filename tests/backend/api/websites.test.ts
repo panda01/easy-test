@@ -44,6 +44,8 @@ const sampleWebsite = {
   url: "https://example.com/",
   name: "Example",
   description: "a site to test",
+  networkIdleTimeoutMs: 5000,
+  screenshotMinimumWaitMs: 1,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,
@@ -119,6 +121,8 @@ describe("website routes", () => {
         url: "https://example.com/",
         name: "Example",
         description: null,
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
       });
     });
 
@@ -133,7 +137,41 @@ describe("website routes", () => {
         url: "https://example.com/",
         name: "Example",
         description: "a site to test",
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
       });
+    });
+
+    it("passes the website's own screenshot timing settings through to the service", async () => {
+      mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+
+      await request(createWebsitesApp()).post("/api/websites").send({
+        url: "https://example.com",
+        name: "Example",
+        networkIdleTimeoutMs: 8000,
+        screenshotMinimumWaitMs: 1200,
+      });
+
+      expect(mockDbService.createWebsite).toHaveBeenCalledWith({
+        url: "https://example.com/",
+        name: "Example",
+        description: null,
+        networkIdleTimeoutMs: 8000,
+        screenshotMinimumWaitMs: 1200,
+      });
+    });
+
+    it("returns 400 and stores nothing when the network idle cap is below the minimum wait", async () => {
+      const res = await request(createWebsitesApp()).post("/api/websites").send({
+        url: "https://example.com",
+        name: "Example",
+        networkIdleTimeoutMs: 200,
+        screenshotMinimumWaitMs: 300,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "The network idle cap cannot be lower than the minimum wait" });
+      expect(mockDbService.createWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 400 with the validation message and does not touch the database for an invalid body", async () => {
@@ -239,7 +277,21 @@ describe("website routes", () => {
         url: "https://example.com/",
         name: "Renamed",
         description: null,
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
       });
+    });
+
+    it("returns 400 and updates nothing when a timing setting is out of range", async () => {
+      const res = await request(createWebsitesApp())
+        .put("/api/websites/cuid-1")
+        .send({ url: "https://example.com", name: "Example", networkIdleTimeoutMs: 30001 });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "The network idle cap must be a whole number of milliseconds from 0 to 30000",
+      });
+      expect(mockDbService.updateWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 400 with the validation message and does not touch the database for an invalid body", async () => {

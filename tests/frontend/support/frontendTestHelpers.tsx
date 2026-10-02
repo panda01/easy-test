@@ -10,6 +10,7 @@ import {
   type InitialEntry,
 } from "react-router-dom";
 import { expect, vi, type Mock } from "vitest";
+import { type ScreenshotRunRecord } from "../../../src/hooks/useScreenshotRuns";
 import { type WebsiteItemRecord } from "../../../src/hooks/useWebsiteItems";
 import { type WebsiteRecord } from "../../../src/hooks/useWebsites";
 import {
@@ -188,6 +189,8 @@ export function buildWebsiteRecord(overrides: Partial<WebsiteRecord> = {}): Webs
     url: "https://example.com",
     name: "Example",
     description: "The example site",
+    networkIdleTimeoutMs: 5000,
+    screenshotMinimumWaitMs: 1,
     createdAt: "2026-01-02T03:04:05.000Z",
     updatedAt: "2026-01-03T03:04:05.000Z",
     deletedAt: null,
@@ -210,6 +213,31 @@ export function buildWebsiteItemRecord(
     description: "Sign in with a valid account",
     createdAt: "2026-02-02T03:04:05.000Z",
     updatedAt: "2026-02-03T03:04:05.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a screenshot run as the API returns it: by default a successful
+ * HTTP 200 visit of website-1 that captured a screenshot.
+ * @param overrides - Fields to replace in the default run
+ * @returns A complete screenshot run record
+ */
+export function buildScreenshotRunRecord(
+  overrides: Partial<ScreenshotRunRecord> = {},
+): ScreenshotRunRecord {
+  return {
+    id: "screenshot-run-1",
+    websiteId: "website-1",
+    requestedUrl: "https://example.com",
+    succeeded: true,
+    httpStatus: 200,
+    errorMessage: null,
+    screenshotFileName: "website-1/screenshot-run-1.png",
+    durationMs: 1234,
+    createdAt: "2026-03-02T03:04:05.000Z",
+    updatedAt: "2026-03-02T03:04:05.000Z",
     deletedAt: null,
     ...overrides,
   };

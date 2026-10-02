@@ -4,10 +4,11 @@ import {
   type Website,
   type UseCase,
   type Action,
+  type ScreenshotRun,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 
-export type { Website, UseCase, Action };
+export type { Website, UseCase, Action, ScreenshotRun };
 
 /**
  * `DATABASE_URL` is read at MODULE LOAD time, which means `../bootEnv.js` must
@@ -44,6 +45,10 @@ export interface WebsiteInput {
   url: string;
   name: string;
   description?: string | null;
+  /** How long to wait for network idle before a screenshot; the column default applies when omitted on create. */
+  networkIdleTimeoutMs?: number;
+  /** The floor on the time from page load to screenshot; the column default applies when omitted on create. */
+  screenshotMinimumWaitMs?: number;
 }
 
 /** The fields a caller supplies when creating or replacing a use case or an action. */
@@ -57,6 +62,26 @@ export type UseCaseInput = TitleDescriptionInput;
 
 /** The fields a caller supplies when creating or replacing an action. */
 export type ActionInput = TitleDescriptionInput;
+
+/**
+ * The fields a caller supplies when recording one screenshot run. The
+ * Playwright service produces everything except `requestedUrl` and
+ * `screenshotFileName`, which the controller decides before the visit.
+ */
+export interface ScreenshotRunInput {
+  /** The URL the browser was sent to (the website's URL at run time). */
+  requestedUrl: string;
+  /** True only when navigation completed with an HTTP status below 400. */
+  succeeded: boolean;
+  /** The main response's HTTP status, or null when there was no response. */
+  httpStatus: number | null;
+  /** Why the run failed, or null when it succeeded. */
+  errorMessage: string | null;
+  /** The PNG's path relative to the screenshot directory, or null when nothing was captured. */
+  screenshotFileName: string | null;
+  /** How long the navigation took, in milliseconds. */
+  durationMs: number;
+}
 
 /**
  * Checks whether a thrown value carries the given Prisma error code.
@@ -107,7 +132,7 @@ export function isRecordNotFound(error: unknown): boolean {
  * partial unique index), so a URL already used by another active website
  * rejects with a P2002 error - see `isUniqueConstraintViolation`. A URL that
  * only appears on soft-deleted websites is allowed.
- * @param data - URL, display name, and optional description
+ * @param data - URL, display name, optional description, and the optional screenshot timing settings
  * @returns The created row, including its generated cuid and timestamps
  */
 export async function createWebsite(data: WebsiteInput): Promise<Website> {
@@ -156,7 +181,7 @@ export async function findWebsiteById(websiteId: string): Promise<Website | null
  * The `deletedAt: null` condition is part of the update itself, so a website
  * deleted a moment earlier cannot be edited back to life by a racing request.
  * @param websiteId - The website's cuid
- * @param data - The new URL, name, and description
+ * @param data - The new URL, name, description, and screenshot timing settings
  * @returns The updated row, or null when no active website has that id
  * @throws The P2002 error (see `isUniqueConstraintViolation`) when another active website already has the new URL
  */
@@ -179,9 +204,10 @@ export async function updateWebsite(
 }
 
 /**
- * Soft deletes an active website AND its active use cases and actions.
+ * Soft deletes an active website AND its active use cases, actions, and
+ * screenshot runs.
  *
- * All three updates run in one transaction and share one `deletedAt`
+ * All four updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
@@ -213,6 +239,10 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.action.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.screenshotRun.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -399,4 +429,51 @@ export async function softDeleteActionForWebsite(
   });
   const anActiveActionWasDeleted = actionUpdate.count > 0;
   return anActiveActionWasDeleted;
+}
+
+// === Screenshot runs ===
+
+/**
+ * Lists a website's active screenshot runs, newest first.
+ * @param websiteId - The owning website's cuid
+ * @returns The website's active screenshot runs ordered by `createdAt` descending
+ */
+export async function listScreenshotRunsForWebsite(websiteId: string): Promise<ScreenshotRun[]> {
+  const screenshotRuns = await prisma.screenshotRun.findMany({
+    where: { websiteId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+  });
+  return screenshotRuns;
+}
+
+/**
+ * Looks up one active screenshot run, scoped to the website that owns it.
+ * @param websiteId - The owning website's cuid
+ * @param screenshotRunId - The screenshot run's cuid
+ * @returns The active screenshot run, or null when it does not exist, was soft deleted, or belongs to another website
+ */
+export async function findScreenshotRunForWebsite(
+  websiteId: string,
+  screenshotRunId: string,
+): Promise<ScreenshotRun | null> {
+  const screenshotRun = await prisma.screenshotRun.findFirst({
+    where: { id: screenshotRunId, websiteId, deletedAt: null },
+  });
+  return screenshotRun;
+}
+
+/**
+ * Records one screenshot run belonging to the given website. Runs are never
+ * edited after this; a failed visit is recorded the same way as a successful
+ * one, with `succeeded: false`.
+ * @param websiteId - The owning website's cuid
+ * @param data - What the visit produced, plus the URL and screenshot file name
+ * @returns The created row
+ */
+export async function createScreenshotRunForWebsite(
+  websiteId: string,
+  data: ScreenshotRunInput,
+): Promise<ScreenshotRun> {
+  const created = await prisma.screenshotRun.create({ data: { ...data, websiteId } });
+  return created;
 }

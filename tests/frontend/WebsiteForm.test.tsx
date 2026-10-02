@@ -4,6 +4,31 @@ import { userEvent } from "@testing-library/user-event";
 import WebsiteForm, { type WebsiteFormProps } from "../../src/components/WebsiteForm";
 import { type WebsiteRequestBody } from "../../src/hooks/useWebsites";
 
+/** A blank form with the default screenshot timing settings, as the create page starts. */
+const BLANK_VALUES: WebsiteRequestBody = {
+  url: "",
+  name: "",
+  description: "",
+  networkIdleTimeoutMs: 5000,
+  screenshotMinimumWaitMs: 1,
+};
+
+/**
+ * Finds the network idle cap field (a number input, so its role is spinbutton).
+ * @returns The "Network idle cap (ms)" input
+ */
+function getNetworkIdleCapField(): HTMLElement {
+  return screen.getByRole("spinbutton", { name: "Network idle cap (ms)" });
+}
+
+/**
+ * Finds the minimum wait field (a number input, so its role is spinbutton).
+ * @returns The "Minimum wait (ms)" input
+ */
+function getMinimumWaitField(): HTMLElement {
+  return screen.getByRole("spinbutton", { name: "Minimum wait (ms)" });
+}
+
 /**
  * Renders the website form with blank fields and spy callbacks, letting a test
  * override any prop.
@@ -19,7 +44,7 @@ function renderWebsiteForm(overrides: Partial<WebsiteFormProps> = {}): {
   const onCancel = vi.fn<() => void>();
   const { container } = render(
     <WebsiteForm
-      initialValues={{ url: "", name: "", description: "" }}
+      initialValues={BLANK_VALUES}
       submitLabel="Create website"
       isSubmitting={false}
       errorMessage={null}
@@ -44,11 +69,31 @@ function getSubmitButton(): HTMLElement {
 describe("WebsiteForm", () => {
   it("seeds the fields from initialValues", () => {
     renderWebsiteForm({
-      initialValues: { url: "https://example.com", name: "Example", description: "Notes" },
+      initialValues: {
+        url: "https://example.com",
+        name: "Example",
+        description: "Notes",
+        networkIdleTimeoutMs: 4000,
+        screenshotMinimumWaitMs: 1000,
+      },
     });
     expect(screen.getByRole("textbox", { name: "URL" })).toHaveValue("https://example.com");
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Example");
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("Notes");
+    expect(getNetworkIdleCapField()).toHaveValue(4000);
+    expect(getMinimumWaitField()).toHaveValue(1000);
+  });
+
+  it("shows the screenshot settings under their own heading, with explanations", () => {
+    renderWebsiteForm();
+
+    expect(screen.getByRole("heading", { level: 2, name: "Screenshot settings" })).toBeInTheDocument();
+    expect(getNetworkIdleCapField()).toHaveAccessibleDescription(
+      /How long to wait for network requests to finish/,
+    );
+    expect(getMinimumWaitField()).toHaveAccessibleDescription(
+      /never taken sooner than this after the page loads/,
+    );
   });
 
   it("disables submit while URL and name are blank", () => {
@@ -107,7 +152,42 @@ describe("WebsiteForm", () => {
       url: "https://example.com",
       name: "Example",
       description: "Line one",
+      networkIdleTimeoutMs: 5000,
+      screenshotMinimumWaitMs: 1,
     });
+  });
+
+  it("submits edited timing settings as numbers, not text", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderWebsiteForm();
+
+    await user.type(screen.getByRole("textbox", { name: "URL" }), "https://example.com");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "Example");
+    await user.clear(getNetworkIdleCapField());
+    await user.type(getNetworkIdleCapField(), "2500");
+    await user.clear(getMinimumWaitField());
+    await user.type(getMinimumWaitField(), "0");
+    await user.click(getSubmitButton());
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ networkIdleTimeoutMs: 2500, screenshotMinimumWaitMs: 0 }),
+    );
+  });
+
+  it.each([
+    { fieldName: "Network idle cap (ms)" },
+    { fieldName: "Minimum wait (ms)" },
+  ])("disables submit while $fieldName is blank", async ({ fieldName }) => {
+    const user = userEvent.setup();
+    const { onSubmit, formElement } = renderWebsiteForm();
+    await user.type(screen.getByRole("textbox", { name: "URL" }), "https://example.com");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "Example");
+
+    await user.clear(screen.getByRole("spinbutton", { name: fieldName }));
+
+    expect(getSubmitButton()).toBeDisabled();
+    fireEvent.submit(formElement);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("ignores a submit event while the required fields are blank (e.g. Enter)", () => {
@@ -118,7 +198,7 @@ describe("WebsiteForm", () => {
 
   it("disables submit and ignores submit events while a save is in flight", () => {
     const { onSubmit, formElement } = renderWebsiteForm({
-      initialValues: { url: "https://example.com", name: "Example", description: "" },
+      initialValues: { ...BLANK_VALUES, url: "https://example.com", name: "Example" },
       isSubmitting: true,
     });
     expect(getSubmitButton()).toBeDisabled();
