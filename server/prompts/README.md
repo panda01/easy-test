@@ -13,7 +13,8 @@ The per-request details (website, action, the one-shot "you cannot ask
 questions" note, and how the guidelines' Output Format maps onto the JSON
 fields) are built in the service and sent as the user message, AFTER this
 system prompt, so the system prompt stays identical across requests and is
-served from the prompt cache.
+served from the prompt cache. The same file is used whichever model the user
+picks.
 
 Markdown rather than a `.ts` string constant: the guidelines contain backticks
 and code fences, which a template literal would need escaped.

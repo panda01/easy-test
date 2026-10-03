@@ -10,7 +10,7 @@ const NAVIGATION_TIMEOUT_MS = 30_000;
 const SCREENSHOT_VIEWPORT = { width: 1280, height: 720 };
 
 /** The lowest HTTP status that makes a visit count as failed. */
-const FIRST_FAILING_HTTP_STATUS = 400;
+export const FIRST_FAILING_HTTP_STATUS = 400;
 
 /**
  * Safety limit on waiting for the page to paint. `page.evaluate` has no
@@ -45,7 +45,7 @@ export interface ScreenshotCaptureResult {
 }
 
 /** How `navigateToUrl` ended: either the page loaded (possibly with an error status) or navigation threw. */
-type NavigationOutcome =
+export type NavigationOutcome =
   | { navigationCompleted: true; httpStatus: number | null; durationMs: number }
   | { navigationCompleted: false; errorMessage: string; durationMs: number };
 
@@ -55,7 +55,7 @@ type NavigationOutcome =
  * @param startedAt - The `performance.now()` reading taken when the work began
  * @returns Elapsed time in whole milliseconds
  */
-function measureElapsedMs(startedAt: number): number {
+export function measureElapsedMs(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
 }
 
@@ -66,7 +66,7 @@ function measureElapsedMs(startedAt: number): number {
  * @param error - Whatever a Playwright call rejected with
  * @returns The first line of the error's message, trimmed
  */
-function summarizeError(error: unknown): string {
+export function summarizeError(error: unknown): string {
   const fullMessage = describeError(error);
   const firstLine = fullMessage.split("\n")[0];
   return firstLine.trim();
@@ -77,7 +77,7 @@ function summarizeError(error: unknown): string {
  * @param httpStatus - The main response's HTTP status, or null when there was no response
  * @returns A sentence naming the status, or saying there was no response
  */
-function describeUnsuccessfulResponse(httpStatus: number | null): string {
+export function describeUnsuccessfulResponse(httpStatus: number | null): string {
   const pageGaveNoResponse = httpStatus === null;
   if (pageGaveNoResponse) {
     return "The page did not return a response";
@@ -96,7 +96,7 @@ function describeUnsuccessfulResponse(httpStatus: number | null): string {
  * @param url - Where to navigate
  * @returns Whether navigation completed, with the HTTP status or the reason it failed, and how long it took
  */
-async function navigateToUrl(page: Page, url: string): Promise<NavigationOutcome> {
+export async function navigateToUrl(page: Page, url: string): Promise<NavigationOutcome> {
   const navigationStartedAt = performance.now();
   try {
     const mainResponse = await page.goto(url, {
@@ -175,20 +175,47 @@ async function waitForPaint(page: Page): Promise<void> {
 }
 
 /**
- * Waits until the page is ready, then writes a PNG of its current viewport
- * (not the full scrollable page). Starts right after the `load` event:
+ * Waits until a page that has just fired its `load` event is ready to be
+ * captured - by a screenshot here, or by the crawler's aria snapshot:
  *
  * 1. Wait for network idle, for at most the website's cap.
  * 2. If the network went idle: wait for the page to paint, then wait out
  *    whatever is left of the website's minimum wait. The minimum is a FLOOR
  *    on the time since `load` - if idle + paint already took that long, there
  *    is no extra wait.
- * 3. If the cap ran out instead, take the screenshot at once (no paint wait).
- *    Validation keeps the cap at or above the minimum, so the minimum has
- *    already passed by then.
+ * 3. If the cap ran out instead, return at once (no paint wait). Validation
+ *    keeps the cap at or above the minimum, so the minimum has already passed
+ *    by then.
  *
- * A failure of any step is reported the same way, as a screenshot that could
- * not be saved.
+ * Failures are NOT caught here: each caller words its own message.
+ * @param page - The page that has finished navigating
+ * @param timingSettings - The website's network idle cap and minimum wait
+ * @returns Resolves once the page is ready
+ * @throws Any failure of a step, e.g. the page closing mid-wait
+ */
+export async function waitForPageReadiness(
+  page: Page,
+  timingSettings: ScreenshotTimingSettings,
+): Promise<void> {
+  const readinessStartedAt = performance.now();
+  const networkWentIdle = await waitForNetworkIdle(page, timingSettings.networkIdleTimeoutMs);
+  if (networkWentIdle) {
+    await waitForPaint(page);
+    const remainingMinimumWaitMs =
+      timingSettings.screenshotMinimumWaitMs - measureElapsedMs(readinessStartedAt);
+    const minimumWaitIsNotYetReached = remainingMinimumWaitMs > 0;
+    if (minimumWaitIsNotYetReached) {
+      await page.waitForTimeout(remainingMinimumWaitMs);
+    }
+  }
+}
+
+/**
+ * Waits until the page is ready (see `waitForPageReadiness`), then writes a
+ * PNG of its current viewport (not the full scrollable page).
+ *
+ * A failure of any step - a readiness step or the screenshot itself - is
+ * reported the same way, as a screenshot that could not be saved.
  * @param page - The page that has finished navigating
  * @param screenshotFilePath - Absolute path of the PNG to write
  * @param timingSettings - The website's network idle cap and minimum wait
@@ -199,18 +226,8 @@ async function captureWhenReady(
   screenshotFilePath: string,
   timingSettings: ScreenshotTimingSettings,
 ): Promise<string | null> {
-  const readinessStartedAt = performance.now();
   try {
-    const networkWentIdle = await waitForNetworkIdle(page, timingSettings.networkIdleTimeoutMs);
-    if (networkWentIdle) {
-      await waitForPaint(page);
-      const remainingMinimumWaitMs =
-        timingSettings.screenshotMinimumWaitMs - measureElapsedMs(readinessStartedAt);
-      const minimumWaitIsNotYetReached = remainingMinimumWaitMs > 0;
-      if (minimumWaitIsNotYetReached) {
-        await page.waitForTimeout(remainingMinimumWaitMs);
-      }
-    }
+    await waitForPageReadiness(page, timingSettings);
     await page.screenshot({ path: screenshotFilePath });
     return null;
   } catch (error: unknown) {
@@ -276,7 +293,7 @@ async function visitPageAndCapture(
  * @param browser - The browser to close
  * @returns Resolves once the browser is closed or the failure is logged
  */
-async function closeBrowserQuietly(browser: Browser): Promise<void> {
+export async function closeBrowserQuietly(browser: Browser): Promise<void> {
   try {
     await browser.close();
   } catch (error: unknown) {

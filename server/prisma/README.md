@@ -32,14 +32,24 @@ The generator is `prisma-client` (the ESM generator), **not** the legacy
 | `UseCase` | `use_cases` | A scenario to test on one website: title, description (both required). |
 | `Action` | `actions` | A reusable step on one website, e.g. "Log in": title, description (both required). |
 | `ScreenshotRun` | `screenshot_runs` | One visit the Playwright controller made to a website: the URL visited, whether it succeeded, the HTTP status, the failure reason, the screenshot's file name, and how long navigation took. |
-| `ActionScript` | `action_scripts` | One Playwright script Claude generated from an action: snapshots of what was sent (website name, START_URL, action title and description), the summary, `assumptions String[]`, the `.mjs` `code`, the warn-only `ruleViolations String[]`, and the `modelId` that answered. **Immutable** - create-only. |
+| `ActionScript` | `action_scripts` | One Playwright script Claude generated from an action: snapshots of what was sent (website name, START_URL, action title and description), the summary, `assumptions String[]`, the `.mjs` `code`, the warn-only `ruleViolations String[]`, the `modelId` that answered, and the `effort` level sent (null = "Standard", or a row saved before the column existed). **Immutable** - create-only. |
 | `ActionScriptRun` | `action_script_runs` | One run of a script: `succeeded`, `exitCode` (null when killed by a signal), `exitSignal`, `timedOut`, the capped `output` and `outputWasTruncated`, the failure screenshot's file name, and the duration. Create-only. |
+| `CrawlRun` | `crawl_runs` | One background crawl of a website: `startUrl` (snapshot), `status` (`running`, `finished`, `stoppedAtPageLimit`, `stoppedAtTimeLimit`, `failed`, `interrupted`), `pageLimit`, the live counters `visitedPageCount` / `waitingUrlCount`, `errorMessage`, and `durationMs` / `finishedAt` (null while running). |
+| `CrawledPage` | `crawled_pages` | One page a crawl visited: `parentPageId` (self-relation - the page whose link first led here; null for the start page), `url` (identity: origin + path), `requestedUrl`, `finalUrl`, `visitOrder`, `depth`, `succeeded`, `httpStatus`, `errorMessage`, `title`, the YAML `ariaSnapshot`, `linkedUrls String[]` (same-origin links on the page), and the duration. Create-only. |
 
 `UseCase`, `Action`, and `ScreenshotRun` each belong to exactly one `Website`
 (`websiteId`, indexed). `ActionScript` belongs to one `Action` and, denormalized
 for single-statement cascades, its `Website`; `ActionScriptRun` carries all
-three parent ids (`websiteId`, `actionId`, `actionScriptId`, each indexed). The foreign keys use Prisma's default `onDelete: Restrict`, which is
-fine because rows are never hard deleted.
+three parent ids (`websiteId`, `actionId`, `actionScriptId`, each indexed).
+`CrawlRun` belongs to one `Website`; `CrawledPage` belongs to one `CrawlRun`
+and, denormalized, its `Website`. The foreign keys use Prisma's default
+`onDelete: Restrict`, which is fine because rows are never hard deleted.
+
+The pages of one crawl form a **tree** through the `CrawledPageTree`
+self-relation (`parentPage` / `childPages`, `parentPageId` indexed; Prisma's
+default for an optional relation makes it `ON DELETE SET NULL`). `linkedUrls`
+keeps the full link graph alongside the tree. `(crawlRunId, url)` is unique,
+so a crawl never records the same page twice.
 
 `ScreenshotRun.screenshotFileName` is **relative** to the configured
 screenshot directory (`SCREENSHOT_DIR`), e.g. `<websiteId>/<uuid>.png`, and is
@@ -63,11 +73,11 @@ select createdAt from websites;     -- fails
 
 ## Soft delete
 
-All six models have a nullable `deletedAt`. Deleting sets it instead of
+All eight models have a nullable `deletedAt`. Deleting sets it instead of
 removing the row, and every `dbService` query filters `deletedAt: null`.
 Deleting a website also stamps its active use cases, actions, screenshot
-runs, action scripts, and action script runs, in one transaction, with the
-**same** timestamp — so that batch can be identified together later. Deleting
+runs, action scripts, action script runs, crawl runs, and crawled pages, in
+one transaction, with the **same** timestamp — so that batch can be identified together later. Deleting
 an action likewise stamps its active scripts and their runs with the action's
 timestamp. A soft-deleted run's PNG (and run folder) stays on disk. Scripts
 and runs are never deleted on their own.

@@ -4,6 +4,214 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-03 11:59 EDT — Website crawler: page tree + aria snapshot per page
+
+**Intent:**
+- **Change of strategy:** instead of only screenshotting a website's start URL, **crawl** it. The crawler follows the site's links, maps every page it reaches as a **tree**, and records each page's Playwright **aria snapshot** (`await page.locator('body').ariaSnapshot()`, the call the user asked for).
+- First target was this app's own dev server (`http://localhost:5180/`).
+- Before planning, a one-off script captured the aria snapshots of forge.aikazi.com and of the dev app into `claude_tmp/aria-snapshots/`.
+
+### Decisions (all made by the user)
+- **Full app feature:** Prisma tables, service, API, and UI, modelled on screenshot runs.
+- **Links only:** read `<a href>` and visit same-origin URLs; never click buttons.
+- **Background + live progress:** the POST answers at once with a `running` run, and the UI polls.
+- **Limits:** a fixed cap of 50 pages (failed pages count) and a 10-minute time limit.
+- **URL identity ignores both `#hash` and `?query`.** A page is loaded with the query of the first link that reached it.
+- **Tree via a self-relation:** `CrawledPage.parentPageId` → `CrawledPage`, null for the start page. This was the user's feedback on the plan.
+- **Browser closes mid-crawl** (a `tsx watch` restart): stop at once, record no fake pages, and mark the run `interrupted`.
+- **Keep** the test website, its crawls, and `claude_tmp/`.
+- The misleading run produced by the bug found during verification is **left in place**.
+- Proposed defaults, approved with the plan:
+  - one crawl at a time per website (409);
+  - readiness reuses the website's screenshot timing settings;
+  - trailing slash kept;
+  - `<a download>` skipped;
+  - links are read from every loaded page whose final URL is on the crawl's origin.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **New models:** `CrawlRun` (`crawl_runs`) and `CrawledPage` (`crawled_pages`, with the `CrawledPageTree` self-relation `parentPage`/`childPages`, `@@unique([crawlRunId, url])`, and indexes on `websiteId` and `parentPageId`). **Back-relations:** `Website.crawlRuns` / `crawledPages`. Doc comments updated. `npx prisma db push` + `npx prisma generate` run; tables only added. |
+| `server/services/dbService.ts` | **Added:** the `CrawlRun` / `CrawledPage` type re-exports, plus `CrawlRunStatus`, `FinishedCrawlRunStatus`, `CrawlRunInput`, `CrawlProgress`, `CrawlRunFinish`, `CrawledPageInput`, `CrawledPageSummary`. **New functions:** `listCrawlRunsForWebsite`, `findCrawlRunForWebsite`, `createCrawlRunForWebsite`, `recordCrawledPage` (one transaction: the counters, guarded by `status: running` / `deletedAt: null`, then the page), `finishCrawlRun`, `markRunningCrawlRunsInterrupted`, `listCrawledPageSummariesForRun` (Prisma `omit`), `findCrawledPageForRun`. **Changed:** `softDeleteWebsite` now also stamps crawl runs and crawled pages ("eight tables"). |
+| `server/services/playwrightService.ts` | **Refactor, behaviour unchanged:** the new exported `waitForPageReadiness` (idle → paint → minimum wait, no try/catch) is split out of `captureWhenReady`. **Now exported:** `FIRST_FAILING_HTTP_STATUS`, `NavigationOutcome`, `measureElapsedMs`, `summarizeError`, `describeUnsuccessfulResponse`, `navigateToUrl`, `closeBrowserQuietly`. |
+| `server/services/crawlerService.ts` (new) | **Exports:** `crawlWebsite`, `readRawPageLinks`, `CRAWL_PAGE_LIMIT`, `CRAWL_TIME_LIMIT_MS`, `ARIA_SNAPSHOT_TIMEOUT_MS`, `CrawlStopReason`, `CrawlOutcome`, `RecordVisitedPage`. **Module-private:** `buildStartEntry`, `rememberCrawlOriginOnce`, `markFinalUrlAsSeen`, `takeAriaSnapshot`, `readPageTitle`, `collectSameOriginLinks`, `readLinksWhenOnOrigin`, `buildUnreadablePageVisit`, `visitCrawlPage`, `claimUnseenLinks`, `decideWhetherToStop`, `crawlNextPage`, `crawlWithPage`. |
+| `server/services/crawlRunService.ts` (new) | **Exports:** `startCrawlRun` (in-memory per-website guard, background crawl, `CrawlRunStart` result), `markUnfinishedCrawlRunsInterrupted`. **Module-private:** `runCrawlInBackground` (never rejects), `recordCrawlFailure`, `BROWSER_CLOSED_MESSAGE`. |
+| `server/controllers/crawlRuns.ts` (new) | `registerCrawlRunRoutes(app)` with four routes: `GET`/`POST /api/websites/:websiteId/crawl-runs`, `GET .../:crawlRunId` (run + page summaries), `GET .../pages/:crawledPageId`. |
+| `server/utils/normalizeCrawlUrl.ts` (new) | `normalizeCrawlUrl`, `isSameOriginUrl`, `MAX_CRAWL_URL_LENGTH`, `NormalizedCrawlUrl`. |
+| `server/server.ts` | Registers `registerCrawlRunRoutes`. **Boot step:** `await markUnfinishedCrawlRunsInterrupted()` before `startListening` (skipped under test). |
+| `server/controllers/websites.ts` | DELETE route JSDoc now lists every cascaded table (it was stale). |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/hooks/useCrawlRuns.ts` (new) | `CrawlRunStatus`, `CrawlRunRecord`, `useCrawlRuns`. |
+| `src/hooks/usePolledJsonResource.ts` (new) | `PolledJsonResourceState`, `usePolledJsonResource`. **Module-private:** `buildFailedPoll`, `FinishedPoll`. |
+| `src/hooks/useCrawlRunProgress.ts` (new) | `CRAWL_RUN_POLL_INTERVAL_MS`, `CrawledPageSummaryRecord`, `CrawlRunWithPagesRecord`, `useCrawlRunProgress`. **Module-private:** `crawlRunIsStillRunning`. |
+| `src/hooks/useCrawledPage.ts` (new) | `CrawledPageRecord`, `useCrawledPage`. |
+| `src/utils/describeCrawlRun.ts` (new) | `describeCrawlRunStatus`, `describeCrawlRunProgress`, `crawlRunSeverity`, `formatCrawledPagePath`, plus the types. **Module-private:** `describeCrawlRunState`. |
+| `src/utils/buildCrawlSiteTree.ts` (new) | `buildCrawlSiteTree`, `flattenCrawlSiteTree`, plus the types. **Module-private:** `appendTreeRows`. |
+| `src/components/CrawlRunsSection.tsx` (new) | The "Crawls" section, `CrawlRunsSectionProps`. |
+| `src/components/CrawlSiteMap.tsx` (new) | The "Site map" tree, `CrawlSiteMapProps`. |
+| `src/components/CrawledPageDetails.tsx` (new) | One page in full, `CrawledPageDetailsProps`. **Module-private:** `DetailRow`. |
+| `src/pages/CrawlRunPage.tsx` (new) | The crawl page. **Module-private:** `findSelectedPage`, `PAGE_QUERY_PARAMETER`. |
+| `src/pages/WebsiteDetailPage.tsx` | **Data:** owns `useCrawlRuns`. **New:** `startCrawl` / `handleCrawlClick` (POST, then navigate to the run) and `crawlRunCountText`. **UI:** renders `CrawlRunsSection`. The delete dialog now names crawl runs, and the JSDoc is updated. |
+| `src/App.tsx` | Route `/websites/:websiteId/crawl-runs/:crawlRunId`. |
+| `src/utils/routePaths.ts` | `crawlRunDetailPath`, `crawlRunsApiUrl`, `crawlRunApiUrl`, `crawledPageApiUrl`. |
+
+### Docs
+`README.md`, `server/controllers/README.md`, `server/services/README.md`, `server/prisma/README.md`, `server/utils/README.md`, `src/components/README.md`, `src/hooks/README.md`, `src/pages/README.md`, `tests/README.md`.
+
+### Tests
+- **Backend, new:** `services/crawlerService.test.ts` (a fake site behind a mocked `playwright`, plus the in-page link scan), `services/crawlRunService.test.ts`, `api/crawlRuns.test.ts`, `utils/normalizeCrawlUrl.test.ts`.
+- **Backend, updated:**
+  - `services/dbService.test.ts`: two new delegates, the crawl functions, and the cascade ("eight tables"); `mockTransaction` widened to `Promise<unknown>`.
+  - `server.test.ts`: `crawlRunService` mocked, the route wiring, and "boot step not run on import".
+  - `playwrightService.test.ts` needed no change.
+- **Frontend, new:** `usePolledJsonResource` (fake timers), `useCrawlRuns`, `useCrawlRunProgress`, `useCrawledPage`, `describeCrawlRun`, `buildCrawlSiteTree`, `CrawlRunsSection`, `CrawlSiteMap`, `CrawledPageDetails`, `CrawlRunPage`.
+- **Frontend, updated:**
+  - `WebsiteDetailPage.test.tsx`: crawl-runs stub, new dialog strings, and a "crawls" group.
+  - `App.test.tsx`: crawl route row.
+  - `routePaths.test.tsx`.
+  - Builders in `support/frontendTestHelpers.tsx`.
+- No test was removed or skipped.
+
+### Verification performed
+- **Checks:**
+  - `npm run test:coverage`: **1031 tests in 86 files, all passing**. Statements 99.44%, branches 98.65%, functions 100%, lines 99.84%. Every crawl file is fully covered except one type-narrowing guard.
+  - `npm run lint`, `npm run tsc` and `npm run tsc:client`: clean.
+- **Live run (Playwright MCP driving the user's Chrome, after a health check and homepage check on a dev server I started):**
+  - **Setup:** created "easy-test dev" (`http://localhost:5180/`) and clicked **Crawl website**.
+  - **409:** a second POST mid-crawl answered `409`.
+  - **Live progress:** "Running · 5 pages so far · 10 links waiting".
+  - **Result:** finished with **21 pages in 14.4 s**.
+  - **Tree in psql:** only `/` has a null parent, and depths are 0–4.
+  - **Snapshot check:** the stored snapshot of `/` matches the earlier `claude_tmp/aria-snapshots/easy-test-dev.yml` line for line, except the uptime text.
+  - **`?page=`:** picking a page updates it (replace), and a reload keeps the selection.
+- **Bug found and fixed during verification:**
+  - **Symptom:** a `tsx watch` restart (SIGTERM → Playwright closes the browser) made the crawler record every queued URL as a fake "browser has been closed" failure and mark the run `finished`.
+  - **First fix:** stop when `browser.isConnected()` is false.
+  - **Second fix:** also stop when `page.isClosed()`, because the page closes a moment before the browser reports itself disconnected; a re-test showed one fake page slipping through.
+  - **Final re-test:** the run was `interrupted` with only its 3 real pages, 3 links waiting, the reason shown, and the UI polling through the restart.
+- **Boot backstop:** I killed the server process (`kill -9`) mid-crawl, which left the run `running`, and started `npm run dev` again. The log showed "[crawl] marked 1 unfinished crawl run(s) interrupted" before "listening", and the run was `interrupted`.
+- **Cleanup:**
+  - My dev servers were stopped, including a `tsx watch` left stuck by the `kill -9` test.
+  - Ports 3010 and 5180 are free.
+  - No orphaned Chromium processes.
+- No git history was written.
+
+### Notable during implementation
+- **Test data left in the dev DB** (by the user's choice): the "easy-test dev" website and its 5 crawl runs. They are the 21-page crawl, the misleading pre-fix "Finished · 11 pages" run (7 fake failures), and 3 `interrupted` runs from the restart tests.
+- **Aria snapshots store page text verbatim.** Crawling the dev app stored, for example, an action description containing login credentials inside the compare page's snapshot.
+- **Crawling the dev app visits action pages,** each of which calls `GET /api/script-models`: one live Models API list call per action page, with no tokens spent.
+- **The Playwright MCP runs in `--extension` mode.** The first navigation waited for the user to approve the connection in Chrome. Later, clicks timed out ("visible, enabled and stable") while the tab was in the background, so the restart re-tests started crawls with a POST via curl; the UI click path had already been verified.
+
+---
+
+## 2026-10-03 03:15 EDT — Model/effort picker, effort column, out-of-date versions, version diff page
+
+**Intent:**
+- **Model and effort dropdowns** on the action page. They list every Claude model the live Models API offers, and exactly the effort levels the chosen one supports.
+- **Each saved script records the effort level sent.** The existing `modelId` already records the model that answered.
+- **Out-of-date marks:** a version generated from a title or description the action no longer has is flagged, so the user knows to convert again.
+- **Comparison page:** any two versions of an action side by side, covering their title, description, and code.
+
+### Decisions (all made by the user)
+- **Levels** are effort levels only. Models without an effort setting (Haiku 4.5, Sonnet 4.5) get a single "Standard".
+- **Fallback is automatic** and read live:
+  - Opus 4.8 when the chosen model allows it;
+  - otherwise the model's first allowed fallback (Sonnet 5.5 → Sonnet 5);
+  - otherwise none.
+- **Model details:** a plain `effort` column. `modelId` keeps storing the model id string that answered. The user turned down a JSON column.
+- **Diff layout:** side by side. **Scope:** versions of one action.
+- **Out of date:** title or description changes only. A changed website URL is not flagged.
+- **End-to-end checks** used a test website pointing at this app (`http://localhost:5180/`), as before.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **New column:** `ActionScript.effort String?`. Doc comment updated. `npx prisma db push` + `npx prisma generate` run; the column is nullable, so no data loss. |
+| `server/services/dbService.ts` | `ActionScriptInput.effort: string \| null`. |
+| `server/services/anthropicClient.ts` (new) | **Moved here** from `scriptGenerationService.ts`: `ScriptGenerationError`, `ScriptGenerationFailureReason` (adds `unsupportedModel`), `readAnthropicApiKey`. **New:** `createAnthropicClient()`. |
+| `server/services/scriptModelService.ts` (new) | **Exports:** `EFFORT_LADDER`, `EffortLevel`, `DEFAULT_SCRIPT_MODEL_ID`, `DEFAULT_SCRIPT_EFFORT`, `PREFERRED_FALLBACK_MODEL_ID`, `SERVER_SIDE_FALLBACK_BETA`, `ScriptModelReference`, `ScriptModelOption`, `ScriptModelChoiceDefaults`, `listScriptModels`, `findScriptModel`, `chooseEffortForModel`, `chooseDefaultScriptModel`. **Module-private:** `readEffortLevels`, `pickFallbackModel`. |
+| `server/services/scriptGenerationService.ts` | **Signature:** `convertActionToScript(request, choice)`. **Request built from the choice:** `fallbacks` / `betas` only when the model has a fallback; `thinking: adaptive` only when supported; `effort` unless "Standard". **Returns** `effort`, and the log line names the model asked and the effort. **Removed:** `ACTION_SCRIPT_MODEL_ID`, `ACTION_SCRIPT_FALLBACK_MODEL_ID`, and the local copies of `ScriptGenerationError` / `readAnthropicApiKey` (moved). **Added:** the `ScriptModelChoice` interface. |
+| `server/controllers/actionScripts.ts` | `POST .../scripts` validates `{ modelId, effort }` (400), looks the model up in the live catalog (400 "Unknown model"), and checks the level (400 naming what the model offers). It then saves `effort`. **New module-private:** `resolveEffortForModel`, `EffortResolution`. **Removed:** `statusForConversionFailure` and its status map, moved to utils as `statusForScriptGenerationFailure`. |
+| `server/controllers/scriptModels.ts` (new) | `registerScriptModelRoutes(app)`: `GET /api/script-models` → `{ models, defaultModelId, defaultEffort }`; 503 without a key. |
+| `server/server.ts` | Registers `registerScriptModelRoutes`. |
+| `server/utils/statusForScriptGenerationFailure.ts` (new) | Shared status mapping for both Claude routes, now including `unsupportedModel` → 400. |
+| `server/utils/validateRequestBodies.ts` | **Added:** `ScriptModelChoiceInput` and `validateScriptModelChoiceInput`. |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/hooks/useScriptModels.ts` (new) | `ScriptModelReference`, `ScriptModelOption`, `ScriptModelCatalog`, `useScriptModels`. |
+| `src/hooks/useActionScripts.ts` | `ActionScriptRecord.effort`. |
+| `src/components/ScriptModelPicker.tsx` (new) | The Model / Effort dropdowns, `ScriptModelPickerProps`. |
+| `src/components/SideBySideDiff.tsx` (new) | The side-by-side diff section, `SideBySideDiffProps`. **Module-private:** `cellBackground`, `changedWordBackground`, `DiffCellView`. |
+| `src/components/ActionScriptsSection.tsx` | **New props:** `canConvert`, `modelPicker`, `currentAction`, `comparePath`, `compareLinkState`. **UI:** the picker, the Compare versions link, model and effort on version rows, and the "Out of date" chip. |
+| `src/components/ActionScriptDetails.tsx` | **New props:** `currentAction`, `catalogModels`. **UI:** a model + effort caption, the "Out of date" warning, and the "Generated from" title/description block. |
+| `src/pages/ActionDetailPage.tsx` | **Picker state:** `pickedModelChoice`, falling back to the catalog's defaults. **Handlers:** `handleModelChange` / `handleEffortChange`. **Convert POST** sends `{ modelId, effort }`. **Module-private:** `ScriptModelChoice`, `chooseEffortForModel` (mirrors the server's), `PREFERRED_EFFORT`. |
+| `src/pages/ActionScriptComparePage.tsx` (new) | The comparison page. **Module-private:** `findScriptIndex`, `describeVersion`, the query parameter constants. |
+| `src/App.tsx` | Route `/websites/:websiteId/actions/:itemId/scripts/compare`. |
+| `src/utils/routePaths.ts` | **Added:** `actionScriptComparePath`, `SCRIPT_MODELS_API_URL`. |
+| `src/utils/describeScriptModel.ts` (new) | `describeScriptModel`, `DescribableScriptModel`. **Module-private:** `describeEffort`, which yields "high effort", "Standard effort", "effort not recorded", or "no effort level" while the model list is unknown. |
+| `src/utils/describeScriptStaleness.ts` (new) | `findChangedActionFields`, `describeChangedActionFields`, and the types. |
+| `src/utils/buildSideBySideDiff.ts` (new) | `buildSideBySideDiffRows`, using jsdiff's `diffLines` (newline at end of file ignored) and `diffWordsWithSpace` for paired lines. |
+
+### Files changed — config, tooling, docs
+| File | Change |
+|---|---|
+| `package.json` / `package-lock.json` | `npm install diff` (9.0.0; ships its own types; `@types/diff` is a deprecated stub). |
+| `README.md`, `server/controllers/README.md`, `server/services/README.md`, `server/utils/README.md`, `server/prisma/README.md`, `server/prompts/README.md`, `src/hooks/README.md`, `src/components/README.md`, `src/pages/README.md`, `tests/README.md` | Updated for the above. |
+
+### Tests
+- **Backend, new:** `services/anthropicClient.test.ts`, `services/scriptModelService.test.ts`, `api/scriptModels.test.ts`, `utils/statusForScriptGenerationFailure.test.ts`.
+- **Backend, updated:**
+  - `services/scriptGenerationService.test.ts`: rewritten for the choice argument.
+    - The unset/empty/whitespace key cases moved to `anthropicClient.test.ts`, where that logic now lives; one missing-key case stays.
+    - The old "asks Claude Opus 5.5 with the named fallback, high effort" case became per-model request-shape cases (current model, older model without adaptive thinking, Standard model).
+  - `api/actionScripts.test.ts`: every convert POST now sends a body. The model lookup is mocked. New 400 cases (no model, unknown model, unoffered level, missing level, level on a Standard model), a Standard conversion, and 503 from the catalog.
+  - `utils/validateRequestBodies.test.ts`: the choice validator.
+  - `services/dbService.test.ts`: `effort` in the fixtures.
+  - `server.test.ts`: the catalog mock and the route wiring.
+- **Frontend, new:** `useScriptModels`, `describeScriptModel`, `describeScriptStaleness`, `buildSideBySideDiff`, `SideBySideDiff`, `ScriptModelPicker`, `ActionScriptComparePage`.
+- **Frontend, updated:**
+  - `ActionDetailPage.test.tsx`: the model catalog is stubbed for every load, Convert waits for it, and the POST body is asserted. New "model choice" and "out-of-date versions and comparing" groups.
+  - `ActionScriptsSection.test.tsx` / `ActionScriptDetails.test.tsx`: the new props. Two rerender-based cases now unmount and render through the shared helper.
+  - `routePaths.test.tsx`; helpers `buildScriptModelOption` / `buildScriptModelCatalog` and `effort` on `buildActionScriptRecord`.
+- No test was removed.
+
+### Verification performed
+- **Live Models API (read-only, before planning):** 13 models with structured outputs, with their effort levels, adaptive support, and allowed fallbacks.
+- **`GET /api/script-models`** on a dev server I started: the same 13 models. Defaults are Opus 5.5 / high. Fallbacks: Opus 4.8 for Opus 5.5, Fable 5.1, Opus 5, and Fable 5; Sonnet 5 for Sonnet 5.5; none otherwise.
+- **Bad convert bodies via curl:** all 400 with clear messages (no body, no model, unknown model, `xhigh` on Opus 4.6, a level on Haiku, a missing level, a blank level).
+- **Playwright UI run** on a test website pointing at this app:
+  - **Picker:** defaults to Opus 5.5 / high; 13 models; Opus 4.6 offers low/medium/high/max with no fallback; Haiku shows a disabled "Standard"; the picker is disabled while converting.
+  - **Conversions:** Haiku / Standard took 3 s, Sonnet 5.5 / low about 4 s. Captions and rows show the model name, id, and effort.
+  - **Out of date:** after editing the title in the UI, both older versions show "Out of date" and the alert names "title". A new conversion is not flagged.
+  - **Run:** running the new version passed.
+  - **Compare:** defaults to v2 vs v3. The title highlights " page", and the description says "No differences". Picking v1 updates `?from=`, which survives a reload. Code shows removed and added lines, and the breadcrumb returns to the action.
+- **Direct API conversions:** Opus 5.5 / low (adaptive thinking + fallback chain) and Opus 4.5 / low (effort, no adaptive) both returned 201. psql shows `modelId` / `effort` stored for every version (`null` for Haiku).
+- **Prompt cache, from the server log:**
+  - Sonnet 5.5 wrote 2,549 tokens once, then read 2,549 on every later call.
+  - Opus 5.5 wrote its own entry (caches are per model).
+  - Haiku 4.5 and Opus 4.5 never cache: the ~2.2k-token prompt is below their 4,096-token minimum. This is documented, not a bug.
+- **Checks:**
+  - `npm run test:coverage`: **853 tests in 72 files, all passing**. Statements 99.41%, branches 98.4%, functions 100%, lines 99.93%.
+  - `npm run lint`, `npm run tsc` and `npm run tsc:client`: clean.
+- **Cleanup:**
+  - The test website was soft deleted, so its scripts and runs are stamped.
+  - My test run folder under `action-scripts/` and `claude_tmp/` were removed. The user's own run folder there is untouched.
+  - The dev servers I started were stopped, including an orphaned `tsx watch` that `./stop-dev.sh` (listeners only) left behind.
+- No git history was written.
+
+### Notable during implementation
+- **The model choice resets when the page remounts,** e.g. after a round trip to the Edit page. It goes back to the server's default; nothing remembers the last choice. Not requested, so not built.
+- **The model list is a live API call** on each action-page load (~0.5–1 s). Until it arrives, Convert is disabled, the picker reads "Loading models…", and version labels show raw ids with "no effort level".
+- **React Router 7 applies URL changes in a transition,** so on the comparison page the dropdown updates one render after `setSearchParams`. The browser test waits for it.
+- **The user had edited `server/prompts/actionScriptGuidelines.md`** (allowing `console.log` for progress). It was left verbatim.
+
+---
+
 ## 2026-10-02 21:33 EDT — Actions convert to immutable Playwright scripts (Convert to script / Run script)
 
 **Intent:**

@@ -116,8 +116,9 @@ export function registerWebsiteRoutes(app: Express): void {
   });
 
   /**
-   * Soft deletes an active website together with its active use cases and
-   * actions (one transaction, one shared `deletedAt`).
+   * Soft deletes an active website together with its active use cases,
+   * actions, screenshot runs, action scripts, action script runs, crawl runs,
+   * and crawled pages (one transaction, one shared `deletedAt`).
    * @route DELETE /api/websites/:websiteId
    * @param websiteId - Path parameter: the website's cuid
    * @returns 204 with no body; 404 with `{ error }` when it does not exist or was already deleted; 500 with `{ error }` when the update fails

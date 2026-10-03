@@ -215,3 +215,52 @@ export function validateTitleDescriptionInput(
 
   return { isValid: true, input: { title, description } };
 }
+
+/**
+ * The model and effort level a "Convert to script" request asks for, as sent.
+ * Whether that model exists and offers that level is checked afterwards,
+ * against the live model catalog.
+ */
+export interface ScriptModelChoiceInput {
+  /** The model identifier string, e.g. "claude-opus-5-5". */
+  modelId: string;
+  /** The effort level, or null for a model with no effort setting ("Standard"). */
+  effort: string | null;
+}
+
+/**
+ * Validates the body of a "Convert to script" request: `modelId` is a
+ * required, non-blank string; `effort` is a non-blank string, or null / left
+ * out for "Standard". Both are trimmed.
+ * @param body - The parsed request body
+ * @returns The cleaned input, or the first problem found as a message
+ */
+export function validateScriptModelChoiceInput(
+  body: unknown,
+): ValidationResult<ScriptModelChoiceInput> {
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object" };
+  }
+
+  const modelId = readTrimmedString(body, "modelId");
+  const modelIdIsMissing = modelId === null || modelId === "";
+  if (modelIdIsMissing) {
+    return { isValid: false, errorMessage: "A model is required" };
+  }
+
+  const rawEffort = body.effort;
+  const effortIsLeftOut = rawEffort === undefined || rawEffort === null;
+  if (effortIsLeftOut) {
+    return { isValid: true, input: { modelId, effort: null } };
+  }
+  const effort = readTrimmedString(body, "effort");
+  const effortIsNotANonBlankString = effort === null || effort === "";
+  if (effortIsNotANonBlankString) {
+    return {
+      isValid: false,
+      errorMessage: "The effort level must be a non-blank string, or null for a model with no effort setting",
+    };
+  }
+
+  return { isValid: true, input: { modelId, effort } };
+}

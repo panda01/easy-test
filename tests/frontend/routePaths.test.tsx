@@ -1,8 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
+  SCRIPT_MODELS_API_URL,
+  actionScriptComparePath,
   actionScriptRunFailureScreenshotApiUrl,
   actionScriptRunsApiUrl,
   actionScriptsApiUrl,
+  crawledPageApiUrl,
+  crawlRunApiUrl,
+  crawlRunDetailPath,
+  crawlRunsApiUrl,
   NEW_WEBSITE_PATH,
   WEBSITE_LIST_PATH,
   WEBSITES_API_URL,
@@ -140,6 +146,54 @@ describe("routePaths: action script API urls", () => {
       actionScriptRunFailureScreenshotApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID, UNSAFE_ID),
     ).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/scripts/${ENCODED_UNSAFE_ID}/runs/${ENCODED_UNSAFE_ID}/failure-screenshot`,
+    );
+  });
+});
+
+describe("routePaths: action script comparison and models", () => {
+  it("builds the comparison page path", () => {
+    expect(actionScriptComparePath("website-1", "action-1")).toBe(
+      "/websites/website-1/actions/action-1/scripts/compare",
+    );
+    expect(actionScriptComparePath(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/scripts/compare`,
+    );
+  });
+
+  it("names the model list endpoint", () => {
+    expect(SCRIPT_MODELS_API_URL).toBe("/api/script-models");
+  });
+});
+
+describe("routePaths: crawl runs", () => {
+  it("builds a crawl run's page path", () => {
+    expect(crawlRunDetailPath("website-1", "crawl-run-1")).toBe(
+      "/websites/website-1/crawl-runs/crawl-run-1",
+    );
+  });
+
+  it("builds a website's crawl run collection url", () => {
+    expect(crawlRunsApiUrl("website-1")).toBe("/api/websites/website-1/crawl-runs");
+  });
+
+  it("builds one crawl run's url", () => {
+    expect(crawlRunApiUrl("website-1", "crawl-run-1")).toBe(
+      "/api/websites/website-1/crawl-runs/crawl-run-1",
+    );
+  });
+
+  it("builds one crawled page's url", () => {
+    expect(crawledPageApiUrl("website-1", "crawl-run-1", "crawled-page-1")).toBe(
+      "/api/websites/website-1/crawl-runs/crawl-run-1/pages/crawled-page-1",
+    );
+  });
+
+  it("encodes every id in crawl paths and urls", () => {
+    expect(crawlRunDetailPath(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/websites/${ENCODED_UNSAFE_ID}/crawl-runs/${ENCODED_UNSAFE_ID}`,
+    );
+    expect(crawledPageApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/crawl-runs/${ENCODED_UNSAFE_ID}/pages/${ENCODED_UNSAFE_ID}`,
     );
   });
 });

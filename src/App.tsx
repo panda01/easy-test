@@ -2,6 +2,8 @@ import { type ReactElement } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import AppHeader from "./components/AppHeader";
 import ActionDetailPage from "./pages/ActionDetailPage";
+import ActionScriptComparePage from "./pages/ActionScriptComparePage";
+import CrawlRunPage from "./pages/CrawlRunPage";
 import HomePage from "./pages/HomePage";
 import UseCaseDetailPage from "./pages/UseCaseDetailPage";
 import WebsiteCreatePage from "./pages/WebsiteCreatePage";
@@ -42,6 +44,7 @@ export default function App(): ReactElement {
         <Route path="/websites/new" element={<WebsiteCreatePage />} />
         <Route path="/websites/:websiteId" element={<WebsiteDetailPage />} />
         <Route path="/websites/:websiteId/edit" element={<WebsiteEditPage />} />
+        <Route path="/websites/:websiteId/crawl-runs/:crawlRunId" element={<CrawlRunPage />} />
 
         <Route
           path="/websites/:websiteId/use-cases/new"
@@ -63,6 +66,10 @@ export default function App(): ReactElement {
         <Route
           path="/websites/:websiteId/actions/:itemId"
           element={<ActionDetailPage key="action-detail" />}
+        />
+        <Route
+          path="/websites/:websiteId/actions/:itemId/scripts/compare"
+          element={<ActionScriptComparePage key="action-script-compare" />}
         />
         <Route
           path="/websites/:websiteId/actions/:itemId/edit"

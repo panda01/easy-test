@@ -16,12 +16,19 @@ import {
 } from "../services/dbService.js";
 import { convertActionToScript } from "../services/scriptGenerationService.js";
 import {
+  type EffortLevel,
+  type ScriptModelOption,
+  findScriptModel,
+} from "../services/scriptModelService.js";
+import {
   FAILURE_SCREENSHOT_FILE_NAME,
   runPlaywrightScript,
 } from "../services/scriptRunnerService.js";
 import { describeError } from "../utils/describeError.js";
 import { findScriptRuleViolations } from "../utils/findScriptRuleViolations.js";
 import { readSendErrorStatus } from "../utils/readSendErrorStatus.js";
+import { statusForScriptGenerationFailure } from "../utils/statusForScriptGenerationFailure.js";
+import { validateScriptModelChoiceInput } from "../utils/validateRequestBodies.js";
 
 const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
 const ACTION_NOT_FOUND_MESSAGE = "Action not found";
@@ -29,19 +36,6 @@ const SCRIPT_NOT_FOUND_MESSAGE = "Script not found";
 const SCRIPT_RUN_NOT_FOUND_MESSAGE = "Script run not found";
 const RUN_HAS_NO_FAILURE_SCREENSHOT_MESSAGE = "This run did not capture a failure screenshot";
 const FAILURE_SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Failure screenshot file not found";
-
-/**
- * The status each known conversion failure answers with (see
- * `ScriptGenerationError` in the generation service). A missing API key is a
- * server configuration problem (503 Service Unavailable); the rest mean
- * Claude answered but its reply was unusable (502 Bad Gateway).
- */
-const STATUS_BY_SCRIPT_GENERATION_FAILURE: Readonly<Record<string, number>> = {
-  missingApiKey: 503,
-  refused: 502,
-  truncated: 502,
-  unparseable: 502,
-};
 
 /** The outcome of looking up a chain of parent rows: all found, or the first one missing. */
 type ParentLookup<TFound> =
@@ -105,27 +99,45 @@ async function findWebsiteActionAndScript(
   return { allWereFound: true, found: { website, action, script } };
 }
 
+/** Whether a model offers the requested effort level, with the level narrowed when it does. */
+type EffortResolution =
+  | { isOffered: true; effort: EffortLevel | null }
+  | { isOffered: false; problem: string };
+
 /**
- * Picks the HTTP status for a failed conversion. Known failures are
- * `ScriptGenerationError`s, recognized structurally (by `name` and `reason`)
- * the same way dbService recognizes Prisma errors, so tests can throw plain
- * errors carrying those fields.
- * @param error - Whatever the conversion rejected with
- * @returns 503 for a missing API key, 502 for an unusable reply, 500 for anything else
+ * Checks a requested effort level against what the chosen model offers. A
+ * model with no effort setting must be sent no level ("Standard"); any other
+ * model must be sent one of its own levels.
+ * @param model - The chosen model, from the live catalog
+ * @param requestedEffort - The level the request asked for, or null
+ * @returns The level to use, or a message saying what is wrong
  */
-function statusForConversionFailure(error: unknown): number {
-  const errorIsAnObject = typeof error === "object" && error !== null;
-  if (!errorIsAnObject) {
-    return 500;
+function resolveEffortForModel(
+  model: ScriptModelOption,
+  requestedEffort: string | null,
+): EffortResolution {
+  const offeredLevelsText = model.effortLevels.join(", ");
+  const modelHasNoEffortSetting = model.effortLevels.length === 0;
+  if (modelHasNoEffortSetting) {
+    const noLevelWasRequested = requestedEffort === null;
+    if (noLevelWasRequested) {
+      return { isOffered: true, effort: null };
+    }
+    return {
+      isOffered: false,
+      problem: `${model.displayName} has no effort setting, so no effort level can be chosen for it`,
+    };
   }
-  const errorIsAScriptGenerationError =
-    "name" in error && error.name === "ScriptGenerationError";
-  const reason: unknown = "reason" in error ? error.reason : undefined;
-  const reasonIsKnown = typeof reason === "string" && reason in STATUS_BY_SCRIPT_GENERATION_FAILURE;
-  if (errorIsAScriptGenerationError && reasonIsKnown) {
-    return STATUS_BY_SCRIPT_GENERATION_FAILURE[reason];
+
+  const offeredLevel = model.effortLevels.find((effortLevel) => effortLevel === requestedEffort);
+  if (offeredLevel !== undefined) {
+    return { isOffered: true, effort: offeredLevel };
   }
-  return 500;
+  const noLevelWasRequested = requestedEffort === null;
+  const problem = noLevelWasRequested
+    ? `${model.displayName} needs an effort level: ${offeredLevelsText}`
+    : `${model.displayName} does not offer the "${requestedEffort}" effort level; it offers ${offeredLevelsText}`;
+  return { isOffered: false, problem };
 }
 
 /**
@@ -176,20 +188,32 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
   });
 
   /**
-   * Converts the action into a new Playwright script with Claude, scans it for
-   * forbidden features, and saves it as a new, immutable version.
+   * Converts the action into a new Playwright script with Claude, using the
+   * model and effort level the user picked, scans it for forbidden features,
+   * and saves it as a new, immutable version.
    *
-   * Claude gets the user's guidelines verbatim plus snapshots of the website
-   * (name, URL as START_URL) and the action (title, description); the same
-   * snapshots are stored on the script. Rule violations only WARN: they are
-   * stored in `ruleViolations` and the script is saved either way. The request
-   * lasts as long as Claude takes - often a minute or more.
+   * The model must be in the live model catalog (see `scriptModelService`)
+   * and the effort level must be one it offers - or null for a model with no
+   * effort setting. Claude gets the user's guidelines verbatim plus snapshots
+   * of the website (name, URL as START_URL) and the action (title,
+   * description); the same snapshots are stored on the script, along with the
+   * model that answered (`modelId`) and the effort level sent (`effort`). Rule
+   * violations only WARN: they are stored in `ruleViolations` and the script
+   * is saved either way. The request lasts as long as Claude takes.
    * @route POST /api/websites/:websiteId/actions/:actionId/scripts
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action to convert
-   * @returns 201 with the saved script; 404 with `{ error }` when the website or action does not exist or was deleted; 502 with `{ error }` when Claude declined, its reply was cut off, or the reply had no usable script; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call or a query fails
+   * @param body - JSON `{ modelId, effort }`; `modelId` required, `effort` a level the model offers or null for "Standard"
+   * @returns 201 with the saved script; 400 with `{ error }` for an invalid body, a model not in the catalog, or an effort level the model does not offer; 404 with `{ error }` when the website or action does not exist or was deleted; 502 with `{ error }` when Claude declined, its reply was cut off, or the reply had no usable script; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call or a query fails
    */
   app.post("/api/websites/:websiteId/actions/:actionId/scripts", async (req, res) => {
+    const choiceValidation = validateScriptModelChoiceInput(req.body);
+    if (!choiceValidation.isValid) {
+      res.status(400).json({ error: choiceValidation.errorMessage });
+      return;
+    }
+    const { modelId, effort: requestedEffort } = choiceValidation.input;
+
     try {
       const lookup = await findWebsiteAndAction(req.params.websiteId, req.params.actionId);
       if (!lookup.allWereFound) {
@@ -198,13 +222,27 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
       }
       const { website, action } = lookup.found;
 
+      const model = await findScriptModel(modelId);
+      if (model === null) {
+        res.status(400).json({ error: `Unknown model "${modelId}"; pick one from the model list` });
+        return;
+      }
+      const effortResolution = resolveEffortForModel(model, requestedEffort);
+      if (!effortResolution.isOffered) {
+        res.status(400).json({ error: effortResolution.problem });
+        return;
+      }
+
       const conversionRequest = {
         websiteName: website.name,
         startUrl: website.url,
         actionTitle: action.title,
         actionDescription: action.description,
       };
-      const conversion = await convertActionToScript(conversionRequest);
+      const conversion = await convertActionToScript(conversionRequest, {
+        model,
+        effort: effortResolution.effort,
+      });
 
       const created = await createActionScriptForAction(website.id, action.id, {
         ...conversionRequest,
@@ -213,10 +251,11 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
         code: conversion.code,
         ruleViolations: findScriptRuleViolations(conversion.code),
         modelId: conversion.modelId,
+        effort: conversion.effort,
       });
       res.status(201).json(created);
     } catch (error: unknown) {
-      res.status(statusForConversionFailure(error)).json({ error: describeError(error) });
+      res.status(statusForScriptGenerationFailure(error)).json({ error: describeError(error) });
     }
   });
 

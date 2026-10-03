@@ -3,6 +3,9 @@ import { act, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import App from "../../src/App";
 import {
+  buildCrawledPageRecord,
+  buildCrawledPageSummaryRecord,
+  buildCrawlRunWithPagesRecord,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
   countRequests,
@@ -35,7 +38,8 @@ describe("App", () => {
 
 /**
  * Stubs every GET the app's pages make for one website ("Example") that has
- * one use case ("Log in") and one action ("Submit credentials").
+ * one use case ("Log in"), one action ("Submit credentials"), and one
+ * finished crawl ("crawl-run-1") of a single page.
  * @returns The installed fetch stub
  */
 function stubEveryPageRequest(): FetchStub {
@@ -52,6 +56,15 @@ function stubEveryPageRequest(): FetchStub {
       body: [buildWebsiteItemRecord({ id: "action-1", title: "Submit credentials" })],
     },
     "GET /api/websites/website-1/screenshot-runs": { status: 200, body: [] },
+    "GET /api/websites/website-1/crawl-runs": { status: 200, body: [] },
+    "GET /api/websites/website-1/crawl-runs/crawl-run-1": {
+      status: 200,
+      body: buildCrawlRunWithPagesRecord({ pages: [buildCrawledPageSummaryRecord()] }),
+    },
+    "GET /api/websites/website-1/crawl-runs/crawl-run-1/pages/crawled-page-1": {
+      status: 200,
+      body: buildCrawledPageRecord(),
+    },
     "GET /api/websites/website-1/use-cases/use-case-1": {
       status: 200,
       body: buildWebsiteItemRecord({ id: "use-case-1", title: "Log in" }),
@@ -80,6 +93,7 @@ describe("App routes", () => {
     { path: "/websites/website-1/actions/new", heading: "New action" },
     { path: "/websites/website-1/actions/action-1", heading: "Submit credentials" },
     { path: "/websites/website-1/actions/action-1/edit", heading: "Edit action" },
+    { path: "/websites/website-1/crawl-runs/crawl-run-1", heading: "Site crawl" },
   ])("routes $path to the page headed '$heading'", async ({ path, heading }) => {
     stubEveryPageRequest();
     window.history.pushState({}, "", path);

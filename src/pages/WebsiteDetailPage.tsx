@@ -1,5 +1,5 @@
 import { type ReactElement, useState } from "react";
-import { Link as RouterLink } from "react-router-dom";
+import { Link as RouterLink, useNavigate } from "react-router-dom";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Container from "@mui/material/Container";
@@ -7,10 +7,12 @@ import Link from "@mui/material/Link";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import ConfirmDeleteDialog from "../components/ConfirmDeleteDialog";
+import CrawlRunsSection from "../components/CrawlRunsSection";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import ScreenshotRunsSection from "../components/ScreenshotRunsSection";
 import WebsiteItemListSection from "../components/WebsiteItemListSection";
+import { type CrawlRunRecord, useCrawlRuns } from "../hooks/useCrawlRuns";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnNavigation, useReturnToHereState } from "../hooks/useReturnNavigation";
@@ -20,6 +22,8 @@ import { useWebsite } from "../hooks/useWebsites";
 import { formatCount } from "../utils/formatCount";
 import {
   WEBSITE_LIST_PATH,
+  crawlRunDetailPath,
+  crawlRunsApiUrl,
   screenshotRunsApiUrl,
   websiteApiUrl,
   websiteEditPath,
@@ -29,8 +33,8 @@ import { ACTION_KIND, USE_CASE_KIND } from "../utils/websiteItemKinds";
 /**
  * A website's own page (`/websites/:websiteId`): its URL, description, and
  * timestamps, Take screenshot / Edit / Delete buttons, the website's
- * screenshot timing settings and screenshot runs, and a section each for its
- * use cases and actions.
+ * screenshot timing settings and screenshot runs, its crawls, and a section
+ * each for its use cases and actions.
  *
  * "Take screenshot" POSTs to the Playwright controller, which visits the
  * website's URL with a headless browser on the server's machine and records
@@ -38,10 +42,14 @@ import { ACTION_KIND, USE_CASE_KIND } from "../utils/websiteItemKinds";
  * button is disabled and a progress bar shows meanwhile. The recorded run is
  * added to the top of the run list and selected.
  *
- * The page fetches the website, both item lists, AND the screenshot runs
- * itself (rather than letting each section fetch), so the delete dialog can
- * say exactly how many use cases, actions, and screenshot runs will be
- * deleted along with the website.
+ * "Crawl website" POSTs a new crawl run, which the server crawls in the
+ * background; the request answers at once, and the page then navigates to
+ * the new run's own page to watch it grow.
+ *
+ * The page fetches the website, both item lists, the screenshot runs, AND
+ * the crawl runs itself (rather than letting each section fetch), so the
+ * delete dialog can say exactly how many use cases, actions, screenshot runs,
+ * and crawl runs will be deleted along with the website.
  *
  * After a delete it returns to the website list history-aware (see
  * `useReturnNavigation`); a later Forward onto this deleted website shows the
@@ -55,7 +63,10 @@ export default function WebsiteDetailPage(): ReactElement {
   const actionsResource = useWebsiteItems(ACTION_KIND, websiteId);
   const screenshotRuns = useScreenshotRuns(websiteId);
   const { addTakenRun } = screenshotRuns;
+  const crawlRunsResource = useCrawlRuns(websiteId);
+  const crawlRuns = crawlRunsResource.data ?? [];
   const website = websiteResource.data;
+  const navigate = useNavigate();
 
   const returnToHereState = useReturnToHereState();
   const { returnTo } = useReturnNavigation();
@@ -67,6 +78,11 @@ export default function WebsiteDetailPage(): ReactElement {
     errorMessage: screenshotErrorMessage,
   } = useJsonMutation();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const {
+    sendJsonRequest: sendCrawlRequest,
+    isSubmitting: crawlStartIsInFlight,
+    errorMessage: crawlStartErrorMessage,
+  } = useJsonMutation();
 
   const useCaseCount = useCasesResource.data?.length ?? 0;
   const actionCount = actionsResource.data?.length ?? 0;
@@ -85,6 +101,7 @@ export default function WebsiteDetailPage(): ReactElement {
     "screenshot run",
     "screenshot runs",
   );
+  const crawlRunCountText = formatCount(crawlRuns.length, "crawl run", "crawl runs");
 
   /**
    * POSTs a new screenshot run for this website and, when the server recorded
@@ -110,6 +127,28 @@ export default function WebsiteDetailPage(): ReactElement {
     void takeScreenshot();
   };
 
+  /**
+   * POSTs a new crawl run for this website and, when the server started it,
+   * opens the run's own page to watch it. A refused start (e.g. a crawl is
+   * already running) shows the error alert in the Crawls section.
+   * @returns Resolves once the request (and any navigation) is done
+   */
+  const startCrawl = async (): Promise<void> => {
+    const result = await sendCrawlRequest("POST", crawlRunsApiUrl(websiteId));
+    if (!result.succeeded) return;
+    // The API is the contract for this shape, as in the typed resource hooks.
+    const startedRun = result.data as CrawlRunRecord;
+    void navigate(crawlRunDetailPath(websiteId, startedRun.id));
+  };
+
+  /**
+   * Starts a crawl without returning its promise, because a button's
+   * `onClick` expects a plain void callback.
+   */
+  const handleCrawlClick = (): void => {
+    void startCrawl();
+  };
+
   /** Opens the delete confirmation dialog. */
   const handleDeleteClick = (): void => {
     setDeleteDialogIsOpen(true);
@@ -121,8 +160,8 @@ export default function WebsiteDetailPage(): ReactElement {
   };
 
   /**
-   * DELETEs the website (the server soft deletes its use cases and actions
-   * with it) and, when that succeeds, returns to the website list. On failure
+   * DELETEs the website (the server soft deletes its use cases, actions,
+   * screenshot runs, scripts, and crawls with it) and, when that succeeds, returns to the website list. On failure
    * the dialog stays open and shows the server's reason.
    * @returns Resolves once the request (and any navigation) is done
    */
@@ -211,6 +250,16 @@ export default function WebsiteDetailPage(): ReactElement {
             takeScreenshotErrorMessage={screenshotErrorMessage}
           />
 
+          <CrawlRunsSection
+            websiteId={website.id}
+            runs={crawlRuns}
+            isLoading={crawlRunsResource.isLoading}
+            errorMessage={crawlRunsResource.errorMessage}
+            isStartingCrawl={crawlStartIsInFlight}
+            startCrawlErrorMessage={crawlStartErrorMessage}
+            onCrawlClick={handleCrawlClick}
+          />
+
           <WebsiteItemListSection
             itemKind={USE_CASE_KIND}
             websiteId={website.id}
@@ -227,7 +276,7 @@ export default function WebsiteDetailPage(): ReactElement {
           <ConfirmDeleteDialog
             isOpen={deleteDialogIsOpen}
             title="Delete website?"
-            message={`"${website.name}" will be deleted, along with its ${useCaseCountText}, ${actionCountText}, and ${screenshotRunCountText}.`}
+            message={`"${website.name}" will be deleted, along with its ${useCaseCountText}, ${actionCountText}, ${screenshotRunCountText}, and ${crawlRunCountText}.`}
             isDeleting={isSubmitting}
             errorMessage={deleteErrorMessage}
             onCancel={handleDeleteCancel}

@@ -8,10 +8,12 @@ import {
   buildActionScriptRecord,
   buildActionScriptRunRecord,
   buildJsonResponse,
+  buildScriptModelCatalog,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
   countRequests,
   createDeferred,
+  readProbeAfterLanding,
   renderPageRoutes,
   stubFetchRoutes,
   type FetchStub,
@@ -24,6 +26,13 @@ const ACTION_TEST_CASE = ITEM_KIND_TEST_CASES[1];
 const ACTION_PATH = "/websites/website-1/actions/item-1";
 const ACTION_API_URL = "/api/websites/website-1/actions/item-1";
 const SCRIPTS_API_URL = `${ACTION_API_URL}/scripts`;
+const SCRIPT_MODELS_API_URL = "/api/script-models";
+
+/** Matches the Model dropdown, whose accessible name also carries the chosen model. */
+const MODEL_SELECT_NAME = /^Model/;
+
+/** Matches the Effort dropdown, whose accessible name also carries the chosen level. */
+const EFFORT_SELECT_NAME = /^Effort/;
 
 /**
  * Builds the runs url of one script of the action under test.
@@ -79,8 +88,51 @@ function stubLoadedAction(
     "GET /api/websites/website-1": { status: 200, body: buildWebsiteRecord() },
     [`GET ${ACTION_API_URL}`]: { status: 200, body: buildWebsiteItemRecord() },
     [`GET ${SCRIPTS_API_URL}`]: { status: 200, body: scripts },
+    [`GET ${SCRIPT_MODELS_API_URL}`]: { status: 200, body: buildScriptModelCatalog() },
     ...extraRoutes,
   });
+}
+
+/**
+ * Waits until the model list has loaded and "Convert to script" can be
+ * clicked.
+ * @returns The enabled Convert button
+ */
+async function waitForConvertButton(): Promise<HTMLElement> {
+  const convertButton = await screen.findByRole("button", { name: "Convert to script" });
+  await waitFor(() => {
+    expect(convertButton).toBeEnabled();
+  });
+  return convertButton;
+}
+
+/**
+ * Builds what `useJsonMutation` sends for a convert request with this choice.
+ * @param modelId - The chosen model's id
+ * @param effort - The chosen effort level, or null
+ * @returns The fetch init the stub should have received
+ */
+function buildConvertRequestInit(modelId: string, effort: string | null): RequestInit {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ modelId, effort }),
+  };
+}
+
+/**
+ * Picks an option from one of the MUI select dropdowns.
+ * @param user - The user-event session
+ * @param selectName - The dropdown's accessible name pattern
+ * @param optionName - The option's text
+ */
+async function pickFromSelect(
+  user: ReturnType<typeof userEvent.setup>,
+  selectName: RegExp,
+  optionName: string,
+): Promise<void> {
+  await user.click(screen.getByRole("combobox", { name: selectName }));
+  await user.click(await screen.findByRole("option", { name: optionName }));
 }
 
 describe("ActionDetailPage", () => {
@@ -90,6 +142,7 @@ describe("ActionDetailPage", () => {
       renderPage: renderActionDetailPage,
       buildPageLoadRoutes: (itemApiUrl) => ({
         [`GET ${itemApiUrl}/scripts`]: { status: 200, body: [] },
+        [`GET ${SCRIPT_MODELS_API_URL}`]: { status: 200, body: buildScriptModelCatalog() },
       }),
     });
   });
@@ -105,7 +158,7 @@ describe("ActionDetailPage", () => {
       renderActionDetailPage();
 
       expect(await screen.findByText("No scripts yet.")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Convert to script" })).toBeEnabled();
+      await waitForConvertButton();
       expect(screen.queryByRole("heading", { name: /Runs of version/ })).not.toBeInTheDocument();
       const requestedUrls = fetchStub.mock.calls.map(([requestedUrl]) => String(requestedUrl));
       expect(requestedUrls.some((requestedUrl) => requestedUrl.endsWith("/runs"))).toBe(false);
@@ -179,7 +232,7 @@ describe("ActionDetailPage", () => {
       renderActionDetailPage();
       await screen.findByRole("heading", { name: "Version 1" });
 
-      await user.click(screen.getByRole("button", { name: "Convert to script" }));
+      await user.click(await waitForConvertButton());
 
       expect(screen.getByRole("button", { name: "Converting…" })).toBeDisabled();
       expect(screen.getByRole("progressbar", { name: "Converting to script" })).toBeInTheDocument();
@@ -191,7 +244,10 @@ describe("ActionDetailPage", () => {
       expect(await screen.findByRole("heading", { name: "Version 2" })).toBeInTheDocument();
       expect(screen.getByLabelText("Script code")).toHaveTextContent("// version two, just made");
       expect(screen.getByRole("button", { name: "Convert to script" })).toBeEnabled();
-      expect(fetchStub).toHaveBeenCalledWith(SCRIPTS_API_URL, { method: "POST" });
+      expect(fetchStub).toHaveBeenCalledWith(
+        SCRIPTS_API_URL,
+        buildConvertRequestInit("claude-opus-5-5", "high"),
+      );
       expect(countRequests(fetchStub, "GET", SCRIPTS_API_URL)).toBe(1);
       await waitFor(() => {
         expect(countRequests(fetchStub, "GET", runsApiUrl("script-3"))).toBe(1);
@@ -209,7 +265,7 @@ describe("ActionDetailPage", () => {
       renderActionDetailPage();
       await screen.findByText("No scripts yet.");
 
-      await user.click(screen.getByRole("button", { name: "Convert to script" }));
+      await user.click(await waitForConvertButton());
 
       expect(await screen.findByRole("alert")).toHaveTextContent(
         "Could not convert: ANTHROPIC_API_KEY is not set in .env.local",
@@ -300,6 +356,193 @@ describe("ActionDetailPage", () => {
 
       expect(screen.getByRole("status")).toHaveTextContent("Passed");
       expect(historyButtons[1]).toHaveAttribute("aria-current", "true");
+    });
+  });
+
+  describe("model choice", () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("starts on the catalog's default model and effort, naming the model id and its fallback", async () => {
+      stubLoadedAction([]);
+
+      renderActionDetailPage();
+
+      await waitForConvertButton();
+      expect(screen.getByRole("combobox", { name: MODEL_SELECT_NAME })).toHaveTextContent(
+        "Claude Opus 5.5",
+      );
+      expect(screen.getByRole("combobox", { name: EFFORT_SELECT_NAME })).toHaveTextContent("high");
+      expect(
+        screen.getByText("claude-opus-5-5 · If it declines, Claude Opus 4.8 answers instead"),
+      ).toBeInTheDocument();
+    });
+
+    it("sends the picked model and effort level with the conversion", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedAction([], {
+        [`POST ${SCRIPTS_API_URL}`]: { status: 503, body: { error: "stop here" } },
+      });
+      renderActionDetailPage();
+      await waitForConvertButton();
+
+      await pickFromSelect(user, MODEL_SELECT_NAME, "Claude Opus 4.6");
+      await pickFromSelect(user, EFFORT_SELECT_NAME, "max");
+      await user.click(screen.getByRole("button", { name: "Convert to script" }));
+
+      await screen.findByText(/Could not convert: stop here/);
+      expect(fetchStub).toHaveBeenCalledWith(
+        SCRIPTS_API_URL,
+        buildConvertRequestInit("claude-opus-4-6", "max"),
+      );
+    });
+
+    it("keeps the effort level when the new model offers it, and falls back to high when it does not", async () => {
+      const user = userEvent.setup();
+      stubLoadedAction([]);
+      renderActionDetailPage();
+      await waitForConvertButton();
+
+      await pickFromSelect(user, MODEL_SELECT_NAME, "Claude Opus 4.6");
+      expect(screen.getByRole("combobox", { name: EFFORT_SELECT_NAME })).toHaveTextContent("high");
+      expect(screen.getByText("claude-opus-4-6 · No fallback for this model")).toBeInTheDocument();
+
+      await pickFromSelect(user, MODEL_SELECT_NAME, "Claude Opus 5.5");
+      await pickFromSelect(user, EFFORT_SELECT_NAME, "xhigh");
+      await pickFromSelect(user, MODEL_SELECT_NAME, "Claude Opus 4.6");
+
+      expect(screen.getByRole("combobox", { name: EFFORT_SELECT_NAME })).toHaveTextContent("high");
+    });
+
+    it("shows Standard and sends no effort level for a model with no effort setting", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedAction([], {
+        [`POST ${SCRIPTS_API_URL}`]: { status: 503, body: { error: "stop here" } },
+      });
+      renderActionDetailPage();
+      await waitForConvertButton();
+
+      await pickFromSelect(user, MODEL_SELECT_NAME, "Claude Haiku 4.5");
+
+      const effortSelect = screen.getByRole("combobox", { name: EFFORT_SELECT_NAME });
+      expect(effortSelect).toHaveTextContent("Standard");
+      expect(effortSelect).toHaveAttribute("aria-disabled", "true");
+      expect(screen.getByText("This model has no effort setting")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Convert to script" }));
+      await screen.findByText(/Could not convert: stop here/);
+      expect(fetchStub).toHaveBeenCalledWith(
+        SCRIPTS_API_URL,
+        buildConvertRequestInit("claude-haiku-4-5-20251001", null),
+      );
+    });
+
+    it("keeps Convert disabled while the model list loads", () => {
+      const pendingCatalog = createDeferred<Response>();
+      stubLoadedAction([], { [`GET ${SCRIPT_MODELS_API_URL}`]: () => pendingCatalog.promise });
+
+      renderActionDetailPage();
+
+      return screen.findByText("Loading models…").then(() => {
+        expect(screen.getByRole("button", { name: "Convert to script" })).toBeDisabled();
+      });
+    });
+
+    it("says why the model list could not load, and keeps Convert disabled", async () => {
+      stubLoadedAction([], {
+        [`GET ${SCRIPT_MODELS_API_URL}`]: {
+          status: 503,
+          body: { error: "ANTHROPIC_API_KEY is not set in .env.local" },
+        },
+      });
+
+      renderActionDetailPage();
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Could not load models: ANTHROPIC_API_KEY is not set in .env.local",
+      );
+      expect(screen.getByRole("button", { name: "Convert to script" })).toBeDisabled();
+    });
+
+    it("labels each version with the model and effort that wrote it", async () => {
+      stubLoadedAction(
+        [
+          buildActionScriptRecord({ id: "script-2", modelId: "claude-haiku-4-5-20251001", effort: null }),
+          buildActionScriptRecord({ id: "script-1", modelId: "claude-opus-5-5", effort: "low" }),
+        ],
+        { [`GET ${runsApiUrl("script-2")}`]: { status: 200, body: [] } },
+      );
+
+      renderActionDetailPage();
+
+      await screen.findByRole("heading", { name: "Version 2" });
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Claude Haiku 4\.5 \(claude-haiku-4-5-20251001\) · Standard effort · START_URL/),
+        ).toBeInTheDocument();
+      });
+      const versionButtons = within(screen.getByRole("list", { name: "Versions" })).getAllByRole("button");
+      expect(versionButtons[1]).toHaveTextContent("Claude Opus 5.5 (claude-opus-5-5) · low effort");
+    });
+  });
+
+  describe("out-of-date versions and comparing", () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("marks versions generated from a different title or description, and explains it on the selected one", async () => {
+      stubLoadedAction(
+        [
+          buildActionScriptRecord({ id: "script-3" }),
+          buildActionScriptRecord({ id: "script-2", actionTitle: "Sign in" }),
+          buildActionScriptRecord({ id: "script-1", actionTitle: "Sign in", actionDescription: "Old text" }),
+        ],
+        {
+          [`GET ${runsApiUrl("script-3")}`]: { status: 200, body: [] },
+          [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+        },
+      );
+      const user = userEvent.setup();
+      renderActionDetailPage();
+      await screen.findByRole("heading", { name: "Version 3" });
+
+      const versionButtons = within(screen.getByRole("list", { name: "Versions" })).getAllByRole("button");
+      expect(versionButtons.map((versionButton) => versionButton.textContent.includes("Out of date"))).toEqual(
+        [false, true, true],
+      );
+      expect(screen.queryByText(/This version was generated from a different/)).not.toBeInTheDocument();
+
+      await user.click(versionButtons[2]);
+
+      expect(
+        await screen.findByText(/This version was generated from a different title and description/),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Old text")).toBeInTheDocument();
+    });
+
+    it("links to the comparison page once there are two versions, carrying this page as the return state", async () => {
+      const user = userEvent.setup();
+      stubLoadedAction([newerScript, olderScript], {
+        [`GET ${runsApiUrl("script-2")}`]: { status: 200, body: [] },
+      });
+      renderActionDetailPage();
+
+      await user.click(await screen.findByRole("link", { name: "Compare versions" }));
+
+      const landing = await readProbeAfterLanding(`${ACTION_PATH}/scripts/compare`);
+      expect(landing.state).toBe(JSON.stringify({ returnTo: ACTION_PATH }));
+    });
+
+    it("offers no comparison with a single version", async () => {
+      stubLoadedAction([olderScript], {
+        [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+      });
+
+      renderActionDetailPage();
+
+      await screen.findByRole("heading", { name: "Version 1" });
+      expect(screen.queryByRole("link", { name: "Compare versions" })).not.toBeInTheDocument();
     });
   });
 });

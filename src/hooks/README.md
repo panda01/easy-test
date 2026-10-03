@@ -13,6 +13,11 @@ than inline in a component.
 | `useRecordListWithAdditions` | `{ records, isLoading, errorMessage, addRecord }`: the generic "fetched list plus rows a POST just created" behind the two hooks below |
 | `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript }` for an action's saved script versions |
 | `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun }` for one script's runs; a `null` script id fetches nothing |
+| `useScriptModels` | Typed `useJsonResource` wrapper for `GET /api/script-models`: the live model list, each model's effort levels and fallback, and the default choice |
+| `useCrawlRuns` | Typed `useJsonResource` wrapper for a website's crawl runs (newest first, no pages); exports `CrawlRunRecord` |
+| `usePolledJsonResource` | `useJsonResource` plus `pollErrorMessage`, GETting the url again every interval while a `keepPolling(data)` check says so; see below |
+| `useCrawlRunProgress` | One crawl run with its page summaries, polled every 2 s while it is `running` (`CRAWL_RUN_POLL_INTERVAL_MS`); exports `CrawlRunWithPagesRecord`, `CrawledPageSummaryRecord` |
+| `useCrawledPage` | One crawled page in full (aria snapshot and links); a `null` page id fetches nothing |
 | `useWebsiteItemDeletion` | The delete dialog's state and handlers shared by the use case and action pages: DELETE, then a history-aware return to the website |
 | `useJsonMutation` | `{ sendJsonRequest, isSubmitting, errorMessage }` for `POST`/`PUT`/`DELETE` |
 | `useRequiredRouteParam` | A `:param` the matched route is guaranteed to have, as `string` |
@@ -67,6 +72,28 @@ records are kept only while a caller-supplied check says they belong to the
 list on screen (the same action / the same script), and a fetched record
 whose id was also added is dropped. `useScreenshotRuns` predates it and is
 left as is.
+
+## `usePolledJsonResource`: watching a background crawl
+
+A crawl runs in the background on the server, so its page re-fetches the run
+until it ends. `usePolledJsonResource(url, keepPolling, intervalMs)`:
+
+- reports `isLoading` only until the **first** response for the url - later
+  polls replace `data` in place, with no spinner flash;
+- schedules the next GET only after the previous one finished (no
+  overlapping requests), with a `setTimeout` cleared on unmount or url change
+  (StrictMode-safe), plus the usual `cancelled` flag on each fetch;
+- on a failed **re-poll** keeps the last good `data`, sets `pollErrorMessage`,
+  and keeps polling - a dev server restart briefly 5xx's the Vite proxy, and
+  the next poll then shows the run as `interrupted`. A failed **first** load is
+  `errorMessage` and stops there;
+- reads `keepPolling` on every render rather than as an effect dependency, so
+  an inline function is fine.
+
+Tests drive it with `vi.useFakeTimers({ toFake: ["setTimeout",
+"clearTimeout"] })` and `act(() => vi.advanceTimersByTimeAsync(ms))`, then
+assert synchronously - Testing Library's `waitFor` / `findBy` do not advance
+Vitest's fake timers.
 
 `useActionScriptRuns` takes a `null` script id while the action has no script
 yet. That passes a `null` url to `useJsonResource`, which stays idle, so the

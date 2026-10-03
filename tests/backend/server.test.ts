@@ -4,8 +4,8 @@ import express from "express";
 import path from "node:path";
 
 /**
- * server.ts registers the website, use case, action, Playwright, and action
- * script controllers, and each of them imports dbService - whose module body
+ * server.ts registers the website, use case, action, Playwright, action
+ * script, and crawl run controllers, and each of them imports dbService - whose module body
  * constructs a real PrismaClient. Every exported dbService function is
  * replaced so loading the full app never builds a client, and the wiring
  * tests below can choose what a query returns.
@@ -38,6 +38,14 @@ const mockDbService = vi.hoisted(() => ({
   listActionScriptRunsForScript: vi.fn(),
   findActionScriptRunForScript: vi.fn(),
   createActionScriptRunForScript: vi.fn(),
+  listCrawlRunsForWebsite: vi.fn(),
+  findCrawlRunForWebsite: vi.fn(),
+  createCrawlRunForWebsite: vi.fn(),
+  recordCrawledPage: vi.fn(),
+  finishCrawlRun: vi.fn(),
+  markRunningCrawlRunsInterrupted: vi.fn(),
+  listCrawledPageSummariesForRun: vi.fn(),
+  findCrawledPageForRun: vi.fn(),
 }));
 
 /** The Playwright service is replaced so loading the full app can never launch a browser. */
@@ -50,20 +58,40 @@ const mockScriptGenerationService = vi.hoisted(() => ({
   convertActionToScript: vi.fn(),
 }));
 
+/** The model catalog is replaced so loading the full app can never call the Models API. */
+const mockScriptModelService = vi.hoisted(() => ({
+  listScriptModels: vi.fn(),
+  findScriptModel: vi.fn(),
+  chooseDefaultScriptModel: vi.fn(),
+}));
+
 /** The script runner is replaced so loading the full app can never start node or a browser. */
 const mockScriptRunnerService = vi.hoisted(() => ({
   FAILURE_SCREENSHOT_FILE_NAME: "failure.png",
   runPlaywrightScript: vi.fn(),
 }));
 
+/** Crawling is replaced so loading the full app can never start a crawl or touch crawl runs at boot. */
+const mockCrawlRunService = vi.hoisted(() => ({
+  startCrawlRun: vi.fn(),
+  markUnfinishedCrawlRunsInterrupted: vi.fn(),
+}));
+
 vi.mock("../../server/services/dbService.js", () => mockDbService);
+vi.mock("../../server/services/crawlRunService.js", () => mockCrawlRunService);
 vi.mock("../../server/services/playwrightService.js", () => mockPlaywrightService);
 vi.mock("../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
 vi.mock("../../server/services/scriptRunnerService.js", () => mockScriptRunnerService);
+vi.mock("../../server/services/scriptModelService.js", () => mockScriptModelService);
 
 import { app, startListening } from "../../server/server.js";
 import { resolveActionScriptDirectory } from "../../server/utils/resolveActionScriptDirectory.js";
 import { resolveScreenshotDirectory } from "../../server/utils/resolveScreenshotDirectory.js";
+
+// Read right after the import ran server.ts's module body, before any
+// `beforeEach` resets the mocks' call history.
+const interruptedMarkCallsAtImport =
+  mockCrawlRunService.markUnfinishedCrawlRunsInterrupted.mock.calls.length;
 
 // Dates are ISO strings because that is how they cross the wire.
 const sampleWebsite = {
@@ -212,6 +240,45 @@ describe("server.ts", () => {
       sampleWebsite.id,
       sampleAction.id,
     );
+  });
+
+  it("wires the script model route into the full app", async () => {
+    mockScriptModelService.listScriptModels.mockResolvedValue([]);
+    mockScriptModelService.chooseDefaultScriptModel.mockReturnValue(null);
+
+    const res = await request(app).get("/api/script-models");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ models: [], defaultModelId: null, defaultEffort: null });
+  });
+
+  it("wires the crawl run routes into the full app", async () => {
+    const runningCrawlRun = {
+      id: "crawl-run-1",
+      websiteId: sampleWebsite.id,
+      startUrl: sampleWebsite.url,
+      status: "running",
+    };
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.listCrawlRunsForWebsite.mockResolvedValue([runningCrawlRun]);
+    mockCrawlRunService.startCrawlRun.mockResolvedValue({
+      crawlStarted: true,
+      crawlRun: runningCrawlRun,
+      crawlCompletion: Promise.resolve(),
+    });
+
+    const listResponse = await request(app).get(`/api/websites/${sampleWebsite.id}/crawl-runs`);
+    const startResponse = await request(app).post(`/api/websites/${sampleWebsite.id}/crawl-runs`);
+
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body).toEqual([runningCrawlRun]);
+    expect(startResponse.status).toBe(201);
+    expect(startResponse.body).toEqual(runningCrawlRun);
+  });
+
+  it("does not mark crawl runs interrupted when imported under test (that boot step only runs with the real listener)", () => {
+    // The module body ran once, at import, with NODE_ENV=test.
+    expect(interruptedMarkCallsAtImport).toBe(0);
   });
 
   it("hands the action script routes the directory resolved from ACTION_SCRIPT_DIR at boot", async () => {

@@ -7,10 +7,21 @@ import {
   type ScreenshotRun,
   type ActionScript,
   type ActionScriptRun,
+  type CrawlRun,
+  type CrawledPage,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 
-export type { Website, UseCase, Action, ScreenshotRun, ActionScript, ActionScriptRun };
+export type {
+  Website,
+  UseCase,
+  Action,
+  ScreenshotRun,
+  ActionScript,
+  ActionScriptRun,
+  CrawlRun,
+  CrawledPage,
+};
 
 /**
  * `DATABASE_URL` is read at MODULE LOAD time, which means `../bootEnv.js` must
@@ -110,6 +121,8 @@ export interface ActionScriptInput {
   ruleViolations: string[];
   /** The model that actually wrote the script. */
   modelId: string;
+  /** The effort level sent with the request, or null for a model with no effort setting ("Standard"). */
+  effort: string | null;
 }
 
 /**
@@ -134,6 +147,92 @@ export interface ActionScriptRunInput {
   /** How long the process ran, in milliseconds. */
   durationMs: number;
 }
+
+/**
+ * Every value `CrawlRun.status` can hold (see the model's doc comment in
+ * `../prisma/schema.prisma`).
+ */
+export type CrawlRunStatus =
+  | "running"
+  | "finished"
+  | "stoppedAtPageLimit"
+  | "stoppedAtTimeLimit"
+  | "failed"
+  | "interrupted";
+
+/**
+ * The statuses a crawl can end with. `interrupted` is set when the crawl's
+ * browser closed mid-crawl, and at boot for runs a restart left `running`.
+ */
+export type FinishedCrawlRunStatus = Exclude<CrawlRunStatus, "running">;
+
+/** The fields a caller supplies when starting a crawl run. */
+export interface CrawlRunInput {
+  /** The website's URL at crawl time - where the crawl starts. */
+  startUrl: string;
+  /** The most pages the crawl may visit. */
+  pageLimit: number;
+}
+
+/** A crawl's live progress counters, written each time a page is recorded. */
+export interface CrawlProgress {
+  /** Pages recorded so far, including the one being recorded now. */
+  visitedPageCount: number;
+  /** Links queued but not yet visited. */
+  waitingUrlCount: number;
+}
+
+/** How a crawl ended, written once when it finishes. */
+export interface CrawlRunFinish {
+  /** The status the crawl ended with. */
+  status: FinishedCrawlRunStatus;
+  /** Links still queued when it ended (0 when every reachable page was visited). */
+  waitingUrlCount: number;
+  /** Why the crawl failed, or null when it did not. */
+  errorMessage: string | null;
+  /** How long the whole crawl took, in milliseconds. */
+  durationMs: number;
+}
+
+/**
+ * The fields a caller supplies when recording one crawled page. Pages are
+ * create-only, so there is no matching "update" input.
+ */
+export interface CrawledPageInput {
+  /** The page whose link led here, or null for the start page. */
+  parentPageId: string | null;
+  /** The page's identity within the run: origin + path, no query or hash. */
+  url: string;
+  /** What the browser loaded: the first link that reached the page, hash dropped. */
+  requestedUrl: string;
+  /** Where the browser ended up after redirects and client-side navigation. */
+  finalUrl: string;
+  /** The page's position in visiting order, counting from 0. */
+  visitOrder: number;
+  /** How many links were followed from the start page to reach it. */
+  depth: number;
+  /** True only when navigation completed, the page answered below HTTP 400, and its aria snapshot was taken. */
+  succeeded: boolean;
+  /** The main response's HTTP status, or null when there was no response. */
+  httpStatus: number | null;
+  /** Why the page failed, or null when it succeeded. */
+  errorMessage: string | null;
+  /** The page's `<title>`, or null when it could not be read. */
+  title: string | null;
+  /** Playwright's YAML aria snapshot of `<body>`, or null when it could not be taken. */
+  ariaSnapshot: string | null;
+  /** Every same-origin link found on the page, normalized. */
+  linkedUrls: string[];
+  /** How long visiting the page took, in milliseconds. */
+  durationMs: number;
+}
+
+/**
+ * A crawled page without its two large fields - what the crawl run's page
+ * list returns, because the UI polls that list while the crawl runs. The full
+ * page comes from `findCrawledPageForRun`.
+ */
+export type CrawledPageSummary = Omit<CrawledPage, "ariaSnapshot" | "linkedUrls">;
 
 /**
  * Checks whether a thrown value carries the given Prisma error code.
@@ -257,9 +356,9 @@ export async function updateWebsite(
 
 /**
  * Soft deletes an active website AND its active use cases, actions, screenshot
- * runs, action scripts, and action script runs.
+ * runs, action scripts, action script runs, crawl runs, and crawled pages.
  *
- * All six updates run in one transaction and share one `deletedAt`
+ * All eight updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
@@ -303,6 +402,14 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.actionScriptRun.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.crawlRun.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.crawledPage.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -689,4 +796,182 @@ export async function createActionScriptRunForScript(
     data: { ...data, websiteId, actionId, actionScriptId },
   });
   return created;
+}
+
+// === Crawl runs ===
+// A run is created `running`, gains pages while the crawl works in the
+// background, and is finished once. Pages are create-only. Both are soft
+// deleted only through `softDeleteWebsite`.
+
+/**
+ * Lists a website's active crawl runs, newest first.
+ * @param websiteId - The owning website's cuid
+ * @returns The website's active crawl runs ordered by `createdAt` descending
+ */
+export async function listCrawlRunsForWebsite(websiteId: string): Promise<CrawlRun[]> {
+  const crawlRuns = await prisma.crawlRun.findMany({
+    where: { websiteId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+  });
+  return crawlRuns;
+}
+
+/**
+ * Looks up one active crawl run, scoped to the website that owns it.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns The active crawl run, or null when it does not exist, was soft deleted, or belongs to another website
+ */
+export async function findCrawlRunForWebsite(
+  websiteId: string,
+  crawlRunId: string,
+): Promise<CrawlRun | null> {
+  const crawlRun = await prisma.crawlRun.findFirst({
+    where: { id: crawlRunId, websiteId, deletedAt: null },
+  });
+  return crawlRun;
+}
+
+/**
+ * Records the start of a crawl: a new run with `status: "running"` and both
+ * progress counters at 0.
+ * @param websiteId - The owning website's cuid
+ * @param data - Where the crawl starts and its page limit
+ * @returns The created row
+ */
+export async function createCrawlRunForWebsite(
+  websiteId: string,
+  data: CrawlRunInput,
+): Promise<CrawlRun> {
+  const created = await prisma.crawlRun.create({
+    data: { ...data, websiteId, status: "running" },
+  });
+  return created;
+}
+
+/**
+ * Records one visited page and the run's new progress counters - but only
+ * while the run is still active and running.
+ *
+ * Both writes run in one transaction, and the run's counter update comes
+ * first with `status: "running", deletedAt: null` in its condition. When it
+ * matches no row (the run's website was deleted, so the run was soft deleted
+ * with it), nothing is written and null tells the crawler to stop. The row
+ * lock that update takes also serialises it with `softDeleteWebsite`, so a
+ * page can never be written as active after its run was deleted.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @param progress - The run's counters after this page
+ * @param data - What visiting the page produced
+ * @returns The created page, or null when the run is no longer active
+ */
+export async function recordCrawledPage(
+  websiteId: string,
+  crawlRunId: string,
+  progress: CrawlProgress,
+  data: CrawledPageInput,
+): Promise<CrawledPage | null> {
+  /**
+   * The transaction body. Declared with an explicit parameter type because
+   * the overloaded `$transaction` signature does not contextually type an
+   * inline callback (tsc reports an implicit any).
+   * @param transaction - The transaction-scoped Prisma client
+   * @returns The created page, or null when the run is no longer active
+   */
+  const recordPageWhileRunIsActive = async (
+    transaction: Prisma.TransactionClient,
+  ): Promise<CrawledPage | null> => {
+    const crawlRunUpdate = await transaction.crawlRun.updateMany({
+      where: { id: crawlRunId, websiteId, status: "running", deletedAt: null },
+      data: {
+        visitedPageCount: progress.visitedPageCount,
+        waitingUrlCount: progress.waitingUrlCount,
+      },
+    });
+    const runIsNoLongerActive = crawlRunUpdate.count === 0;
+    if (runIsNoLongerActive) {
+      return null;
+    }
+    const created = await transaction.crawledPage.create({
+      data: { ...data, crawlRunId, websiteId },
+    });
+    return created;
+  };
+
+  const recordedPage = await prisma.$transaction(recordPageWhileRunIsActive);
+  return recordedPage;
+}
+
+/**
+ * Records how a running crawl ended. Only an active run that is still
+ * `running` is changed, so finishing a run whose website was deleted
+ * meanwhile is a harmless no-op.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @param finish - The final status, waiting links, error, and duration
+ * @returns True when the run was finished; false when no active running run matched
+ */
+export async function finishCrawlRun(
+  websiteId: string,
+  crawlRunId: string,
+  finish: CrawlRunFinish,
+): Promise<boolean> {
+  const crawlRunUpdate = await prisma.crawlRun.updateMany({
+    where: { id: crawlRunId, websiteId, status: "running", deletedAt: null },
+    data: { ...finish, finishedAt: new Date() },
+  });
+  const runWasFinished = crawlRunUpdate.count > 0;
+  return runWasFinished;
+}
+
+/**
+ * Marks every active run still `running` as `interrupted`. Called once at
+ * boot, before the server accepts requests: a crawl only runs inside the
+ * server process, so any run still `running` then was cut off by a restart.
+ * @returns How many runs were marked interrupted
+ */
+export async function markRunningCrawlRunsInterrupted(): Promise<number> {
+  const crawlRunUpdate = await prisma.crawlRun.updateMany({
+    where: { status: "running", deletedAt: null },
+    data: { status: "interrupted", finishedAt: new Date() },
+  });
+  return crawlRunUpdate.count;
+}
+
+/**
+ * Lists a crawl run's active pages in visiting order, without their aria
+ * snapshots and link lists (see `CrawledPageSummary`).
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns The run's page summaries ordered by `visitOrder`
+ */
+export async function listCrawledPageSummariesForRun(
+  websiteId: string,
+  crawlRunId: string,
+): Promise<CrawledPageSummary[]> {
+  const pageSummaries = await prisma.crawledPage.findMany({
+    where: { websiteId, crawlRunId, deletedAt: null },
+    orderBy: { visitOrder: "asc" },
+    omit: { ariaSnapshot: true, linkedUrls: true },
+  });
+  return pageSummaries;
+}
+
+/**
+ * Looks up one active crawled page in full, scoped to the website and run
+ * that own it.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @param crawledPageId - The page's cuid
+ * @returns The active page, or null when it does not exist, was soft deleted, or belongs to another run
+ */
+export async function findCrawledPageForRun(
+  websiteId: string,
+  crawlRunId: string,
+  crawledPageId: string,
+): Promise<CrawledPage | null> {
+  const crawledPage = await prisma.crawledPage.findFirst({
+    where: { id: crawledPageId, websiteId, crawlRunId, deletedAt: null },
+  });
+  return crawledPage;
 }

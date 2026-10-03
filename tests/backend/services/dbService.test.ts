@@ -13,6 +13,8 @@ const {
   mockScreenshotRunDelegate,
   mockActionScriptDelegate,
   mockActionScriptRunDelegate,
+  mockCrawlRunDelegate,
+  mockCrawledPageDelegate,
   mockTransaction,
 } = vi.hoisted(
   () => {
@@ -21,8 +23,8 @@ const {
     /**
      * Builds a stand-in for one Prisma model delegate (`prisma.website`,
      * `prisma.useCase`, `prisma.action`, `prisma.screenshotRun`,
-     * `prisma.actionScript`, `prisma.actionScriptRun`) carrying every method
-     * dbService calls.
+     * `prisma.actionScript`, `prisma.actionScriptRun`, `prisma.crawlRun`,
+     * `prisma.crawledPage`) carrying every method dbService calls.
      * @returns An object whose query methods are bare vitest mocks
      */
     function createMockModelDelegate() {
@@ -41,6 +43,8 @@ const {
     const screenshotRunDelegate = createMockModelDelegate();
     const actionScriptDelegate = createMockModelDelegate();
     const actionScriptRunDelegate = createMockModelDelegate();
+    const crawlRunDelegate = createMockModelDelegate();
+    const crawledPageDelegate = createMockModelDelegate();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
@@ -50,6 +54,8 @@ const {
       screenshotRun: screenshotRunDelegate,
       actionScript: actionScriptDelegate,
       actionScriptRun: actionScriptRunDelegate,
+      crawlRun: crawlRunDelegate,
+      crawledPage: crawledPageDelegate,
     };
 
     return {
@@ -59,10 +65,12 @@ const {
       mockScreenshotRunDelegate: screenshotRunDelegate,
       mockActionScriptDelegate: actionScriptDelegate,
       mockActionScriptRunDelegate: actionScriptRunDelegate,
+      mockCrawlRunDelegate: crawlRunDelegate,
+      mockCrawledPageDelegate: crawledPageDelegate,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
-        (callback: (transaction: typeof transactionClient) => Promise<boolean>) =>
+        (callback: (transaction: typeof transactionClient) => Promise<unknown>) =>
           callback(transactionClient),
       ),
     };
@@ -86,6 +94,8 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     screenshotRun = mockScreenshotRunDelegate;
     actionScript = mockActionScriptDelegate;
     actionScriptRun = mockActionScriptRunDelegate;
+    crawlRun = mockCrawlRunDelegate;
+    crawledPage = mockCrawledPageDelegate;
     $transaction = mockTransaction;
   },
 }));
@@ -118,6 +128,14 @@ import {
   listActionScriptRunsForScript,
   findActionScriptRunForScript,
   createActionScriptRunForScript,
+  listCrawlRunsForWebsite,
+  findCrawlRunForWebsite,
+  createCrawlRunForWebsite,
+  recordCrawledPage,
+  finishCrawlRun,
+  markRunningCrawlRunsInterrupted,
+  listCrawledPageSummariesForRun,
+  findCrawledPageForRun,
 } from "../../../server/services/dbService.js";
 
 const sampleWebsite = {
@@ -177,6 +195,7 @@ const sampleActionScript = {
   code: "import { chromium } from 'playwright';\n",
   ruleViolations: [],
   modelId: "claude-opus-5-5",
+  effort: "high",
   createdAt: new Date("2026-01-05T00:00:00.000Z"),
   updatedAt: new Date("2026-01-05T00:00:00.000Z"),
   deletedAt: null,
@@ -197,6 +216,49 @@ const sampleActionScriptRun = {
   durationMs: 3100,
   createdAt: new Date("2026-01-06T00:00:00.000Z"),
   updatedAt: new Date("2026-01-06T00:00:00.000Z"),
+  deletedAt: null,
+};
+
+const sampleCrawlRun = {
+  id: "crawl-run-1",
+  websiteId: "cuid-1",
+  startUrl: "https://example.com",
+  status: "running",
+  pageLimit: 50,
+  visitedPageCount: 0,
+  waitingUrlCount: 0,
+  errorMessage: null,
+  durationMs: null,
+  finishedAt: null,
+  createdAt: new Date("2026-01-07T00:00:00.000Z"),
+  updatedAt: new Date("2026-01-07T00:00:00.000Z"),
+  deletedAt: null,
+};
+
+/** The fields the crawler supplies for one page (see `CrawledPageInput`). */
+const sampleCrawledPageInput = {
+  parentPageId: "crawled-page-0",
+  url: "https://example.com/about",
+  requestedUrl: "https://example.com/about?ref=nav",
+  finalUrl: "https://example.com/about",
+  visitOrder: 1,
+  depth: 1,
+  succeeded: true,
+  httpStatus: 200,
+  errorMessage: null,
+  title: "About",
+  ariaSnapshot: '- heading "About" [level=1]',
+  linkedUrls: ["https://example.com/"],
+  durationMs: 950,
+};
+
+const sampleCrawledPage = {
+  ...sampleCrawledPageInput,
+  id: "crawled-page-1",
+  crawlRunId: "crawl-run-1",
+  websiteId: "cuid-1",
+  createdAt: new Date("2026-01-07T00:00:01.000Z"),
+  updatedAt: new Date("2026-01-07T00:00:01.000Z"),
   deletedAt: null,
 };
 
@@ -416,13 +478,15 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, and action script runs inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, crawl runs, and crawled pages inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 4 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 5 });
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 2 });
+      mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 30 });
 
       const websiteWasDeleted = await softDeleteWebsite("cuid-1");
 
@@ -453,15 +517,25 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(mockCrawledPageDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
     });
 
-    it("softDeleteWebsite writes one shared deletedAt timestamp to all six tables", async () => {
+    it("softDeleteWebsite writes one shared deletedAt timestamp to all eight tables", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 0 });
       const millisecondsBeforeCall = Date.now();
 
       await softDeleteWebsite("cuid-1");
@@ -475,6 +549,8 @@ describe("dbService", () => {
       const actionScriptRunDeletedAt = readDeletedAtWrittenBy(
         mockActionScriptRunDelegate.updateMany,
       );
+      const crawlRunDeletedAt = readDeletedAtWrittenBy(mockCrawlRunDelegate.updateMany);
+      const crawledPageDeletedAt = readDeletedAtWrittenBy(mockCrawledPageDelegate.updateMany);
 
       expect(websiteDeletedAt).toBeInstanceOf(Date);
       expect(useCaseDeletedAt).toBe(websiteDeletedAt);
@@ -482,6 +558,8 @@ describe("dbService", () => {
       expect(screenshotRunDeletedAt).toBe(websiteDeletedAt);
       expect(actionScriptDeletedAt).toBe(websiteDeletedAt);
       expect(actionScriptRunDeletedAt).toBe(websiteDeletedAt);
+      expect(crawlRunDeletedAt).toBe(websiteDeletedAt);
+      expect(crawledPageDeletedAt).toBe(websiteDeletedAt);
       const deletedAtMilliseconds = (websiteDeletedAt as Date).getTime();
       expect(deletedAtMilliseconds).toBeGreaterThanOrEqual(millisecondsBeforeCall);
       expect(deletedAtMilliseconds).toBeLessThanOrEqual(millisecondsAfterCall);
@@ -499,6 +577,8 @@ describe("dbService", () => {
       expect(mockScreenshotRunDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockCrawlRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockCrawledPageDelegate.updateMany).not.toHaveBeenCalled();
     });
 
     it("softDeleteWebsite propagates a failure inside the transaction", async () => {
@@ -827,6 +907,7 @@ describe("dbService", () => {
         code: "import { chromium } from 'playwright';\n",
         ruleViolations: ["Line 2: .fill( - sets a whole value at once; type with pressSequentially"],
         modelId: "claude-opus-5-5",
+        effort: "high",
       };
 
       const created = await createActionScriptForAction("cuid-1", "action-1", scriptInput);
@@ -915,6 +996,175 @@ describe("dbService", () => {
         },
       });
       expect(created).toBe(sampleActionScriptRun);
+    });
+  });
+
+  describe("crawl runs", () => {
+    it("listCrawlRunsForWebsite returns the website's active runs, newest first", async () => {
+      mockCrawlRunDelegate.findMany.mockResolvedValue([sampleCrawlRun]);
+
+      const crawlRuns = await listCrawlRunsForWebsite("cuid-1");
+
+      expect(mockCrawlRunDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(crawlRuns).toEqual([sampleCrawlRun]);
+    });
+
+    it("findCrawlRunForWebsite scopes the lookup to the website and to active rows", async () => {
+      mockCrawlRunDelegate.findFirst.mockResolvedValue(sampleCrawlRun);
+
+      const found = await findCrawlRunForWebsite("cuid-1", "crawl-run-1");
+
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledWith({
+        where: { id: "crawl-run-1", websiteId: "cuid-1", deletedAt: null },
+      });
+      expect(found).toBe(sampleCrawlRun);
+    });
+
+    it("findCrawlRunForWebsite returns null when no active run of that website matches", async () => {
+      mockCrawlRunDelegate.findFirst.mockResolvedValue(null);
+
+      expect(await findCrawlRunForWebsite("cuid-1", "other-run")).toBeNull();
+    });
+
+    it("createCrawlRunForWebsite inserts a running run under the website", async () => {
+      mockCrawlRunDelegate.create.mockResolvedValue(sampleCrawlRun);
+
+      const created = await createCrawlRunForWebsite("cuid-1", {
+        startUrl: "https://example.com",
+        pageLimit: 50,
+      });
+
+      expect(mockCrawlRunDelegate.create).toHaveBeenCalledWith({
+        data: {
+          startUrl: "https://example.com",
+          pageLimit: 50,
+          websiteId: "cuid-1",
+          status: "running",
+        },
+      });
+      expect(created).toBe(sampleCrawlRun);
+    });
+
+    it("recordCrawledPage updates the running run's counters, then inserts the page, inside one transaction", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockCrawledPageDelegate.create.mockResolvedValue(sampleCrawledPage);
+
+      const recorded = await recordCrawledPage(
+        "cuid-1",
+        "crawl-run-1",
+        { visitedPageCount: 2, waitingUrlCount: 7 },
+        sampleCrawledPageInput,
+      );
+
+      expect(recorded).toBe(sampleCrawledPage);
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+      expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "crawl-run-1", websiteId: "cuid-1", status: "running", deletedAt: null },
+        data: { visitedPageCount: 2, waitingUrlCount: 7 },
+      });
+      expect(mockCrawledPageDelegate.create).toHaveBeenCalledWith({
+        data: { ...sampleCrawledPageInput, crawlRunId: "crawl-run-1", websiteId: "cuid-1" },
+      });
+      const counterUpdateOrder = mockCrawlRunDelegate.updateMany.mock.invocationCallOrder[0];
+      const pageCreateOrder = mockCrawledPageDelegate.create.mock.invocationCallOrder[0];
+      expect(counterUpdateOrder).toBeLessThan(pageCreateOrder);
+    });
+
+    it("recordCrawledPage writes no page and returns null when the run is no longer active and running", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      const recorded = await recordCrawledPage(
+        "cuid-1",
+        "deleted-run",
+        { visitedPageCount: 3, waitingUrlCount: 0 },
+        sampleCrawledPageInput,
+      );
+
+      expect(recorded).toBeNull();
+      expect(mockCrawledPageDelegate.create).not.toHaveBeenCalled();
+    });
+
+    it("finishCrawlRun writes the outcome and finish time to the active running run only", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      const finish = {
+        status: "stoppedAtPageLimit" as const,
+        waitingUrlCount: 12,
+        errorMessage: null,
+        durationMs: 64000,
+      };
+
+      const runWasFinished = await finishCrawlRun("cuid-1", "crawl-run-1", finish);
+
+      expect(runWasFinished).toBe(true);
+      expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "crawl-run-1", websiteId: "cuid-1", status: "running", deletedAt: null },
+        data: { ...finish, finishedAt: expect.any(Date) },
+      });
+    });
+
+    it("finishCrawlRun returns false when no active running run matched", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      const runWasFinished = await finishCrawlRun("cuid-1", "deleted-run", {
+        status: "finished",
+        waitingUrlCount: 0,
+        errorMessage: null,
+        durationMs: 10,
+      });
+
+      expect(runWasFinished).toBe(false);
+    });
+
+    it("markRunningCrawlRunsInterrupted flips every active running run to interrupted and counts them", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 2 });
+
+      const interruptedRunCount = await markRunningCrawlRunsInterrupted();
+
+      expect(interruptedRunCount).toBe(2);
+      expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { status: "running", deletedAt: null },
+        data: { status: "interrupted", finishedAt: expect.any(Date) },
+      });
+    });
+
+    it("listCrawledPageSummariesForRun lists the run's active pages in visiting order, without snapshots or links", async () => {
+      const { ariaSnapshot: _ariaSnapshot, linkedUrls: _linkedUrls, ...pageSummary } =
+        sampleCrawledPage;
+      mockCrawledPageDelegate.findMany.mockResolvedValue([pageSummary]);
+
+      const pageSummaries = await listCrawledPageSummariesForRun("cuid-1", "crawl-run-1");
+
+      expect(mockCrawledPageDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", crawlRunId: "crawl-run-1", deletedAt: null },
+        orderBy: { visitOrder: "asc" },
+        omit: { ariaSnapshot: true, linkedUrls: true },
+      });
+      expect(pageSummaries).toEqual([pageSummary]);
+    });
+
+    it("findCrawledPageForRun scopes the lookup to the website, the run, and active rows", async () => {
+      mockCrawledPageDelegate.findFirst.mockResolvedValue(sampleCrawledPage);
+
+      const found = await findCrawledPageForRun("cuid-1", "crawl-run-1", "crawled-page-1");
+
+      expect(mockCrawledPageDelegate.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "crawled-page-1",
+          websiteId: "cuid-1",
+          crawlRunId: "crawl-run-1",
+          deletedAt: null,
+        },
+      });
+      expect(found).toBe(sampleCrawledPage);
+    });
+
+    it("findCrawledPageForRun returns null when no active page of that run matches", async () => {
+      mockCrawledPageDelegate.findFirst.mockResolvedValue(null);
+
+      expect(await findCrawledPageForRun("cuid-1", "crawl-run-1", "other-page")).toBeNull();
     });
   });
 });

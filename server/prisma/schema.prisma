@@ -31,8 +31,8 @@ generator client {
 ///
 /// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
 /// timestamp on the website's active use cases, actions, screenshot runs,
-/// action scripts, and action script runs) instead of removing the row. Every
-/// dbService query filters `deletedAt: null`.
+/// action scripts, action script runs, crawl runs, and crawled pages) instead
+/// of removing the row. Every dbService query filters `deletedAt: null`.
 ///
 /// Two per-website settings control WHEN the Playwright controller takes a
 /// screenshot, after the page's `load` event:
@@ -58,6 +58,8 @@ model Website {
   screenshotRuns          ScreenshotRun[]
   actionScripts           ActionScript[]
   actionScriptRuns        ActionScriptRun[]
+  crawlRuns               CrawlRun[]
+  crawledPages            CrawledPage[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -153,8 +155,12 @@ model ScreenshotRun {
 /// `code` is the complete `.mjs` source, run verbatim with `node`.
 /// `ruleViolations` is the warn-only text scan of `code` for features a real
 /// user could not use (e.g. "Line 14: .fill( - ..."); empty when clean.
-/// `modelId` is the model that actually answered (`response.model`) - normally
-/// claude-opus-5-5, or the fallback model when the first one declined.
+/// `modelId` is the model that actually answered (`response.model`) - the
+/// model chosen in the UI, or its fallback when the chosen one declined.
+/// `effort` is the effort level sent with the request (`low`, `medium`,
+/// `high`, `xhigh`, or `max`); a fallback inherits it. Null means "Standard"
+/// (the chosen model has no effort setting) - and also marks rows saved before
+/// this column existed.
 model ActionScript {
   id                String            @id @default(cuid())
   websiteId         String
@@ -168,6 +174,7 @@ model ActionScript {
   code              String
   ruleViolations    String[]
   modelId           String
+  effort            String?
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
   deletedAt         DateTime?
@@ -220,4 +227,103 @@ model ActionScriptRun {
   @@index([actionId])
   @@index([actionScriptId])
   @@map("action_script_runs")
+}
+
+/// One crawl of a website: a headless browser on this machine started at the
+/// website's URL, followed every same-origin `<a href>` it found (links only -
+/// it never clicks buttons), and recorded each page it reached as a
+/// `CrawledPage`. Belongs to exactly one website. Soft deleted together with
+/// it.
+///
+/// The crawl runs in the BACKGROUND: the row is created with
+/// `status: "running"`, pages are added (and the two counters updated) as they
+/// are visited, and the row is finished when the crawl ends. `status` is one
+/// of:
+/// - `running`: still crawling.
+/// - `finished`: every reachable page was visited.
+/// - `stoppedAtPageLimit`: `pageLimit` pages were visited with links still
+///   waiting.
+/// - `stoppedAtTimeLimit`: the crawl's time limit ran out with links waiting.
+/// - `failed`: the crawl itself broke (e.g. the browser could not launch);
+///   `errorMessage` says why. A page that 404s is NOT a failed crawl.
+/// - `interrupted`: the server restarted while it was running - either the
+///   crawl saw its browser close (Playwright closes it on SIGTERM) and
+///   stopped, or the next boot found the run still `running`.
+///
+/// `startUrl` is a snapshot of the website's URL at crawl time. `pageLimit` is
+/// the cap the crawl ran with. `visitedPageCount` and `waitingUrlCount` are the
+/// live progress counters (pages recorded so far, links queued but not yet
+/// visited). `durationMs` and `finishedAt` are null while the crawl runs.
+model CrawlRun {
+  id               String        @id @default(cuid())
+  websiteId        String
+  startUrl         String
+  status           String
+  pageLimit        Int
+  visitedPageCount Int           @default(0)
+  waitingUrlCount  Int           @default(0)
+  errorMessage     String?
+  durationMs       Int?
+  finishedAt       DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  deletedAt        DateTime?
+  website          Website       @relation(fields: [websiteId], references: [id])
+  pages            CrawledPage[]
+
+  @@index([websiteId])
+  @@map("crawl_runs")
+}
+
+/// One page a crawl visited. Belongs to exactly one crawl run (and,
+/// denormalized, its website). Create-only; soft deleted together with its
+/// website.
+///
+/// The pages of a run form a TREE: `parentPageId` points at the page where
+/// this page's link was first found, and is null only for the start page.
+/// `linkedUrls` holds every same-origin link found on the page (normalized),
+/// so the full link graph is kept too, not just the tree.
+///
+/// Three URLs are kept:
+/// - `url`: the page's identity within the run - origin + path, with the
+///   query string and hash dropped. Unique per run.
+/// - `requestedUrl`: what the browser actually loaded - the first link that
+///   reached the page, hash dropped (the query string is kept).
+/// - `finalUrl`: where the browser ended up after redirects and client-side
+///   navigation.
+///
+/// `visitOrder` counts from 0 in the order pages were visited (breadth first),
+/// and `depth` is the number of links followed from the start page.
+/// `succeeded` is true only when navigation completed, the page answered below
+/// HTTP 400, AND its aria snapshot was taken. `ariaSnapshot` is Playwright's
+/// YAML aria snapshot of `<body>`, or null when it could not be taken.
+model CrawledPage {
+  id           String        @id @default(cuid())
+  crawlRunId   String
+  websiteId    String
+  parentPageId String?
+  url          String
+  requestedUrl String
+  finalUrl     String
+  visitOrder   Int
+  depth        Int
+  succeeded    Boolean
+  httpStatus   Int?
+  errorMessage String?
+  title        String?
+  ariaSnapshot String?
+  linkedUrls   String[]
+  durationMs   Int
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  deletedAt    DateTime?
+  crawlRun     CrawlRun      @relation(fields: [crawlRunId], references: [id])
+  website      Website       @relation(fields: [websiteId], references: [id])
+  parentPage   CrawledPage?  @relation("CrawledPageTree", fields: [parentPageId], references: [id])
+  childPages   CrawledPage[] @relation("CrawledPageTree")
+
+  @@unique([crawlRunId, url])
+  @@index([websiteId])
+  @@index([parentPageId])
+  @@map("crawled_pages")
 }

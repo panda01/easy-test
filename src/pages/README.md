@@ -7,11 +7,13 @@ One component per route. Routes are declared in `../App.tsx`.
 | `HomePage.tsx` | `/` | "Hello World" plus the live `/api/health` status. |
 | `WebsiteListPage.tsx` | `/websites` | Every active website, newest first, plus "New website". |
 | `WebsiteCreatePage.tsx` | `/websites/new` | The website form. |
-| `WebsiteDetailPage.tsx` | `/websites/:websiteId` | One website, Take screenshot/Edit/Delete, its Screenshots section, and its Use cases and Actions sections. |
+| `WebsiteDetailPage.tsx` | `/websites/:websiteId` | One website, Take screenshot/Edit/Delete, its Screenshots and Crawls sections, and its Use cases and Actions sections. "Crawl website" starts a background crawl and opens its page. |
+| `CrawlRunPage.tsx` | `/websites/:websiteId/crawl-runs/:crawlRunId?page=` | One crawl: its `role="status"` outcome (live progress while running, re-fetched every 2 s), the "Site map" tree of every page it found, and the selected page in full with its aria snapshot. The selected page lives in `?page=` (replaced, not pushed) and defaults to the start page, so it survives a reload. |
 | `WebsiteEditPage.tsx` | `/websites/:websiteId/edit` | The website form, pre-filled. |
 | `WebsiteItemCreatePage.tsx` | `/websites/:websiteId/use-cases/new`, `.../actions/new` | The title/description form. |
 | `UseCaseDetailPage.tsx` | `/websites/:websiteId/use-cases/:itemId` | One use case, Edit/Delete. |
-| `ActionDetailPage.tsx` | `/websites/:websiteId/actions/:itemId` | One action, Edit/Delete, then its Scripts (Convert to script, versions, code) and the selected version's Runs (Run script, outcome, output, failure screenshot). |
+| `ActionDetailPage.tsx` | `/websites/:websiteId/actions/:itemId` | One action, Edit/Delete, then its Scripts (Model / Effort dropdowns, Convert to script, versions with model and effort and out-of-date marks, code, Compare versions) and the selected version's Runs (Run script, outcome, output, failure screenshot). The model choice lasts for the visit and starts on the server's default. |
+| `ActionScriptComparePage.tsx` | `/websites/:websiteId/actions/:itemId/scripts/compare?from=&to=` | Two of the action's script versions side by side - title, description, and code. "From" (left) defaults to the second newest and "To" (right) to the newest; both are kept in the query string (replaced, not pushed), so a comparison can be linked or reloaded. |
 | `WebsiteItemEditPage.tsx` | `/websites/:websiteId/use-cases/:itemId/edit`, `.../actions/:itemId/edit` | The title/description form, pre-filled. |
 
 Pages compose hooks and MUI components; they do not fetch inline. See

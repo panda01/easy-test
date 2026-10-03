@@ -12,6 +12,16 @@ import {
 import { expect, vi, type Mock } from "vitest";
 import { type ActionScriptRunRecord } from "../../../src/hooks/useActionScriptRuns";
 import { type ActionScriptRecord } from "../../../src/hooks/useActionScripts";
+import { type CrawledPageRecord } from "../../../src/hooks/useCrawledPage";
+import {
+  type CrawledPageSummaryRecord,
+  type CrawlRunWithPagesRecord,
+} from "../../../src/hooks/useCrawlRunProgress";
+import { type CrawlRunRecord } from "../../../src/hooks/useCrawlRuns";
+import {
+  type ScriptModelCatalog,
+  type ScriptModelOption,
+} from "../../../src/hooks/useScriptModels";
 import { type ScreenshotRunRecord } from "../../../src/hooks/useScreenshotRuns";
 import { type WebsiteItemRecord } from "../../../src/hooks/useWebsiteItems";
 import { type WebsiteRecord } from "../../../src/hooks/useWebsites";
@@ -246,6 +256,91 @@ export function buildScreenshotRunRecord(
 }
 
 /**
+ * Builds a crawl run (without pages) as the API returns it: by default a
+ * finished crawl of website-1 that visited 3 pages.
+ * @param overrides - Fields to replace in the default run
+ * @returns The crawl run record
+ */
+export function buildCrawlRunRecord(overrides: Partial<CrawlRunRecord> = {}): CrawlRunRecord {
+  return {
+    id: "crawl-run-1",
+    websiteId: "website-1",
+    startUrl: "https://example.com/",
+    status: "finished",
+    pageLimit: 50,
+    visitedPageCount: 3,
+    waitingUrlCount: 0,
+    errorMessage: null,
+    durationMs: 6400,
+    finishedAt: "2026-03-04T05:06:13.000Z",
+    createdAt: "2026-03-04T05:06:07.000Z",
+    updatedAt: "2026-03-04T05:06:13.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a crawled page summary as the run's page list returns it: by
+ * default the start page of crawl-run-1, loaded with HTTP 200.
+ * @param overrides - Fields to replace in the default page
+ * @returns The page summary record
+ */
+export function buildCrawledPageSummaryRecord(
+  overrides: Partial<CrawledPageSummaryRecord> = {},
+): CrawledPageSummaryRecord {
+  return {
+    id: "crawled-page-1",
+    crawlRunId: "crawl-run-1",
+    websiteId: "website-1",
+    parentPageId: null,
+    url: "https://example.com/",
+    requestedUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    visitOrder: 0,
+    depth: 0,
+    succeeded: true,
+    httpStatus: 200,
+    errorMessage: null,
+    title: "Example",
+    durationMs: 900,
+    createdAt: "2026-03-04T05:06:08.000Z",
+    updatedAt: "2026-03-04T05:06:08.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a full crawled page (snapshot and links included), by default the
+ * default summary with a one-line snapshot and no links.
+ * @param overrides - Fields to replace in the default page
+ * @returns The full page record
+ */
+export function buildCrawledPageRecord(
+  overrides: Partial<CrawledPageRecord> = {},
+): CrawledPageRecord {
+  return {
+    ...buildCrawledPageSummaryRecord(),
+    ariaSnapshot: '- heading "Example" [level=1]',
+    linkedUrls: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a crawl run with its pages, as the run endpoint returns it: by
+ * default the default run with no pages.
+ * @param overrides - Fields to replace in the default run, `pages` included
+ * @returns The crawl run with its pages
+ */
+export function buildCrawlRunWithPagesRecord(
+  overrides: Partial<CrawlRunWithPagesRecord> = {},
+): CrawlRunWithPagesRecord {
+  return { ...buildCrawlRunRecord(), pages: [], ...overrides };
+}
+
+/**
  * Builds an action script version as the API returns it: by default a clean
  * script for action item-1 of website-1, with one assumption.
  * @param overrides - Fields to replace in the default script
@@ -267,6 +362,7 @@ export function buildActionScriptRecord(
     code: "import { chromium } from 'playwright';\n// script-1 steps\n",
     ruleViolations: [],
     modelId: "claude-opus-5-5",
+    effort: "high",
     createdAt: "2026-04-02T03:04:05.000Z",
     updatedAt: "2026-04-02T03:04:05.000Z",
     deletedAt: null,
@@ -299,6 +395,59 @@ export function buildActionScriptRunRecord(
     createdAt: "2026-04-03T03:04:05.000Z",
     updatedAt: "2026-04-03T03:04:05.000Z",
     deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds one model as `GET /api/script-models` describes it: by default
+ * Claude Opus 5.5 with every effort level and the Opus 4.8 fallback.
+ * @param overrides - Fields to replace in the default model
+ * @returns A complete script model option
+ */
+export function buildScriptModelOption(
+  overrides: Partial<ScriptModelOption> = {},
+): ScriptModelOption {
+  return {
+    id: "claude-opus-5-5",
+    displayName: "Claude Opus 5.5",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    supportsAdaptiveThinking: true,
+    fallbackModel: { id: "claude-opus-4-8", displayName: "Claude Opus 4.8" },
+    ...overrides,
+  };
+}
+
+/**
+ * Builds the model catalog `GET /api/script-models` answers with: by default
+ * three models - Claude Opus 5.5 (all levels, Opus 4.8 fallback), Claude Opus
+ * 4.6 (no xhigh, no fallback), and Claude Haiku 4.5 (no effort setting) -
+ * starting on Opus 5.5 at high.
+ * @param overrides - Fields to replace in the default catalog
+ * @returns A complete model catalog
+ */
+export function buildScriptModelCatalog(
+  overrides: Partial<ScriptModelCatalog> = {},
+): ScriptModelCatalog {
+  return {
+    models: [
+      buildScriptModelOption(),
+      buildScriptModelOption({
+        id: "claude-opus-4-6",
+        displayName: "Claude Opus 4.6",
+        effortLevels: ["low", "medium", "high", "max"],
+        fallbackModel: null,
+      }),
+      buildScriptModelOption({
+        id: "claude-haiku-4-5-20251001",
+        displayName: "Claude Haiku 4.5",
+        effortLevels: [],
+        supportsAdaptiveThinking: false,
+        fallbackModel: null,
+      }),
+    ],
+    defaultModelId: "claude-opus-5-5",
+    defaultEffort: "high",
     ...overrides,
   };
 }

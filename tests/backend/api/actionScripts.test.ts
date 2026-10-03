@@ -21,6 +21,11 @@ const mockScriptGenerationService = vi.hoisted(() => ({
   convertActionToScript: vi.fn(),
 }));
 
+/** The live model catalog is replaced outright: no spec ever calls the Models API. */
+const mockScriptModelService = vi.hoisted(() => ({
+  findScriptModel: vi.fn(),
+}));
+
 /** Running is replaced outright: no spec ever starts node or a browser. */
 const mockScriptRunnerService = vi.hoisted(() => ({
   FAILURE_SCREENSHOT_FILE_NAME: "failure.png",
@@ -30,6 +35,7 @@ const mockScriptRunnerService = vi.hoisted(() => ({
 vi.mock("../../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
 vi.mock("../../../server/services/scriptRunnerService.js", () => mockScriptRunnerService);
+vi.mock("../../../server/services/scriptModelService.js", () => mockScriptModelService);
 
 import { registerActionScriptRoutes } from "../../../server/controllers/actionScripts.js";
 
@@ -134,7 +140,29 @@ const cleanConversion = {
   assumptions: ["The button is called Sign in"],
   code: "import { chromium } from 'playwright';\nawait page.getByRole('button').click();\n",
   modelId: "claude-opus-5-5",
+  effort: "high",
 };
+
+/** A catalog model with effort levels (what `findScriptModel` finds by default). */
+const opusModel = {
+  id: "claude-opus-5-5",
+  displayName: "Claude Opus 5.5",
+  effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  supportsAdaptiveThinking: true,
+  fallbackModel: { id: "claude-opus-4-8", displayName: "Claude Opus 4.8" },
+};
+
+/** A catalog model with no effort setting ("Standard"). */
+const haikuModel = {
+  id: "claude-haiku-4-5-20251001",
+  displayName: "Claude Haiku 4.5",
+  effortLevels: [],
+  supportsAdaptiveThinking: false,
+  fallbackModel: null,
+};
+
+/** The body the action page sends with "Convert to script". */
+const OPUS_HIGH_CHOICE = { modelId: "claude-opus-5-5", effort: "high" };
 
 /** What `runPlaywrightScript` reports for a passing run. */
 const passingRunResult = {
@@ -179,6 +207,7 @@ describe("Action script routes", () => {
     mockDbService.findWebsiteById.mockResolvedValue(foundWebsite);
     mockDbService.findActionForWebsite.mockResolvedValue(foundAction);
     mockDbService.findActionScriptForAction.mockResolvedValue(foundScript);
+    mockScriptModelService.findScriptModel.mockResolvedValue(opusModel);
   });
 
   describe("GET /api/websites/:websiteId/actions/:actionId/scripts", () => {
@@ -231,20 +260,24 @@ describe("Action script routes", () => {
   });
 
   describe("POST /api/websites/:websiteId/actions/:actionId/scripts", () => {
-    it("converts the found action, scans the code, saves the snapshots, and returns 201", async () => {
+    it("converts the found action with the chosen model and effort, scans the code, saves the snapshots, and returns 201", async () => {
       mockScriptGenerationService.convertActionToScript.mockResolvedValue(cleanConversion);
       mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
 
-      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(201);
       expect(res.body).toEqual(foundScript);
-      expect(mockScriptGenerationService.convertActionToScript).toHaveBeenCalledWith({
-        websiteName: foundWebsite.name,
-        startUrl: foundWebsite.url,
-        actionTitle: foundAction.title,
-        actionDescription: foundAction.description,
-      });
+      expect(mockScriptModelService.findScriptModel).toHaveBeenCalledWith("claude-opus-5-5");
+      expect(mockScriptGenerationService.convertActionToScript).toHaveBeenCalledWith(
+        {
+          websiteName: foundWebsite.name,
+          startUrl: foundWebsite.url,
+          actionTitle: foundAction.title,
+          actionDescription: foundAction.description,
+        },
+        { model: opusModel, effort: "high" },
+      );
       expect(mockDbService.createActionScriptForAction).toHaveBeenCalledWith(
         foundWebsite.id,
         foundAction.id,
@@ -258,8 +291,109 @@ describe("Action script routes", () => {
           code: cleanConversion.code,
           ruleViolations: [],
           modelId: cleanConversion.modelId,
+          effort: "high",
         },
       );
+    });
+
+    it("converts with a model that has no effort setting when the effort is null", async () => {
+      mockScriptModelService.findScriptModel.mockResolvedValue(haikuModel);
+      mockScriptGenerationService.convertActionToScript.mockResolvedValue({
+        ...cleanConversion,
+        modelId: haikuModel.id,
+        effort: null,
+      });
+      mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
+
+      const res = await request(createActionScriptsApp())
+        .post(SCRIPTS_PATH)
+        .send({ modelId: haikuModel.id, effort: null });
+
+      expect(res.status).toBe(201);
+      expect(mockScriptGenerationService.convertActionToScript).toHaveBeenCalledWith(
+        expect.any(Object),
+        { model: haikuModel, effort: null },
+      );
+      const [, , savedScript] = mockDbService.createActionScriptForAction.mock.calls[0] as [
+        string,
+        string,
+        { modelId: string; effort: string | null },
+      ];
+      expect(savedScript).toMatchObject({ modelId: haikuModel.id, effort: null });
+    });
+
+    it("returns 400 and looks nothing up when the body names no model", async () => {
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send({ effort: "high" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "A model is required" });
+      expect(mockDbService.findWebsiteById).not.toHaveBeenCalled();
+      expect(mockScriptModelService.findScriptModel).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 and converts nothing for a model that is not in the catalog", async () => {
+      mockScriptModelService.findScriptModel.mockResolvedValue(null);
+
+      const res = await request(createActionScriptsApp())
+        .post(SCRIPTS_PATH)
+        .send({ modelId: "claude-nope", effort: "high" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'Unknown model "claude-nope"; pick one from the model list' });
+      expect(mockScriptGenerationService.convertActionToScript).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 for an effort level the model does not offer", async () => {
+      mockScriptModelService.findScriptModel.mockResolvedValue({
+        ...opusModel,
+        effortLevels: ["low", "medium", "high", "max"],
+        displayName: "Claude Opus 4.6",
+      });
+
+      const res = await request(createActionScriptsApp())
+        .post(SCRIPTS_PATH)
+        .send({ modelId: "claude-opus-4-6", effort: "xhigh" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Claude Opus 4.6 does not offer the "xhigh" effort level; it offers low, medium, high, max',
+      });
+      expect(mockScriptGenerationService.convertActionToScript).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 when a model with effort levels is sent no level", async () => {
+      const res = await request(createActionScriptsApp())
+        .post(SCRIPTS_PATH)
+        .send({ modelId: "claude-opus-5-5" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "Claude Opus 5.5 needs an effort level: low, medium, high, xhigh, max",
+      });
+    });
+
+    it("returns 400 when a model with no effort setting is sent a level", async () => {
+      mockScriptModelService.findScriptModel.mockResolvedValue(haikuModel);
+
+      const res = await request(createActionScriptsApp())
+        .post(SCRIPTS_PATH)
+        .send({ modelId: haikuModel.id, effort: "low" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "Claude Haiku 4.5 has no effort setting, so no effort level can be chosen for it",
+      });
+    });
+
+    it("returns 503 when the model catalog cannot be read without an API key", async () => {
+      mockScriptModelService.findScriptModel.mockRejectedValue(
+        buildScriptGenerationError("missingApiKey", "ANTHROPIC_API_KEY is not set"),
+      );
+
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
+
+      expect(res.status).toBe(503);
+      expect(mockScriptGenerationService.convertActionToScript).not.toHaveBeenCalled();
     });
 
     it("still saves a script that breaks rules, storing the violations as warnings", async () => {
@@ -269,7 +403,7 @@ describe("Action script routes", () => {
       });
       mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
 
-      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(201);
       const [, , savedScript] = mockDbService.createActionScriptForAction.mock.calls[0] as [
@@ -285,10 +419,11 @@ describe("Action script routes", () => {
     it("returns 404 Action not found and converts nothing when the action does not exist", async () => {
       mockDbService.findActionForWebsite.mockResolvedValue(null);
 
-      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(404);
       expect(res.body).toEqual({ error: "Action not found" });
+      expect(mockScriptModelService.findScriptModel).not.toHaveBeenCalled();
       expect(mockScriptGenerationService.convertActionToScript).not.toHaveBeenCalled();
     });
 
@@ -297,7 +432,7 @@ describe("Action script routes", () => {
         buildScriptGenerationError("missingApiKey", "ANTHROPIC_API_KEY is not set"),
       );
 
-      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(503);
       expect(res.body).toEqual({ error: "ANTHROPIC_API_KEY is not set" });
@@ -311,7 +446,7 @@ describe("Action script routes", () => {
           buildScriptGenerationError(reason, `Claude failed: ${reason}`),
         );
 
-        const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+        const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
         expect(res.status).toBe(502);
         expect(res.body).toEqual({ error: `Claude failed: ${reason}` });
@@ -324,7 +459,7 @@ describe("Action script routes", () => {
         buildScriptGenerationError("somethingNew", "odd failure"),
       );
 
-      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: "odd failure" });
@@ -335,7 +470,7 @@ describe("Action script routes", () => {
         Object.assign(new Error("rate limited"), { reason: "refused" }),
       );
 
-      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: "rate limited" });
@@ -344,7 +479,7 @@ describe("Action script routes", () => {
     it("returns 500 with the stringified value when the conversion rejects with a non-Error", async () => {
       mockScriptGenerationService.convertActionToScript.mockRejectedValue("socket hang up");
 
-      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH);
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: "socket hang up" });

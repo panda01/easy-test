@@ -37,11 +37,27 @@ mocks the `playwright` module (`chromium.launch` returns a fake browser whose
 controller mocks `../services/playwrightService.js` outright.
 `backend/fixtures/screenshot-files/` holds a tiny committed PNG that the
 Playwright controller spec serves through the real `res.sendFile`.
+`crawlerService.test.ts` mocks `playwright` the same way, but its fake page
+serves a **fake site** (a table of URL → status, final URL, title, snapshot,
+and raw hrefs), and it runs the in-page link scan (`readRawPageLinks`) against
+a stubbed `document`. `crawlRunService.test.ts` mocks the crawler and
+dbService and awaits the returned `crawlCompletion` instead of polling; the
+crawl controller spec and `server.test.ts` mock `crawlRunService` outright.
+`server.test.ts` reads `markUnfinishedCrawlRunsInterrupted`'s call count
+right after import (before any `beforeEach` reset) to prove the boot step does
+not run under test.
+
+**Polling is tested with fake timers.** `usePolledJsonResource`,
+`useCrawlRunProgress`, and `CrawlRunPage`'s "while the crawl runs" specs use
+`vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })` and
+`act(() => vi.advanceTimersByTimeAsync(ms))`, then assert synchronously:
+Testing Library's `waitFor` / `findBy` do not advance Vitest's fake timers.
 
 **No unit test ever calls the Anthropic API or starts a process.**
 `scriptGenerationService.test.ts` replaces `@anthropic-ai/sdk` with a fake
 client whose `beta.messages.parse` is a spy (the real prompt file is read, to
-prove it is sent verbatim); `scriptRunnerService.test.ts` replaces
+prove it is sent verbatim); `scriptModelService.test.ts` fakes
+`beta.models.list` as an async iterable of model infos; `scriptRunnerService.test.ts` replaces
 `node:child_process` with a fake child (an EventEmitter with stdout/stderr
 streams) and `node:fs/promises`, and drives the 5 minute limit with fake
 `setTimeout`. Every spec that loads the action scripts controller mocks both

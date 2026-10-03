@@ -12,7 +12,9 @@ is erased at runtime.)
 | `resolveActionScriptDirectory.ts` | `resolveConfiguredDirectory("ACTION_SCRIPT_DIR")`, plus: the directory must sit strictly **inside the project root** (generated scripts import `playwright` from its `node_modules`, and ES modules ignore `NODE_PATH`). A folder merely named `..runs` counts as inside. |
 | `findScriptRuleViolations.ts` | `findScriptRuleViolations(code)`: the warn-only text scan of a generated script for features a user could not use (`.fill(`, `evaluate`, `force: true`, `page.route`, `textContent`, `process.env`, imports other than `playwright`, ...). Returns `"Line N: <feature> - <why>"` strings in line order. Anchored import matching, so `"from 'X'"` inside a step message is not an import. |
 | `readSendErrorStatus.ts` | `readSendErrorStatus(sendError)`: the HTTP status `res.sendFile` attached to its error, or null. Shared by the two controllers that serve files. |
+| `statusForScriptGenerationFailure.ts` | `statusForScriptGenerationFailure(error)`: 503 for `missingApiKey`, 400 for `unsupportedModel`, 502 for `refused`/`truncated`/`unparseable`, 500 otherwise - recognized structurally, so it needs no service import. Shared by the two controllers that talk to Claude. |
 | `describeError.ts` | `describeError(error)`: an Error's message, or the stringified value. Used by every route `catch`. |
+| `normalizeCrawlUrl.ts` | `normalizeCrawlUrl(rawHref, baseUrl)`: resolves a link as a browser would and returns `{ identityUrl, loadUrl }` - identity is origin + path (query and hash dropped), load keeps the query - or null for anything not followable (non-http(s), unparseable, blank, longer than `MAX_CRAWL_URL_LENGTH` = 2000). `isSameOriginUrl(url, origin)`. Used by the crawler. |
 | `validateRequestBodies.ts` | `validateWebsiteInput` and `validateTitleDescriptionInput`: check, trim, and normalize request bodies, returning `{ isValid: true, input }` or `{ isValid: false, errorMessage }`. |
 
 `resolveServerPort`, `resolveScreenshotDirectory`, and
@@ -27,6 +29,7 @@ browser instead of a one-line startup error.
 |---|---|
 | Website | `url` required, must be `http:`/`https:`, stored as `new URL(url).href`; `name` required; `description` optional — missing, null, or blank is stored as `null`; `networkIdleTimeoutMs` and `screenshotMinimumWaitMs` optional JSON numbers — whole milliseconds 0–30000, missing or null become 5000 and 1, and the cap may not be lower than the minimum. |
 | Use case / action | `title` and `description` both required and non-blank. |
+| Script model choice | `modelId` required and non-blank; `effort` a non-blank string, or null / left out for "Standard". Whether the model exists and offers that level is checked by the controller against the live catalog. |
 
 All strings are trimmed. A body that is not a JSON object (including the
 `undefined` Express 5 leaves when no JSON was sent) is rejected first.

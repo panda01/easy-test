@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  validateScriptModelChoiceInput,
   DEFAULT_NETWORK_IDLE_TIMEOUT_MS,
   DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS,
   validateWebsiteInput,
@@ -334,6 +335,58 @@ describe("validateTitleDescriptionInput", () => {
     expect(result).toEqual({
       isValid: true,
       input: { title: "Log in", description: "Enter credentials" },
+    });
+  });
+});
+
+describe("validateScriptModelChoiceInput", () => {
+  it("accepts a model with an effort level, trimming both", () => {
+    expect(validateScriptModelChoiceInput({ modelId: " claude-opus-5-5 ", effort: " high " })).toEqual({
+      isValid: true,
+      input: { modelId: "claude-opus-5-5", effort: "high" },
+    });
+  });
+
+  it.each([
+    ["null", null],
+    ["left out", undefined],
+  ])("accepts a model with the effort %s, as Standard (null)", (_label, effort) => {
+    expect(validateScriptModelChoiceInput({ modelId: "claude-haiku-4-5-20251001", effort })).toEqual({
+      isValid: true,
+      input: { modelId: "claude-haiku-4-5-20251001", effort: null },
+    });
+  });
+
+  it.each([
+    ["no body", undefined],
+    ["an array", []],
+    ["a string", "claude-opus-5-5"],
+  ])("rejects %s", (_label, body) => {
+    expect(validateScriptModelChoiceInput(body)).toEqual({
+      isValid: false,
+      errorMessage: "The request body must be a JSON object",
+    });
+  });
+
+  it.each([
+    ["missing", {}],
+    ["blank", { modelId: "   " }],
+    ["not a string", { modelId: 5 }],
+  ])("rejects a model id that is %s", (_label, body) => {
+    expect(validateScriptModelChoiceInput(body)).toEqual({
+      isValid: false,
+      errorMessage: "A model is required",
+    });
+  });
+
+  it.each([
+    ["blank", "  "],
+    ["not a string", 3],
+  ])("rejects an effort level that is %s", (_label, effort) => {
+    expect(validateScriptModelChoiceInput({ modelId: "claude-opus-5-5", effort })).toEqual({
+      isValid: false,
+      errorMessage:
+        "The effort level must be a non-blank string, or null for a model with no effort setting",
     });
   });
 });

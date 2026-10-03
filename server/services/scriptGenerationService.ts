@@ -1,26 +1,18 @@
 import { readFile } from "node:fs/promises";
-import { Anthropic } from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
-
-/** The model that converts actions into scripts (the user's choice). */
-export const ACTION_SCRIPT_MODEL_ID = "claude-opus-5-5";
-
-/**
- * The model the API retries on, inside the same call, when a safety
- * classifier declines the request on `ACTION_SCRIPT_MODEL_ID` (the user chose
- * a named fallback). The saved script records whichever model answered.
- */
-export const ACTION_SCRIPT_FALLBACK_MODEL_ID = "claude-opus-4-8";
+import { ScriptGenerationError, createAnthropicClient } from "./anthropicClient.js";
+import {
+  SERVER_SIDE_FALLBACK_BETA,
+  type EffortLevel,
+  type ScriptModelOption,
+} from "./scriptModelService.js";
 
 /**
  * Upper bound on the reply, thinking included. 16000 keeps a non-streaming
  * request well inside the SDK's HTTP timeout; going higher needs streaming.
  */
 const ACTION_SCRIPT_MAX_TOKENS = 16000;
-
-/** Beta flag for the array form of `fallbacks` (a named fallback model). */
-const SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-06-01";
 
 /**
  * The user's script-writing guidelines, used VERBATIM as the system prompt.
@@ -55,6 +47,14 @@ export interface ActionScriptConversionRequest {
   actionDescription: string;
 }
 
+/** The model and effort level the user picked for one conversion. */
+export interface ScriptModelChoice {
+  /** The model to ask, from the live catalog (see `scriptModelService`). */
+  model: ScriptModelOption;
+  /** One of the model's effort levels, or null when it has no effort setting ("Standard"). */
+  effort: EffortLevel | null;
+}
+
 /** What one successful conversion produced. */
 export interface ActionScriptConversion {
   /** One line summarizing what the script does. */
@@ -63,31 +63,10 @@ export interface ActionScriptConversion {
   assumptions: string[];
   /** The complete `.mjs` source. */
   code: string;
-  /** The model that actually answered (the fallback model when the first one declined). */
+  /** The model that actually answered (the fallback model when the chosen one declined). */
   modelId: string;
-}
-
-/** Why a conversion produced no usable script, as opposed to an API or network error. */
-export type ScriptGenerationFailureReason = "missingApiKey" | "refused" | "truncated" | "unparseable";
-
-/**
- * A conversion that cannot produce a script for a known reason. The
- * controller maps `reason` to a status: `missingApiKey` is a server
- * configuration problem (503); the rest mean Claude's reply was unusable (502).
- */
-export class ScriptGenerationError extends Error {
-  /** Which known failure this is. */
-  readonly reason: ScriptGenerationFailureReason;
-
-  /**
-   * @param reason - Which known failure this is
-   * @param message - A human-readable explanation, shown to the user
-   */
-  constructor(reason: ScriptGenerationFailureReason, message: string) {
-    super(message);
-    this.name = "ScriptGenerationError";
-    this.reason = reason;
-  }
+  /** The effort level sent, which a fallback inherits; null for "Standard". */
+  effort: EffortLevel | null;
 }
 
 /**
@@ -127,65 +106,65 @@ function buildConversionRequestMessage(request: ActionScriptConversionRequest): 
 }
 
 /**
- * Reads the Anthropic API key from the environment.
- * @returns The trimmed key
- * @throws {ScriptGenerationError} `missingApiKey` when `ANTHROPIC_API_KEY` is unset or blank
- */
-function readAnthropicApiKey(): string {
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-  const apiKeyIsMissing = apiKey === undefined || apiKey === "";
-  if (apiKeyIsMissing) {
-    throw new ScriptGenerationError(
-      "missingApiKey",
-      "ANTHROPIC_API_KEY is not set in .env.local, so actions cannot be converted to scripts",
-    );
-  }
-  return apiKey;
-}
-
-/**
  * Asks Claude to convert one action into a Playwright `.mjs` script, following
- * the user's guidelines (`server/prompts/actionScriptGuidelines.md`) verbatim.
+ * the user's guidelines (`server/prompts/actionScriptGuidelines.md`) verbatim,
+ * with the model and effort level the user picked.
  *
  * - The client is built per call, never at boot, so a missing key only
- *   affects this feature. The key is passed explicitly, so the SDK never falls
- *   back to some other credential on this machine.
+ *   affects this feature (see `createAnthropicClient`).
  * - The guidelines are the system prompt, marked for prompt caching: they are
- *   identical on every conversion, so repeat conversions within the cache
- *   lifetime read them from the cache instead of paying for them again.
+ *   identical on every conversion, so repeat conversions on the same model
+ *   within the cache lifetime read them from the cache instead of paying for
+ *   them again. (Caches are per model.)
  * - Structured outputs make the reply a validated `{ summary, assumptions,
  *   script }` object.
- * - If a safety classifier declines on the main model, the API retries on
- *   `ACTION_SCRIPT_FALLBACK_MODEL_ID` within the same call.
+ * - The request only carries what the chosen model supports: `fallbacks` when
+ *   it has a fallback (the API then retries there, inside the same call, if a
+ *   safety classifier declines), adaptive thinking when it takes it, and an
+ *   effort level unless it has no effort setting.
  *
  * API and network errors (bad key, rate limit, outage) are not caught here;
  * they reject with the SDK's own error.
  * @param request - The website and action snapshots to convert
- * @returns The summary, assumptions, code, and the model that wrote it
+ * @param choice - The model and effort level to use
+ * @returns The summary, assumptions, code, the model that wrote it, and the effort level sent
  * @throws {ScriptGenerationError} `missingApiKey` when no key is configured; `refused` when every model declined; `truncated` when the reply hit the token limit; `unparseable` when the reply did not match the schema or had an empty script
  */
 export async function convertActionToScript(
   request: ActionScriptConversionRequest,
+  choice: ScriptModelChoice,
 ): Promise<ActionScriptConversion> {
-  const apiKey = readAnthropicApiKey();
+  const client = createAnthropicClient();
   const guidelines = await readFile(GUIDELINES_FILE_URL, "utf8");
-  const client = new Anthropic({ apiKey });
+
+  const { model, effort } = choice;
+  const { fallbackModel } = model;
+  const modelHasAFallback = fallbackModel !== null;
+  const fallbackSettings = modelHasAFallback
+    ? { betas: [SERVER_SIDE_FALLBACK_BETA], fallbacks: [{ model: fallbackModel.id }] }
+    : {};
+  const thinkingSettings = model.supportsAdaptiveThinking
+    ? { thinking: { type: "adaptive" as const } }
+    : {};
+  const modelHasNoEffortSetting = effort === null;
+  const effortSettings = modelHasNoEffortSetting ? {} : { effort };
 
   const response = await client.beta.messages.parse({
-    model: ACTION_SCRIPT_MODEL_ID,
+    model: model.id,
     max_tokens: ACTION_SCRIPT_MAX_TOKENS,
-    betas: [SERVER_SIDE_FALLBACK_BETA],
-    fallbacks: [{ model: ACTION_SCRIPT_FALLBACK_MODEL_ID }],
+    ...fallbackSettings,
+    ...thinkingSettings,
     system: [{ type: "text", text: guidelines, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: buildConversionRequestMessage(request) }],
     output_config: {
-      effort: "high",
+      ...effortSettings,
       format: betaZodOutputFormat(ActionScriptConversionSchema),
     },
   });
 
   console.log(
-    `[scripts] ${response.model} answered: ${response.usage.input_tokens} input tokens, ` +
+    `[scripts] asked ${model.id} at ${effort ?? "standard"} effort; ` +
+      `${response.model} answered: ${response.usage.input_tokens} input tokens, ` +
       `${response.usage.cache_read_input_tokens ?? 0} read from cache, ` +
       `${response.usage.cache_creation_input_tokens ?? 0} written to cache, ` +
       `${response.usage.output_tokens} output tokens`,
@@ -229,5 +208,6 @@ export async function convertActionToScript(
     assumptions: conversion.assumptions,
     code: conversion.script,
     modelId: response.model,
+    effort,
   };
 }

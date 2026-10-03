@@ -4,6 +4,7 @@ import { userEvent, type UserEvent } from "@testing-library/user-event";
 import { Route } from "react-router-dom";
 import WebsiteDetailPage from "../../src/pages/WebsiteDetailPage";
 import {
+  buildCrawlRunRecord,
   buildJsonResponse,
   buildScreenshotRunRecord,
   buildWebsiteItemRecord,
@@ -25,6 +26,7 @@ const WEBSITE_API_URL = "/api/websites/website-1";
 const USE_CASES_API_URL = "/api/websites/website-1/use-cases";
 const ACTIONS_API_URL = "/api/websites/website-1/actions";
 const SCREENSHOT_RUNS_API_URL = "/api/websites/website-1/screenshot-runs";
+const CRAWL_RUNS_API_URL = "/api/websites/website-1/crawl-runs";
 
 /** History as it is after clicking the website on the list. */
 const OPENED_FROM_LIST: RouterStart = {
@@ -47,8 +49,8 @@ function renderWebsiteDetailPage(routerStart: RouterStart): RenderResult {
 }
 
 /**
- * Stubs a successful load of the website with one use case, two actions, and
- * no screenshot runs, plus any extra or replacement routes.
+ * Stubs a successful load of the website with one use case, two actions, no
+ * screenshot runs, and no crawl runs, plus any extra or replacement routes.
  * @param extraRoutes - More replies, e.g. for the DELETE, or replacements for the GETs
  * @returns The installed fetch stub
  */
@@ -67,6 +69,7 @@ function stubLoadedWebsite(extraRoutes: StubbedRouteTable = {}): FetchStub {
       ],
     },
     [`GET ${SCREENSHOT_RUNS_API_URL}`]: { status: 200, body: [] },
+    [`GET ${CRAWL_RUNS_API_URL}`]: { status: 200, body: [] },
     ...extraRoutes,
   });
 }
@@ -183,7 +186,7 @@ describe("WebsiteDetailPage", () => {
     expect(landing.state).toBe(JSON.stringify({ returnTo: DETAIL_PATH }));
   });
 
-  it("names the use case, action, and screenshot run counts in the delete dialog", async () => {
+  it("names the use case, action, screenshot run, and crawl run counts in the delete dialog", async () => {
     const user = userEvent.setup();
     stubLoadedWebsite();
     renderWebsiteDetailPage(OPENED_FROM_LIST);
@@ -191,7 +194,7 @@ describe("WebsiteDetailPage", () => {
     const dialog = await openDeleteDialog(user);
 
     expect(dialog).toHaveTextContent(
-      '"Example" will be deleted, along with its 1 use case, 2 actions, and 0 screenshot runs.',
+      '"Example" will be deleted, along with its 1 use case, 2 actions, 0 screenshot runs, and 0 crawl runs.',
     );
   });
 
@@ -208,7 +211,7 @@ describe("WebsiteDetailPage", () => {
 
     const dialog = await openDeleteDialog(user);
 
-    expect(dialog).toHaveTextContent("1 use case, 2 actions, and 1 screenshot run.");
+    expect(dialog).toHaveTextContent("1 use case, 2 actions, 1 screenshot run, and 0 crawl runs.");
   });
 
   it("counts zero items when the item lists failed to load", async () => {
@@ -226,7 +229,7 @@ describe("WebsiteDetailPage", () => {
     await user.click(screen.getByRole("button", { name: "Delete" }));
 
     expect(await screen.findByRole("dialog")).toHaveTextContent(
-      "along with its 0 use cases, 0 actions, and 0 screenshot runs.",
+      "along with its 0 use cases, 0 actions, 0 screenshot runs, and 0 crawl runs.",
     );
   });
 
@@ -460,6 +463,134 @@ describe("WebsiteDetailPage", () => {
       await user.click(screen.getByRole("button", { name: "Take screenshot" }));
 
       expect(await within(section).findByRole("status")).toHaveTextContent("Succeeded · HTTP 200");
+    });
+  });
+
+  describe("crawls", () => {
+    const finishedCrawlRun = buildCrawlRunRecord({
+      id: "crawl-run-1",
+      status: "finished",
+      visitedPageCount: 12,
+      createdAt: "2026-03-04T05:06:07.000Z",
+    });
+    const runningCrawlRun = buildCrawlRunRecord({
+      id: "crawl-run-2",
+      status: "running",
+      visitedPageCount: 4,
+      durationMs: null,
+      finishedAt: null,
+      createdAt: "2026-03-05T05:06:07.000Z",
+    });
+
+    it("shows the empty state and an enabled Crawl website button when the website has no crawls", async () => {
+      stubLoadedWebsite();
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const section = await screen.findByRole("region", { name: "Crawls" });
+
+      expect(await within(section).findByText("No crawls yet.")).toBeInTheDocument();
+      expect(within(section).getByRole("button", { name: "Crawl website" })).toBeEnabled();
+    });
+
+    it("lists every crawl in the history, each linking to its own page", async () => {
+      stubLoadedWebsite({
+        [`GET ${CRAWL_RUNS_API_URL}`]: { status: 200, body: [finishedCrawlRun] },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const history = await screen.findByRole("list", { name: "Crawl history" });
+      const runLink = within(history).getByRole("link", { name: /Finished · 12 pages/ });
+
+      expect(runLink).toHaveAttribute("href", "/websites/website-1/crawl-runs/crawl-run-1");
+      expect(runLink).toHaveTextContent(new Date(finishedCrawlRun.createdAt).toLocaleString());
+    });
+
+    it("disables the button while a crawl of the website is running", async () => {
+      stubLoadedWebsite({
+        [`GET ${CRAWL_RUNS_API_URL}`]: {
+          status: 200,
+          body: [runningCrawlRun, finishedCrawlRun],
+        },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      expect(await screen.findByRole("button", { name: "Crawl running…" })).toBeDisabled();
+      expect(screen.getByRole("link", { name: /Running · 4 pages so far/ })).toBeInTheDocument();
+    });
+
+    it("POSTs once and opens the new crawl's page", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedWebsite({
+        [`POST ${CRAWL_RUNS_API_URL}`]: { status: 201, body: runningCrawlRun },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      await user.click(await screen.findByRole("button", { name: "Crawl website" }));
+
+      const landing = await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
+      expect(landing.navigationType).toBe("PUSH");
+      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, { method: "POST" });
+      expect(countRequests(fetchStub, "POST", CRAWL_RUNS_API_URL)).toBe(1);
+    });
+
+    it("disables the button and says so while the crawl is being started", async () => {
+      const user = userEvent.setup();
+      const pendingStart = createDeferred<Response>();
+      stubLoadedWebsite({ [`POST ${CRAWL_RUNS_API_URL}`]: () => pendingStart.promise });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      await user.click(await screen.findByRole("button", { name: "Crawl website" }));
+
+      expect(screen.getByRole("button", { name: "Starting crawl…" })).toBeDisabled();
+      await act(async () => {
+        pendingStart.resolve(buildJsonResponse(201, runningCrawlRun));
+        await pendingStart.promise;
+      });
+      await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
+    });
+
+    it("shows the server's reason and stays on the page when the crawl cannot start", async () => {
+      const user = userEvent.setup();
+      stubLoadedWebsite({
+        [`POST ${CRAWL_RUNS_API_URL}`]: {
+          status: 409,
+          body: { error: "A crawl is already running for this website" },
+        },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+      const section = await screen.findByRole("region", { name: "Crawls" });
+
+      await user.click(within(section).getByRole("button", { name: "Crawl website" }));
+
+      expect(await within(section).findByRole("alert")).toHaveTextContent(
+        "Could not start a crawl: A crawl is already running for this website",
+      );
+      expect(within(section).getByRole("button", { name: "Crawl website" })).toBeEnabled();
+      expect(screen.getByRole("heading", { level: 1, name: "Example" })).toBeInTheDocument();
+    });
+
+    it("shows a crawl list failure in the section", async () => {
+      stubLoadedWebsite({
+        [`GET ${CRAWL_RUNS_API_URL}`]: { status: 500, body: { error: "Database unavailable" } },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+      const section = await screen.findByRole("region", { name: "Crawls" });
+
+      expect(await within(section).findByRole("alert")).toHaveTextContent("Database unavailable");
+      expect(within(section).queryByText("No crawls yet.")).not.toBeInTheDocument();
+    });
+
+    it("counts the website's crawl runs in the delete dialog", async () => {
+      const user = userEvent.setup();
+      stubLoadedWebsite({
+        [`GET ${CRAWL_RUNS_API_URL}`]: { status: 200, body: [finishedCrawlRun] },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+      await screen.findByRole("list", { name: "Crawl history" });
+
+      const dialog = await openDeleteDialog(user);
+
+      expect(dialog).toHaveTextContent("1 use case, 2 actions, 0 screenshot runs, and 1 crawl run.");
     });
   });
 });

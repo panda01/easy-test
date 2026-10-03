@@ -1,7 +1,9 @@
 import { type ReactElement } from "react";
+import { Link as RouterLink } from "react-router-dom";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Chip from "@mui/material/Chip";
 import LinearProgress from "@mui/material/LinearProgress";
 import List from "@mui/material/List";
 import ListItemButton from "@mui/material/ListItemButton";
@@ -11,7 +13,11 @@ import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import ActionScriptDetails from "./ActionScriptDetails";
 import LoadStatusNotice from "./LoadStatusNotice";
+import ScriptModelPicker, { type ScriptModelPickerProps } from "./ScriptModelPicker";
 import { type ActionScriptRecord } from "../hooks/useActionScripts";
+import { type ReturnState } from "../hooks/useReturnNavigation";
+import { describeScriptModel } from "../utils/describeScriptModel";
+import { type CurrentActionText, findChangedActionFields } from "../utils/describeScriptStaleness";
 import { formatCount } from "../utils/formatCount";
 
 const HEADING_ID = "action-scripts-section-heading";
@@ -35,14 +41,28 @@ export interface ActionScriptsSectionProps {
   convertErrorMessage: string | null;
   /** Called when the user clicks "Convert to script". */
   onConvertClick: () => void;
+  /** False until a model (and effort level) is chosen, i.e. while the model list loads or after it failed. */
+  canConvert: boolean;
+  /** The Model / Effort dropdowns' props (see `ScriptModelPicker`). */
+  modelPicker: ScriptModelPickerProps;
+  /** The action as it is now, to mark versions generated from older text as out of date. */
+  currentAction: CurrentActionText;
+  /** Where "Compare versions" goes (see `actionScriptComparePath`). */
+  comparePath: string;
+  /** History state for the "Compare versions" link, so that page can return here. */
+  compareLinkState: ReturnState;
 }
 
 /**
- * The "Scripts" section of an action's page: the "Convert to script" button
- * (Claude turns the action into a Playwright script; each conversion is saved
- * as a new, never-edited version), the list of versions to pick from, and the
- * selected version in full (the newest unless the user picked another).
- * @param props - The scripts, the request states, and the callbacks
+ * The "Scripts" section of an action's page: the Model and Effort dropdowns
+ * and the "Convert to script" button (Claude turns the action into a
+ * Playwright script with the chosen model; each conversion is saved as a new,
+ * never-edited version), a "Compare versions" link once there are two, the
+ * list of versions to pick from - each with its model and effort, and an
+ * "Out of date" chip when the action's title or description has changed since
+ * - and the selected version in full (the newest unless the user picked
+ * another).
+ * @param props - The scripts, the model choice, the request states, and the callbacks
  * @returns The rendered section
  */
 export default function ActionScriptsSection(props: ActionScriptsSectionProps): ReactElement {
@@ -55,6 +75,11 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
     isConverting,
     convertErrorMessage,
     onConvertClick,
+    canConvert,
+    modelPicker,
+    currentAction,
+    comparePath,
+    compareLinkState,
   } = props;
 
   const selectedScriptIndex = Math.max(
@@ -66,6 +91,8 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
   const scriptListLoadedWithoutError = !isLoading && errorMessage === null;
   const thereAreNoScripts = scripts.length === 0;
   const thereAreScripts = !thereAreNoScripts;
+  const thereAreVersionsToCompare = scripts.length >= 2;
+  const convertIsBlocked = isConverting || !canConvert;
 
   /**
    * Numbers versions by age: the list is newest first, so the oldest is 1.
@@ -84,14 +111,32 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
         <Typography id={HEADING_ID} variant="h5" component="h2">
           Scripts
         </Typography>
-        <Button onClick={onConvertClick} disabled={isConverting} variant="contained">
-          {isConverting ? "Converting…" : "Convert to script"}
-        </Button>
+        {thereAreVersionsToCompare && (
+          <Button component={RouterLink} to={comparePath} state={compareLinkState} variant="outlined">
+            Compare versions
+          </Button>
+        )}
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         Claude turns this action into a Playwright script that only does what a user could do with
         a mouse and keyboard. Each conversion is saved as a new version; versions are never edited.
       </Typography>
+
+      <Stack
+        direction={{ xs: "column", md: "row" }}
+        spacing={2}
+        sx={{ alignItems: { md: "flex-start" }, mb: 2 }}
+      >
+        <ScriptModelPicker {...modelPicker} />
+        <Button
+          onClick={onConvertClick}
+          disabled={convertIsBlocked}
+          variant="contained"
+          sx={{ flexShrink: 0 }}
+        >
+          {isConverting ? "Converting…" : "Convert to script"}
+        </Button>
+      </Stack>
 
       {isConverting && (
         <>
@@ -129,10 +174,17 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
                 const scriptIsSelected = scriptIndex === selectedScriptIndex;
                 const ruleWarningCount = script.ruleViolations.length;
                 const scriptHasRuleWarnings = ruleWarningCount > 0;
+                const scriptIsOutOfDate =
+                  findChangedActionFields(script, currentAction).length > 0;
                 const generatedAtText = new Date(script.createdAt).toLocaleString();
+                const modelText = describeScriptModel(
+                  script.modelId,
+                  script.effort,
+                  modelPicker.models,
+                );
                 const versionDetailsText = scriptHasRuleWarnings
-                  ? `${generatedAtText} · ${formatCount(ruleWarningCount, "rule warning", "rule warnings")}`
-                  : generatedAtText;
+                  ? `${generatedAtText} · ${modelText} · ${formatCount(ruleWarningCount, "rule warning", "rule warnings")}`
+                  : `${generatedAtText} · ${modelText}`;
                 return (
                   <ListItemButton
                     key={script.id}
@@ -147,6 +199,9 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
                       primary={`Version ${String(versionNumberAt(scriptIndex))}`}
                       secondary={versionDetailsText}
                     />
+                    {scriptIsOutOfDate && (
+                      <Chip label="Out of date" color="warning" size="small" sx={{ ml: 1 }} />
+                    )}
                   </ListItemButton>
                 );
               })}
@@ -159,6 +214,8 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
         <ActionScriptDetails
           script={selectedScript}
           versionNumber={versionNumberAt(selectedScriptIndex)}
+          currentAction={currentAction}
+          catalogModels={modelPicker.models}
         />
       )}
     </Box>

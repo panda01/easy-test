@@ -75,10 +75,37 @@ export function websiteItemEditPath(
   return `${websiteItemDetailPath(itemKind, websiteId, itemId)}/edit`;
 }
 
+/**
+ * Builds the path of the page that compares two of an action's script
+ * versions side by side. Which two is kept in the page's own query string
+ * (`?from=<scriptId>&to=<scriptId>`), so it is not part of this path.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The action's cuid
+ * @returns `/websites/<websiteId>/actions/<actionId>/scripts/compare`
+ */
+export function actionScriptComparePath(websiteId: string, actionId: string): string {
+  return `${websiteItemDetailPath(ACTION_KIND, websiteId, actionId)}/scripts/compare`;
+}
+
+/**
+ * Builds the path of one crawl run's page: the tree of pages the crawl found
+ * and each page's aria snapshot. Which page is selected is kept in the page's
+ * own query string (`?page=<crawledPageId>`), so it is not part of this path.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns `/websites/<websiteId>/crawl-runs/<crawlRunId>`
+ */
+export function crawlRunDetailPath(websiteId: string, crawlRunId: string): string {
+  return `${websiteDetailPath(websiteId)}/crawl-runs/${encodeURIComponent(crawlRunId)}`;
+}
+
 // === API urls (relative: the Vite dev server proxies /api to Express) ===
 
 /** The website collection endpoint. */
 export const WEBSITES_API_URL = "/api/websites";
+
+/** The live list of models "Convert to script" can use, with their effort levels. */
+export const SCRIPT_MODELS_API_URL = "/api/script-models";
 
 /**
  * Builds the API url of one website.
@@ -177,4 +204,40 @@ export function actionScriptRunFailureScreenshotApiUrl(
 ): string {
   const runsApiUrl = actionScriptRunsApiUrl(websiteId, actionId, actionScriptId);
   return `${runsApiUrl}/${encodeURIComponent(actionScriptRunId)}/failure-screenshot`;
+}
+
+/**
+ * Builds the API url of a website's crawl run collection: GET lists the runs,
+ * POST starts a new crawl in the background.
+ * @param websiteId - The owning website's cuid
+ * @returns `/api/websites/<websiteId>/crawl-runs`
+ */
+export function crawlRunsApiUrl(websiteId: string): string {
+  return `${websiteApiUrl(websiteId)}/crawl-runs`;
+}
+
+/**
+ * Builds the API url of one crawl run: the run plus its page summaries (the
+ * page tree, without snapshots), polled while the crawl runs.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns `/api/websites/<websiteId>/crawl-runs/<crawlRunId>`
+ */
+export function crawlRunApiUrl(websiteId: string, crawlRunId: string): string {
+  return `${crawlRunsApiUrl(websiteId)}/${encodeURIComponent(crawlRunId)}`;
+}
+
+/**
+ * Builds the API url of one crawled page in full, aria snapshot included.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @param crawledPageId - The page's cuid
+ * @returns `/api/websites/<websiteId>/crawl-runs/<crawlRunId>/pages/<crawledPageId>`
+ */
+export function crawledPageApiUrl(
+  websiteId: string,
+  crawlRunId: string,
+  crawledPageId: string,
+): string {
+  return `${crawlRunApiUrl(websiteId, crawlRunId)}/pages/${encodeURIComponent(crawledPageId)}`;
 }

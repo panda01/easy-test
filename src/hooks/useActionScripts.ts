@@ -27,8 +27,10 @@ export interface ActionScriptRecord {
   code: string;
   /** Warn-only rule scan results ("Line N: ..."); empty when the code is clean. */
   ruleViolations: string[];
-  /** The model that wrote the script. */
+  /** The model that wrote the script (the fallback's id when the chosen model declined). */
   modelId: string;
+  /** The effort level sent, or null: "Standard" for a model with no effort setting, or not recorded on older rows. */
+  effort: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;

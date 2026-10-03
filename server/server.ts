@@ -14,6 +14,9 @@ import { registerUseCaseRoutes } from "./controllers/useCases.js";
 import { registerActionRoutes } from "./controllers/actions.js";
 import { registerPlaywrightRoutes } from "./controllers/playwright.js";
 import { registerActionScriptRoutes } from "./controllers/actionScripts.js";
+import { registerScriptModelRoutes } from "./controllers/scriptModels.js";
+import { registerCrawlRunRoutes } from "./controllers/crawlRuns.js";
+import { markUnfinishedCrawlRunsInterrupted } from "./services/crawlRunService.js";
 
 const app = express();
 const PORT = resolveServerPort();
@@ -52,6 +55,8 @@ registerUseCaseRoutes(app);
 registerActionRoutes(app);
 registerPlaywrightRoutes(app, SCREENSHOT_DIRECTORY);
 registerActionScriptRoutes(app, ACTION_SCRIPT_DIRECTORY);
+registerScriptModelRoutes(app);
+registerCrawlRunRoutes(app);
 
 /**
  * Binds the Express app to a TCP port and logs the resolved URL.
@@ -72,6 +77,10 @@ export function startListening(expressApp: Express, port: number): Server {
 
 const serverIsUnderTest = process.env.NODE_ENV === "test";
 if (!serverIsUnderTest) {
+  // A crawl only runs inside this process, so any crawl run still "running"
+  // was cut off by a restart. Awaited BEFORE listening, so it can never flip
+  // a crawl this process starts. It never rejects (failures are logged).
+  await markUnfinishedCrawlRunsInterrupted();
   startListening(app, PORT);
 }
 
