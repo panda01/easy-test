@@ -6,10 +6,14 @@ than inline in a component.
 | Hook | Returns |
 |---|---|
 | `useHealth` | `{ health, isLoading, errorMessage }` from `GET /api/health` |
-| `useJsonResource` | `{ data, isLoading, errorMessage }` for any `GET` url; `data` is `unknown` |
+| `useJsonResource` | `{ data, isLoading, errorMessage }` for any `GET` url; `data` is `unknown`. A `null` url stays idle (no request, not loading) |
 | `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website |
 | `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them |
 | `useScreenshotRuns` | `{ runs, isLoading, errorMessage, addTakenRun }` for a website's screenshot runs; see below |
+| `useRecordListWithAdditions` | `{ records, isLoading, errorMessage, addRecord }`: the generic "fetched list plus rows a POST just created" behind the two hooks below |
+| `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript }` for an action's saved script versions |
+| `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun }` for one script's runs; a `null` script id fetches nothing |
+| `useWebsiteItemDeletion` | The delete dialog's state and handlers shared by the use case and action pages: DELETE, then a history-aware return to the website |
 | `useJsonMutation` | `{ sendJsonRequest, isSubmitting, errorMessage }` for `POST`/`PUT`/`DELETE` |
 | `useRequiredRouteParam` | A `:param` the matched route is guaranteed to have, as `string` |
 | `useReturnNavigation` / `useReturnToHereState` | History-aware exits from forms and deleted pages; see `../pages/README.md` |
@@ -55,3 +59,16 @@ fetched list:
 
 `runs` is never null — it is empty while loading or after a failed fetch,
 apart from any runs taken in the meantime.
+
+`useRecordListWithAdditions` is that same pattern made generic, and is what
+`useActionScripts` (a new version from "Convert to script") and
+`useActionScriptRuns` (a new run from "Run script") are built on: added
+records are kept only while a caller-supplied check says they belong to the
+list on screen (the same action / the same script), and a fetched record
+whose id was also added is dropped. `useScreenshotRuns` predates it and is
+left as is.
+
+`useActionScriptRuns` takes a `null` script id while the action has no script
+yet. That passes a `null` url to `useJsonResource`, which stays idle, so the
+action page can call the hook unconditionally (hooks cannot be called
+conditionally).

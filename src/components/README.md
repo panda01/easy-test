@@ -14,6 +14,12 @@ fetching is done by the page through a hook and passed down.
 | `WebsiteItemListSection.tsx` | The "Use cases" or "Actions" section of a website's page. |
 | `ScreenshotRunsSection.tsx` | The "Screenshots" section of a website's page: a line explaining when screenshots are taken (the website's timing settings), progress while a screenshot is being taken, the selected run (newest by default), and the "Run history" list to pick a run from. |
 | `ScreenshotRunDetails.tsx` | One screenshot run in full: a `role="status"` outcome line ("Failed · HTTP 404 · 1.2 s") with its reason, when and where it was taken, and its image (or "No screenshot was captured"). |
+| `WebsiteItemSummary.tsx` | The top of a use case's or action's page: kind, title with Edit (link) and Delete, description, timestamps, and the delete dialog. The delete flow comes in as a `WebsiteItemDeletion` prop (`../hooks/useWebsiteItemDeletion.ts`). |
+| `ActionScriptsSection.tsx` | The "Scripts" section of an action's page: the "Convert to script" button with progress and its error, the "Versions" list ("Version N", newest first, with rule-warning counts), and the selected version via `ActionScriptDetails`. |
+| `ActionScriptDetails.tsx` | One script version in full: when, by which model, and for which START_URL it was generated; a warning listing its rule violations (still runnable); the summary, the assumptions, and the code. |
+| `ActionScriptRunsSection.tsx` | "Runs of version N": the "Run script" button (it opens a browser window on this computer) with progress and its error, the selected run via `ActionScriptRunDetails`, and the "Run history" list. |
+| `ActionScriptRunDetails.tsx` | One script run in full: a `role="status"` outcome line ("Failed · exit code 1 · 4.2 s"), when it ran, its output, and its failure screenshot when there is one. |
+| `CodeBlock.tsx` | A read-only, monospace, scrollable `<pre>` for code or program output, with an accessible name. |
 
 ## Conventions
 

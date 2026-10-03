@@ -10,18 +10,25 @@ One component per route. Routes are declared in `../App.tsx`.
 | `WebsiteDetailPage.tsx` | `/websites/:websiteId` | One website, Take screenshot/Edit/Delete, its Screenshots section, and its Use cases and Actions sections. |
 | `WebsiteEditPage.tsx` | `/websites/:websiteId/edit` | The website form, pre-filled. |
 | `WebsiteItemCreatePage.tsx` | `/websites/:websiteId/use-cases/new`, `.../actions/new` | The title/description form. |
-| `WebsiteItemDetailPage.tsx` | `/websites/:websiteId/use-cases/:itemId`, `.../actions/:itemId` | One use case or action, Edit/Delete. |
+| `UseCaseDetailPage.tsx` | `/websites/:websiteId/use-cases/:itemId` | One use case, Edit/Delete. |
+| `ActionDetailPage.tsx` | `/websites/:websiteId/actions/:itemId` | One action, Edit/Delete, then its Scripts (Convert to script, versions, code) and the selected version's Runs (Run script, outcome, output, failure screenshot). |
 | `WebsiteItemEditPage.tsx` | `/websites/:websiteId/use-cases/:itemId/edit`, `.../actions/:itemId/edit` | The title/description form, pre-filled. |
 
 Pages compose hooks and MUI components; they do not fetch inline. See
 `../hooks/README.md`.
 
-## Use cases and actions share pages
+## Use cases and actions share the create and edit pages
 
-Both have the same shape (title + description) and the same screens, so the
-three `WebsiteItem*Page` components take an `itemKind` prop
-(`USE_CASE_KIND` or `ACTION_KIND`, from `../utils/websiteItemKinds.ts`) that
-supplies the labels and the URL segment.
+Both have the same shape (title + description) and the same forms, so the
+`WebsiteItemCreatePage` and `WebsiteItemEditPage` components take an
+`itemKind` prop (`USE_CASE_KIND` or `ACTION_KIND`, from
+`../utils/websiteItemKinds.ts`) that supplies the labels and the URL segment.
+
+The **detail** pages are separate components (`UseCaseDetailPage`,
+`ActionDetailPage`), because only actions have scripts and the page owns
+every request (components only take props). What they share lives outside
+them: `WebsiteItemSummary` (title, Edit/Delete, description, the delete
+dialog) and `useWebsiteItemDeletion` (the delete flow).
 
 Each of their `<Route>` elements has its own `key`. Without it, react-router
 would reuse the mounted component when Back/Forward moves between two routes

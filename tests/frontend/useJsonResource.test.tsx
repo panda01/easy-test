@@ -179,4 +179,33 @@ describe("useJsonResource", () => {
     expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null });
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
+
+  it("stays idle for a null url: no request, not loading, no data, no error", () => {
+    const fetchStub = stubFetchRoutes({});
+
+    const { result } = renderHook(() => useJsonResource(null));
+
+    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null });
+    expect(fetchStub).not.toHaveBeenCalled();
+  });
+
+  it("starts fetching when a null url becomes a real one, and goes idle again when it returns to null", async () => {
+    const fetchStub = stubFetchRoutes({
+      "GET /api/websites": { status: 200, body: [{ id: "website-1" }] },
+    });
+    const { result, rerender } = renderHook(
+      ({ resourceUrl }: { resourceUrl: string | null }) => useJsonResource(resourceUrl),
+      { initialProps: { resourceUrl: null as string | null } },
+    );
+
+    rerender({ resourceUrl: "/api/websites" });
+    expect(result.current.isLoading).toBe(true);
+    await waitFor(() => {
+      expect(result.current.data).toEqual([{ id: "website-1" }]);
+    });
+
+    rerender({ resourceUrl: null });
+    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null });
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+  });
 });

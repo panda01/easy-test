@@ -12,6 +12,7 @@ is no build step in development.
 | `controllers/` | Route registrars. One file per API section. |
 | `services/` | Stateless modules holding real logic, including the one Prisma client. |
 | `utils/` | Small pure helpers with no I/O. |
+| `prompts/` | Model prompts read at runtime, kept **verbatim**. See `prompts/README.md`. |
 | `prisma/` | `schema.prisma` and its docs. |
 | `generated/` | Prisma client output. Gitignored, regenerated, never imported directly. |
 

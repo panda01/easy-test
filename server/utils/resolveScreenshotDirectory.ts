@@ -1,4 +1,4 @@
-import path from "node:path";
+import { resolveConfiguredDirectory } from "./resolveConfiguredDirectory.js";
 
 /**
  * Resolves the directory screenshot PNGs are written to and served from, from
@@ -8,6 +8,7 @@ import path from "node:path";
  * root `../bootEnv.ts` loads `.env` from - so the committed default
  * `SCREENSHOT_DIR=screenshots` means `<repo>/screenshots`. An absolute value
  * is returned normalized. `~` is NOT expanded; use an absolute path instead.
+ * The shared rule lives in `resolveConfiguredDirectory`.
  *
  * Deliberately a hard failure rather than a default, mirroring
  * `resolveServerPort`: a missing setting surfaces as a one-line startup error
@@ -19,12 +20,5 @@ import path from "node:path";
  * @throws {Error} When `SCREENSHOT_DIR` is unset, empty, or only whitespace
  */
 export function resolveScreenshotDirectory(): string {
-  const rawScreenshotDirectory = process.env.SCREENSHOT_DIR?.trim();
-  const screenshotDirectoryIsMissing =
-    rawScreenshotDirectory === undefined || rawScreenshotDirectory === "";
-  if (screenshotDirectoryIsMissing) {
-    throw new Error("SCREENSHOT_DIR is not defined in environment variables");
-  }
-
-  return path.resolve(process.cwd(), rawScreenshotDirectory);
+  return resolveConfiguredDirectory("SCREENSHOT_DIR");
 }

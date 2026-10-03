@@ -4,6 +4,126 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-02 21:33 EDT — Actions convert to immutable Playwright scripts (Convert to script / Run script)
+
+**Intent:**
+- An action's page gets a **Convert to script** button. The server sends the action, plus the website's name and URL, to **Claude Opus 5.5**. The user's script-writing guidelines are used **verbatim** as the system prompt.
+- Claude answers with a summary, its assumptions, and a Playwright `.mjs` script that only does what a user could do with a mouse and keyboard.
+- Each conversion is saved as a new, **immutable** version. The user can view every version (summary, assumptions, code) and **Run** it.
+- A run executes the script with plain `node`, opening a visible browser on this machine. It records pass/fail, the step log, and a failure screenshot.
+- This lays the groundwork for use cases, which will later call action scripts with parameters. That is out of scope here, but scripts and runs are create-only, and the runner and scanner are script-agnostic.
+
+### Decisions (all made by the user)
+- **LLM:** Claude Opus 5.5 (`claude-opus-5-5`) via `@anthropic-ai/sdk`. The key is `ANTHROPIC_API_KEY` in `.env.local`.
+- **Refusal fallback:** a **named model**, `claude-opus-4-8`. If a safety classifier declines on Opus 5.5, the API retries on it inside the same call. The script records the model that answered.
+- **Prompt caching** (asked mid-implementation) on the prompt sent to the LLM.
+- **File type:** generated scripts stay **`.mjs`**, an explicit exception to CLAUDE.md's ".mts" rule (recorded in `server/prompts/README.md`). All project code stays TypeScript.
+- **Rule check:** **save and only warn**. Violations are stored and shown; the script is still runnable.
+- **Run mode:** **synchronous**, like Take screenshot, killed after **5 minutes**.
+- **Script environment:** **no environment variables at all** (`env: {}`).
+- **UI:** the shared detail page is split into **`ActionDetailPage`** and **`UseCaseDetailPage`**. Pages fetch, and components only take props.
+- **End-to-end test site:** this app itself (`http://localhost:5180/`). example.com no longer has its link, and now asks not to be used for testing.
+- **Defaults approved with the plan:**
+  - pass = exit 0 + no timeout + no `failure.png`;
+  - `ACTION_SCRIPT_DIR` must be inside the project;
+  - 503 for a missing key, 502 for an unusable reply;
+  - "Version N" is derived on the client;
+  - output is capped at 200k characters, keeping the tail;
+  - `effort: "high"`, `max_tokens` 16000;
+  - CLAUDE.md is not edited.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **New models.** `ActionScript` (`action_scripts`) and `ActionScriptRun` (`action_script_runs`), both create-only and soft deleted. **Back-relations:** `Website.actionScripts`, `Website.actionScriptRuns`, `Action.scripts`, `Action.scriptRuns`. **Doc comments** updated for the cascades. `npx prisma db push` and `npx prisma generate` were run; tables were only added. |
+| `server/services/dbService.ts` | **Re-exported types:** `ActionScript`, `ActionScriptRun`. **Added interfaces:** `ActionScriptInput`, `ActionScriptRunInput`. **Added functions:** `listActionScriptsForAction`, `findActionScriptForAction`, `createActionScriptForAction`, `listActionScriptRunsForScript`, `findActionScriptRunForScript`, `createActionScriptRunForScript`. There are deliberately no update functions. **Changed:** `softDeleteWebsite` also stamps scripts and runs (six tables, one timestamp). `softDeleteActionForWebsite` is now a `$transaction` that stamps the action's scripts and runs with the action's timestamp (signature unchanged). |
+| `server/services/scriptGenerationService.ts` (new) | **Exports:** `ACTION_SCRIPT_MODEL_ID`, `ACTION_SCRIPT_FALLBACK_MODEL_ID`, `ActionScriptConversionSchema` (zod), `ActionScriptConversionRequest`, `ActionScriptConversion`, `ScriptGenerationFailureReason`, `ScriptGenerationError`, `convertActionToScript`. **Module-private:** `buildConversionRequestMessage`, `readAnthropicApiKey`. **Request:** `client.beta.messages.parse` + `betaZodOutputFormat`, with fallbacks `[claude-opus-4-8]` (beta `server-side-fallback-2026-06-01`). **System prompt:** sent as a text block with `cache_control: ephemeral`. **Logging:** `[scripts]` usage lines (cache read/write). |
+| `server/services/scriptRunnerService.ts` (new) | **Exports:** `SCRIPT_RUN_TIMEOUT_MS`, `SCRIPT_KILL_GRACE_MS`, `SCRIPT_OUTPUT_CHARACTER_LIMIT`, `SCRIPT_FILE_NAME`, `FAILURE_SCREENSHOT_FILE_NAME`, `ScriptRunResult`, `runPlaywrightScript`. **Module-private:** `RunOutputCollector` (tail cap, NUL stripping), `signalProcessGroup`, `fileExists`. **Run:** `spawn(process.execPath, ["script.mjs"], { cwd, env: {}, detached: true })`. **Time limit:** SIGTERM to the process group at 5 min, SIGKILL 5 s later. |
+| `server/controllers/actionScripts.ts` (new) | **Exported:** `registerActionScriptRoutes(app, actionScriptDirectory)`. **Routes:** `GET`/`POST .../actions/:actionId/scripts`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`. **Module-private:** `findWebsiteAndAction`, `findWebsiteActionAndScript`, `statusForConversionFailure`, `buildRunFolderName`, `STATUS_BY_SCRIPT_GENERATION_FAILURE`, and the message constants. |
+| `server/controllers/playwright.ts` | `readSendErrorStatus` moved out to `server/utils/readSendErrorStatus.ts`; it is now imported. No behavior change. |
+| `server/server.ts` | `ACTION_SCRIPT_DIRECTORY = resolveActionScriptDirectory()` is resolved at boot. `registerActionScriptRoutes(app, ACTION_SCRIPT_DIRECTORY)` is registered. |
+| `server/utils/resolveConfiguredDirectory.ts` (new) | `resolveConfiguredDirectory(environmentVariableName)`: the body of the old `resolveScreenshotDirectory`, generalized. |
+| `server/utils/resolveScreenshotDirectory.ts` | Now a one-line call to `resolveConfiguredDirectory("SCREENSHOT_DIR")`. The error text is identical, so its existing test is untouched. |
+| `server/utils/resolveActionScriptDirectory.ts` (new) | `resolveActionScriptDirectory()`: requires `ACTION_SCRIPT_DIR` to sit strictly inside the project root. |
+| `server/utils/findScriptRuleViolations.ts` (new) | `findScriptRuleViolations(code)`: the warn-only scan. **Module-private:** `SCRIPT_RULES`, `IMPORT_SPECIFIER_PATTERNS`, `ALLOWED_IMPORT_SPECIFIER`, `readImportSpecifier`. |
+| `server/utils/readSendErrorStatus.ts` (new) | `readSendErrorStatus(sendError)`, extracted from the Playwright controller. |
+| `server/prompts/actionScriptGuidelines.md` (new) | The user's guidelines, byte-for-byte from "# Role" through the template. |
+| `server/prompts/README.md` (new) | Prompts are used verbatim. Records the `.mjs` exception. |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/pages/WebsiteItemDetailPage.tsx` | **Deleted.** Split into the two pages below. |
+| `src/pages/UseCaseDetailPage.tsx` (new) | The use case's page (summary + delete). |
+| `src/pages/ActionDetailPage.tsx` (new) | The action's page: summary + delete, `ActionScriptsSection`, and `ActionScriptRunsSection` for the selected version. **Inner handlers:** `convertToScript`, `handleConvertClick`, `runSelectedScript`, `handleRunClick`. |
+| `src/App.tsx` | The detail routes render `UseCaseDetailPage` / `ActionDetailPage`. The route-key comment was updated. |
+| `src/hooks/useJsonResource.ts` | `useJsonResource(resourceUrl: string \| null)`: a null url stays idle. `JsonResourceState` doc updated. |
+| `src/hooks/useRecordListWithAdditions.ts` (new) | `useRecordListWithAdditions`, `RecordListWithAdditions`. |
+| `src/hooks/useActionScripts.ts` (new) | `ActionScriptRecord`, `ActionScriptsState`, `useActionScripts`. |
+| `src/hooks/useActionScriptRuns.ts` (new) | `ActionScriptRunRecord`, `ActionScriptRunsState`, `useActionScriptRuns`. |
+| `src/hooks/useWebsiteItemDeletion.ts` (new) | `WebsiteItemDeletion`, `useWebsiteItemDeletion`, lifted from the old page. |
+| `src/components/WebsiteItemSummary.tsx` (new) | `WebsiteItemSummary`, `WebsiteItemSummaryProps`. |
+| `src/components/ActionScriptsSection.tsx`, `ActionScriptDetails.tsx`, `ActionScriptRunsSection.tsx`, `ActionScriptRunDetails.tsx`, `CodeBlock.tsx` (new) | The scripts UI, each with an exported `<Name>Props`. |
+| `src/utils/routePaths.ts` | **Added:** `actionScriptsApiUrl`, `actionScriptRunsApiUrl`, `actionScriptRunFailureScreenshotApiUrl`. Now imports `ACTION_KIND`. |
+| `src/utils/describeActionScriptRun.ts` (new) | `describeActionScriptRunOutcome`, `ActionScriptRunOutcomeFields`. |
+
+### Files changed — config, tooling, docs
+| File | Change |
+|---|---|
+| `package.json` / `package-lock.json` | `npm install @anthropic-ai/sdk zod` (runtime dependencies; both ship their own types). `npm audit` reports 4 high findings. They are pre-existing, in Prisma's `deepmerge-ts`/`mysql2` chain, not from these packages. |
+| `.env` | `ACTION_SCRIPT_DIR=action-scripts`. It has to be committed: `server.ts` resolves it at import, and the server test imports `server.ts`. |
+| `.env.example` | Documents `ACTION_SCRIPT_DIR` and `ANTHROPIC_API_KEY=` (real key only in `.env.local`). |
+| `.gitignore` | `/action-scripts/`. |
+| `README.md` | Feature paragraph, env table rows, and the runtime-deps note. |
+| `server/README.md`, `server/controllers/README.md`, `server/services/README.md`, `server/utils/README.md`, `server/prisma/README.md`, `src/hooks/README.md`, `src/components/README.md`, `src/pages/README.md`, `tests/README.md` | Updated for the above. |
+
+### Tests
+- **Backend, added:** `api/actionScripts.test.ts` (32 tests), `services/scriptGenerationService.test.ts` (16), `services/scriptRunnerService.test.ts` (13), `utils/findScriptRuleViolations.test.ts` (43), `utils/resolveConfiguredDirectory.test.ts`, `utils/resolveActionScriptDirectory.test.ts`, `utils/readSendErrorStatus.test.ts`.
+- **Backend fixture:** `fixtures/action-script-files/website-id-from-db/existing-run/failure.png`.
+- **Backend, updated:** `services/dbService.test.ts` adds the two delegates and the six new functions. The website cascade test now covers six tables. The action delete tests were rewritten because the function now cascades in a transaction; the old test asserted it did *not* use a transaction. `server.test.ts` adds the new mocks plus wiring and boot-directory tests.
+- **Frontend split:** `WebsiteItemDetailPage.test.tsx` became `UseCaseDetailPage.test.tsx` and `ActionDetailPage.test.tsx`. **Every one of its 11 cases was moved, not removed:** they live in `support/websiteItemDetailPageCases.tsx` and both pages run them. The action page adds 10 script/run cases; the use case page adds a "never asks for scripts" case.
+- **Frontend, added:** `useRecordListWithAdditions`, `useActionScripts`, `useActionScriptRuns`, `useWebsiteItemDeletion`, `describeActionScriptRun`, `CodeBlock`, `WebsiteItemSummary`, `ActionScriptDetails`, `ActionScriptRunDetails`, `ActionScriptsSection`, `ActionScriptRunsSection`. `routePaths` and `useJsonResource` (null url) were extended. Helpers gained `buildActionScriptRecord` and `buildActionScriptRunRecord`.
+
+### Verification performed
+- **Runner smoke** (headless scripts via tsx): with `env: {}` a script imports `playwright` from the project and launches Chromium. Pass gave exit 0. Fail gave exit 1 with `failure.png` in the run folder.
+- **Prompt caching** (two real conversions, back to back): the first wrote 2,535 tokens to the cache; the second read 2,535 from it.
+  - Structured output and the named fallback were accepted together.
+  - The script followed the template exactly.
+- **End-to-end Playwright UI run** against the user's running dev servers, with a test website pointing at this app:
+  - **Passing action** ("Click Websites in the header…"): converted in about 7 s; START_URL and `headless: false` were in the code. Run: visible Chromium, **Passed** with the step log.
+  - **Failing action** ("Click 'Launch rocket'…"): **Failed · exit code 1**, and the failure screenshot loaded in the page.
+  - **UI states:** empty state, disabled buttons with progress bars, version switching, run history, and a hand-saved script showing **6 rule warnings** while still runnable.
+  - **Pages:** the use case page has no Scripts section and makes no `/scripts` requests. Take screenshot still works.
+- **Missing key:** a separate server on port 3099 with `ANTHROPIC_API_KEY=` booted, and convert answered **503** with the explanation. That server was then stopped.
+- **5 minute limit:** a hand-saved script that never finishes answered **201** after 305 s.
+  - Recorded as `timedOut: true`, `exitSignal: SIGKILL`.
+  - Playwright closed Chromium on SIGTERM; the stubborn script was SIGKILLed 5 s later.
+  - No Chromium or `script.mjs` processes were left.
+- **Restart orphan:** an earlier attempt was cut short at 120 s when an edit under `server/` made `tsx watch` restart the dev server. The response was lost and the script kept running, which is the documented limitation. Those orphaned processes were stopped by hand.
+- **Delete cascades (psql):**
+  - Deleting an action stamped it and its scripts with one `deletedAt`, and left other actions' scripts active.
+  - Deleting the website stamped every remaining row (website, use case, actions, screenshot run, scripts, runs) with one timestamp, leaving 0 active rows.
+  - The user's two websites were untouched.
+- **Checks:**
+  - `npm run test:coverage`: **741 tests in 61 files, all passing**. Statements 99.68%, branches 99.08%, functions 100%, lines 99.91%.
+  - `npm run lint`, `npm run tsc` and `npm run tsc:client`: clean, with no rule disables and no config changes.
+- **Cleanup:**
+  - Test data was soft deleted.
+  - `claude_tmp/` and the test run folders (`action-scripts/`) were removed.
+  - The user's dev servers were left running as found.
+  - No git history was written; everything is left uncommitted in the working tree.
+
+### Notable during implementation
+- **Two bugs caught by the new tests:**
+  - `resolveActionScriptDirectory` treated a folder named `..runs` as outside the project. It now checks for a real `..` path segment.
+  - Lint flagged a `let timedOut` that TypeScript narrows to `false` because it is set inside a timer callback. It now lives on a small state object.
+- **Playwright's SIGTERM handler closes the browser but does not exit the process,** so a script that keeps itself alive needs the SIGKILL backstop. Template scripts end once the browser closes.
+- **Known limitations** (documented in `server/controllers/README.md`):
+  - A dev-server restart or `./stop-dev.sh` during a run loses the response, and the script keeps running. A script waiting in `page.pause()` stays open until closed by hand.
+  - Run folders accumulate on disk.
+
+---
+
 ## 2026-10-02 18:28 EDT — Minimum wait default lowered from 300 ms to 1 ms
 
 **Intent:**

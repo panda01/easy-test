@@ -4,8 +4,8 @@ import express from "express";
 import path from "node:path";
 
 /**
- * server.ts registers the website, use case, action, and Playwright
- * controllers, and each of them imports dbService - whose module body
+ * server.ts registers the website, use case, action, Playwright, and action
+ * script controllers, and each of them imports dbService - whose module body
  * constructs a real PrismaClient. Every exported dbService function is
  * replaced so loading the full app never builds a client, and the wiring
  * tests below can choose what a query returns.
@@ -32,6 +32,12 @@ const mockDbService = vi.hoisted(() => ({
   listScreenshotRunsForWebsite: vi.fn(),
   findScreenshotRunForWebsite: vi.fn(),
   createScreenshotRunForWebsite: vi.fn(),
+  listActionScriptsForAction: vi.fn(),
+  findActionScriptForAction: vi.fn(),
+  createActionScriptForAction: vi.fn(),
+  listActionScriptRunsForScript: vi.fn(),
+  findActionScriptRunForScript: vi.fn(),
+  createActionScriptRunForScript: vi.fn(),
 }));
 
 /** The Playwright service is replaced so loading the full app can never launch a browser. */
@@ -39,10 +45,24 @@ const mockPlaywrightService = vi.hoisted(() => ({
   captureWebsiteScreenshot: vi.fn(),
 }));
 
+/** Claude is replaced so loading the full app can never call the Anthropic API. */
+const mockScriptGenerationService = vi.hoisted(() => ({
+  convertActionToScript: vi.fn(),
+}));
+
+/** The script runner is replaced so loading the full app can never start node or a browser. */
+const mockScriptRunnerService = vi.hoisted(() => ({
+  FAILURE_SCREENSHOT_FILE_NAME: "failure.png",
+  runPlaywrightScript: vi.fn(),
+}));
+
 vi.mock("../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../server/services/playwrightService.js", () => mockPlaywrightService);
+vi.mock("../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
+vi.mock("../../server/services/scriptRunnerService.js", () => mockScriptRunnerService);
 
 import { app, startListening } from "../../server/server.js";
+import { resolveActionScriptDirectory } from "../../server/utils/resolveActionScriptDirectory.js";
 import { resolveScreenshotDirectory } from "../../server/utils/resolveScreenshotDirectory.js";
 
 // Dates are ISO strings because that is how they cross the wire.
@@ -175,6 +195,59 @@ describe("server.ts", () => {
     // bootEnv loaded SCREENSHOT_DIR from .env, as it does for `npm run dev`.
     const configuredScreenshotDirectory = resolveScreenshotDirectory();
     expect(screenshotFilePath.startsWith(configuredScreenshotDirectory + path.sep)).toBe(true);
+  });
+
+  it("wires the action script routes into the full app", async () => {
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
+    mockDbService.listActionScriptsForAction.mockResolvedValue([]);
+
+    const res = await request(app).get(
+      `/api/websites/${sampleWebsite.id}/actions/${sampleAction.id}/scripts`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+    expect(mockDbService.listActionScriptsForAction).toHaveBeenCalledWith(
+      sampleWebsite.id,
+      sampleAction.id,
+    );
+  });
+
+  it("hands the action script routes the directory resolved from ACTION_SCRIPT_DIR at boot", async () => {
+    const sampleScript = {
+      id: "action-script-1",
+      websiteId: sampleWebsite.id,
+      actionId: sampleAction.id,
+      code: "import { chromium } from 'playwright';\n",
+    };
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
+    mockDbService.findActionScriptForAction.mockResolvedValue(sampleScript);
+    mockScriptRunnerService.runPlaywrightScript.mockResolvedValue({
+      succeeded: true,
+      exitCode: 0,
+      exitSignal: null,
+      timedOut: false,
+      output: "",
+      outputWasTruncated: false,
+      failureScreenshotWasCaptured: false,
+      durationMs: 1200,
+    });
+    mockDbService.createActionScriptRunForScript.mockResolvedValue({ id: "run-1" });
+
+    const res = await request(app).post(
+      `/api/websites/${sampleWebsite.id}/actions/${sampleAction.id}/scripts/${sampleScript.id}/runs`,
+    );
+
+    expect(res.status).toBe(201);
+    const [, runDirectory] = mockScriptRunnerService.runPlaywrightScript.mock.calls[0] as [
+      string,
+      string,
+    ];
+    // bootEnv loaded ACTION_SCRIPT_DIR from .env, as it does for `npm run dev`.
+    const configuredActionScriptDirectory = resolveActionScriptDirectory();
+    expect(runDirectory.startsWith(configuredActionScriptDirectory + path.sep)).toBe(true);
   });
 
   it("parses a JSON body before it reaches the website routes", async () => {

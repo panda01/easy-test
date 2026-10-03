@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  actionScriptRunFailureScreenshotApiUrl,
+  actionScriptRunsApiUrl,
+  actionScriptsApiUrl,
   NEW_WEBSITE_PATH,
   WEBSITE_LIST_PATH,
   WEBSITES_API_URL,
@@ -109,6 +112,34 @@ describe("routePaths: screenshot run API urls", () => {
     );
     expect(screenshotRunImageApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/screenshot-runs/${ENCODED_UNSAFE_ID}/screenshot`,
+    );
+  });
+});
+
+describe("routePaths: action script API urls", () => {
+  it("builds an action's script collection url", () => {
+    expect(actionScriptsApiUrl("website-1", "action-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts",
+    );
+  });
+
+  it("builds a script's run collection url", () => {
+    expect(actionScriptRunsApiUrl("website-1", "action-1", "script-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/runs",
+    );
+  });
+
+  it("builds one run's failure screenshot url", () => {
+    expect(actionScriptRunFailureScreenshotApiUrl("website-1", "action-1", "script-1", "run-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/runs/run-1/failure-screenshot",
+    );
+  });
+
+  it("encodes every id in action script urls", () => {
+    expect(
+      actionScriptRunFailureScreenshotApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID, UNSAFE_ID),
+    ).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/scripts/${ENCODED_UNSAFE_ID}/runs/${ENCODED_UNSAFE_ID}/failure-screenshot`,
     );
   });
 });

@@ -10,6 +10,8 @@ import {
   type InitialEntry,
 } from "react-router-dom";
 import { expect, vi, type Mock } from "vitest";
+import { type ActionScriptRunRecord } from "../../../src/hooks/useActionScriptRuns";
+import { type ActionScriptRecord } from "../../../src/hooks/useActionScripts";
 import { type ScreenshotRunRecord } from "../../../src/hooks/useScreenshotRuns";
 import { type WebsiteItemRecord } from "../../../src/hooks/useWebsiteItems";
 import { type WebsiteRecord } from "../../../src/hooks/useWebsites";
@@ -238,6 +240,64 @@ export function buildScreenshotRunRecord(
     durationMs: 1234,
     createdAt: "2026-03-02T03:04:05.000Z",
     updatedAt: "2026-03-02T03:04:05.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds an action script version as the API returns it: by default a clean
+ * script for action item-1 of website-1, with one assumption.
+ * @param overrides - Fields to replace in the default script
+ * @returns A complete action script record
+ */
+export function buildActionScriptRecord(
+  overrides: Partial<ActionScriptRecord> = {},
+): ActionScriptRecord {
+  return {
+    id: "script-1",
+    websiteId: "website-1",
+    actionId: "item-1",
+    websiteName: "Example",
+    startUrl: "https://example.com",
+    actionTitle: "Log in",
+    actionDescription: "Sign in with a valid account",
+    summary: "Opens the site and signs in.",
+    assumptions: ["The sign-in button is labelled Sign in"],
+    code: "import { chromium } from 'playwright';\n// script-1 steps\n",
+    ruleViolations: [],
+    modelId: "claude-opus-5-5",
+    createdAt: "2026-04-02T03:04:05.000Z",
+    updatedAt: "2026-04-02T03:04:05.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds an action script run as the API returns it: by default a passing
+ * run of script-1 with a two-line step log and no failure screenshot.
+ * @param overrides - Fields to replace in the default run
+ * @returns A complete action script run record
+ */
+export function buildActionScriptRunRecord(
+  overrides: Partial<ActionScriptRunRecord> = {},
+): ActionScriptRunRecord {
+  return {
+    id: "script-run-1",
+    websiteId: "website-1",
+    actionId: "item-1",
+    actionScriptId: "script-1",
+    succeeded: true,
+    exitCode: 0,
+    exitSignal: null,
+    timedOut: false,
+    output: "▶ Open the site\n✔ Use case completed\n",
+    outputWasTruncated: false,
+    failureScreenshotFileName: null,
+    durationMs: 4321,
+    createdAt: "2026-04-03T03:04:05.000Z",
+    updatedAt: "2026-04-03T03:04:05.000Z",
     deletedAt: null,
     ...overrides,
   };

@@ -1,12 +1,13 @@
 import { type ReactElement } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import AppHeader from "./components/AppHeader";
+import ActionDetailPage from "./pages/ActionDetailPage";
 import HomePage from "./pages/HomePage";
+import UseCaseDetailPage from "./pages/UseCaseDetailPage";
 import WebsiteCreatePage from "./pages/WebsiteCreatePage";
 import WebsiteDetailPage from "./pages/WebsiteDetailPage";
 import WebsiteEditPage from "./pages/WebsiteEditPage";
 import WebsiteItemCreatePage from "./pages/WebsiteItemCreatePage";
-import WebsiteItemDetailPage from "./pages/WebsiteItemDetailPage";
 import WebsiteItemEditPage from "./pages/WebsiteItemEditPage";
 import WebsiteListPage from "./pages/WebsiteListPage";
 import { ACTION_KIND, USE_CASE_KIND } from "./utils/websiteItemKinds";
@@ -24,8 +25,10 @@ import { ACTION_KIND, USE_CASE_KIND } from "./utils/websiteItemKinds";
  *
  * Each use case / action route element carries a distinct `key`. react-router
  * reuses a mounted component when two routes render the same component type
- * (e.g. Back from an action page to a use case page), which would carry state
- * across; the key forces a fresh mount per route instead.
+ * (e.g. Back from an action's edit page to a use case's edit page), which
+ * would carry state across; the key forces a fresh mount per route instead.
+ * The detail pages are separate components (`UseCaseDetailPage`,
+ * `ActionDetailPage`) and keep their keys for consistency.
  * @returns The routed application
  */
 export default function App(): ReactElement {
@@ -46,7 +49,7 @@ export default function App(): ReactElement {
         />
         <Route
           path="/websites/:websiteId/use-cases/:itemId"
-          element={<WebsiteItemDetailPage key="use-case-detail" itemKind={USE_CASE_KIND} />}
+          element={<UseCaseDetailPage key="use-case-detail" />}
         />
         <Route
           path="/websites/:websiteId/use-cases/:itemId/edit"
@@ -59,7 +62,7 @@ export default function App(): ReactElement {
         />
         <Route
           path="/websites/:websiteId/actions/:itemId"
-          element={<WebsiteItemDetailPage key="action-detail" itemKind={ACTION_KIND} />}
+          element={<ActionDetailPage key="action-detail" />}
         />
         <Route
           path="/websites/:websiteId/actions/:itemId/edit"

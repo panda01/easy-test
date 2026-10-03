@@ -1,4 +1,4 @@
-import { type WebsiteItemKind } from "./websiteItemKinds";
+import { ACTION_KIND, type WebsiteItemKind } from "./websiteItemKinds";
 
 /*
  * Every page URL and API URL in the client is built here, so a link, a
@@ -132,4 +132,49 @@ export function screenshotRunsApiUrl(websiteId: string): string {
  */
 export function screenshotRunImageApiUrl(websiteId: string, screenshotRunId: string): string {
   return `${screenshotRunsApiUrl(websiteId)}/${encodeURIComponent(screenshotRunId)}/screenshot`;
+}
+
+/**
+ * Builds the API url of an action's script collection: GET lists every saved
+ * version, POST converts the action into a new version with Claude.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The action's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts`
+ */
+export function actionScriptsApiUrl(websiteId: string, actionId: string): string {
+  return `${websiteItemApiUrl(ACTION_KIND, websiteId, actionId)}/scripts`;
+}
+
+/**
+ * Builds the API url of a script's run collection: GET lists the recorded
+ * runs, POST runs the script and records a new run.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/runs`
+ */
+export function actionScriptRunsApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+): string {
+  return `${actionScriptsApiUrl(websiteId, actionId)}/${encodeURIComponent(actionScriptId)}/runs`;
+}
+
+/**
+ * Builds the API url of one failed run's screenshot PNG, for an `<img src>`.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @param actionScriptRunId - The run's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/runs/<actionScriptRunId>/failure-screenshot`
+ */
+export function actionScriptRunFailureScreenshotApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+): string {
+  const runsApiUrl = actionScriptRunsApiUrl(websiteId, actionId, actionScriptId);
+  return `${runsApiUrl}/${encodeURIComponent(actionScriptRunId)}/failure-screenshot`;
 }

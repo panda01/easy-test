@@ -4,7 +4,8 @@ import { describeError, readResponseErrorMessage } from "../utils/describeError"
 /**
  * The three flat values a page needs to render a GET request: loading,
  * failed, or loaded. Exactly one of `isLoading`, `errorMessage !== null`, or
- * `data !== null` describes the current state.
+ * `data !== null` describes the current state - except while idle (a null
+ * url), when all three are empty.
  */
 export interface JsonResourceState<TData> {
   /** The parsed response body; null while loading and after a failure. */
@@ -38,13 +39,19 @@ interface FinishedRequest {
  *
  * The `cancelled` flag stops a response that resolves after unmount, or after
  * the url has changed again, from calling setState.
- * @param resourceUrl - Relative API url to GET, e.g. `/api/websites`
+ *
+ * A null url means "nothing to fetch yet" (e.g. the runs of a script that
+ * does not exist yet): the hook stays idle - no request, not loading, no data,
+ * no error - so a page can call it unconditionally.
+ * @param resourceUrl - Relative API url to GET, e.g. `/api/websites`; null to stay idle
  * @returns The loading / error / data state for that url
  */
-export function useJsonResource(resourceUrl: string): JsonResourceState<unknown> {
+export function useJsonResource(resourceUrl: string | null): JsonResourceState<unknown> {
   const [finishedRequest, setFinishedRequest] = useState<FinishedRequest | null>(null);
 
   useEffect(() => {
+    const thereIsNothingToFetch = resourceUrl === null;
+    if (thereIsNothingToFetch) return;
     let cancelled = false;
 
     /**
@@ -74,6 +81,10 @@ export function useJsonResource(resourceUrl: string): JsonResourceState<unknown>
     };
   }, [resourceUrl]);
 
+  const hookIsIdle = resourceUrl === null;
+  if (hookIsIdle) {
+    return { data: null, isLoading: false, errorMessage: null };
+  }
   const finishedRequestIsForCurrentUrl = finishedRequest?.resourceUrl === resourceUrl;
   if (finishedRequest === null || !finishedRequestIsForCurrentUrl) {
     return { data: null, isLoading: true, errorMessage: null };

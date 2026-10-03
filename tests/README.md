@@ -38,6 +38,21 @@ controller mocks `../services/playwrightService.js` outright.
 `backend/fixtures/screenshot-files/` holds a tiny committed PNG that the
 Playwright controller spec serves through the real `res.sendFile`.
 
+**No unit test ever calls the Anthropic API or starts a process.**
+`scriptGenerationService.test.ts` replaces `@anthropic-ai/sdk` with a fake
+client whose `beta.messages.parse` is a spy (the real prompt file is read, to
+prove it is sent verbatim); `scriptRunnerService.test.ts` replaces
+`node:child_process` with a fake child (an EventEmitter with stdout/stderr
+streams) and `node:fs/promises`, and drives the 5 minute limit with fake
+`setTimeout`. Every spec that loads the action scripts controller mocks both
+services outright. `backend/fixtures/action-script-files/` holds the committed
+failure PNG that controller spec serves.
+
+`frontend/support/websiteItemDetailPageCases.tsx` holds the detail-page
+cases (summary and delete flow) that `UseCaseDetailPage.test.tsx` and
+`ActionDetailPage.test.tsx` both run - like the helpers file, it is not a spec
+itself.
+
 ## Coverage
 
 Global thresholds: **lines 80 / branches 70 / functions 80 / statements 80.**

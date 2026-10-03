@@ -30,8 +30,9 @@ generator client {
 ///   select "createdAt" from websites;
 ///
 /// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
-/// timestamp on the website's active use cases, actions, and screenshot runs)
-/// instead of removing the row. Every dbService query filters `deletedAt: null`.
+/// timestamp on the website's active use cases, actions, screenshot runs,
+/// action scripts, and action script runs) instead of removing the row. Every
+/// dbService query filters `deletedAt: null`.
 ///
 /// Two per-website settings control WHEN the Playwright controller takes a
 /// screenshot, after the page's `load` event:
@@ -43,18 +44,20 @@ generator client {
 /// Both are whole milliseconds from 0 to 30000, and the cap may not be lower
 /// than the minimum (enforced by `validateWebsiteInput`).
 model Website {
-  id                      String          @id @default(cuid())
+  id                      String            @id @default(cuid())
   url                     String
   name                    String
   description             String?
-  networkIdleTimeoutMs    Int             @default(5000)
-  screenshotMinimumWaitMs Int             @default(1)
-  createdAt               DateTime        @default(now())
-  updatedAt               DateTime        @updatedAt
+  networkIdleTimeoutMs    Int               @default(5000)
+  screenshotMinimumWaitMs Int               @default(1)
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
   deletedAt               DateTime?
   useCases                UseCase[]
   actions                 Action[]
   screenshotRuns          ScreenshotRun[]
+  actionScripts           ActionScript[]
+  actionScriptRuns        ActionScriptRun[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -79,16 +82,19 @@ model UseCase {
 }
 
 /// A reusable step on a website, e.g. "Log in". Belongs to exactly one
-/// website. Soft deleted like `Website`.
+/// website. Soft deleted like `Website`; deleting an action also stamps the
+/// same `deletedAt` on its active scripts and script runs.
 model Action {
-  id          String    @id @default(cuid())
+  id          String            @id @default(cuid())
   websiteId   String
   title       String
   description String
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
   deletedAt   DateTime?
-  website     Website   @relation(fields: [websiteId], references: [id])
+  website     Website           @relation(fields: [websiteId], references: [id])
+  scripts     ActionScript[]
+  scriptRuns  ActionScriptRun[]
 
   @@index([websiteId])
   @@map("actions")
@@ -129,4 +135,89 @@ model ScreenshotRun {
 
   @@index([websiteId])
   @@map("screenshot_runs")
+}
+
+/// A Playwright script Claude generated from an action ("Convert to script").
+/// Belongs to exactly one action (and, denormalized, its website).
+///
+/// IMMUTABLE: rows are create-only - dbService has no update function for them
+/// and there is no PUT route. Converting the same action again creates a NEW
+/// row; the UI numbers them "Version 1, 2, ..." by `createdAt`. Soft deleted
+/// only together with its action or its website (same `deletedAt`).
+///
+/// `websiteName`, `startUrl`, `actionTitle`, and `actionDescription` are
+/// snapshots of exactly what was sent to Claude, because the website and the
+/// action can be edited afterwards. `startUrl` is the website URL the script's
+/// `START_URL` constant was told to use.
+///
+/// `code` is the complete `.mjs` source, run verbatim with `node`.
+/// `ruleViolations` is the warn-only text scan of `code` for features a real
+/// user could not use (e.g. "Line 14: .fill( - ..."); empty when clean.
+/// `modelId` is the model that actually answered (`response.model`) - normally
+/// claude-opus-5-5, or the fallback model when the first one declined.
+model ActionScript {
+  id                String            @id @default(cuid())
+  websiteId         String
+  actionId          String
+  websiteName       String
+  startUrl          String
+  actionTitle       String
+  actionDescription String
+  summary           String
+  assumptions       String[]
+  code              String
+  ruleViolations    String[]
+  modelId           String
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  deletedAt         DateTime?
+  website           Website           @relation(fields: [websiteId], references: [id])
+  action            Action            @relation(fields: [actionId], references: [id])
+  runs              ActionScriptRun[]
+
+  @@index([websiteId])
+  @@index([actionId])
+  @@map("action_scripts")
+}
+
+/// One "Run script": the stored `ActionScript.code` was written to
+/// `<ACTION_SCRIPT_DIR>/<websiteId>/<uuid>/script.mjs` and run with `node`
+/// (a visible browser window). Create-only, like the script it ran. Soft
+/// deleted together with its action or website.
+///
+/// `succeeded` is true only when the process exited with code 0, was not
+/// stopped by the time limit, AND wrote no `failure.png` (the template only
+/// writes it from its `catch`). `exitCode` is null when the process was
+/// killed by a signal, which `exitSignal` then names. `timedOut` is true when
+/// the run hit the time limit and was stopped.
+///
+/// `output` is the combined stdout + stderr (the template's step log), capped;
+/// when the cap cut it, the EARLY part was dropped and `outputWasTruncated` is
+/// true. `failureScreenshotFileName` is RELATIVE to `ACTION_SCRIPT_DIR`, e.g.
+/// `<websiteId>/<uuid>/failure.png`, or null when none was written.
+/// `durationMs` runs from process start to process end.
+model ActionScriptRun {
+  id                        String       @id @default(cuid())
+  websiteId                 String
+  actionId                  String
+  actionScriptId            String
+  succeeded                 Boolean
+  exitCode                  Int?
+  exitSignal                String?
+  timedOut                  Boolean
+  output                    String
+  outputWasTruncated        Boolean
+  failureScreenshotFileName String?
+  durationMs                Int
+  createdAt                 DateTime     @default(now())
+  updatedAt                 DateTime     @updatedAt
+  deletedAt                 DateTime?
+  website                   Website      @relation(fields: [websiteId], references: [id])
+  action                    Action       @relation(fields: [actionId], references: [id])
+  actionScript              ActionScript @relation(fields: [actionScriptId], references: [id])
+
+  @@index([websiteId])
+  @@index([actionId])
+  @@index([actionScriptId])
+  @@map("action_script_runs")
 }

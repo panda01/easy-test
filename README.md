@@ -24,6 +24,22 @@ website form: a network idle cap (default 5000 ms) and a minimum wait
 LAN addresses included — and an invalid TLS certificate counts as a failed
 visit. See `server/controllers/README.md` and `server/services/README.md`.
 
+An action's page has a **Convert to script** button. The server sends the
+action (and the website's name and URL) to **Claude Opus 5.5**, with the
+script-writing guidelines in `server/prompts/actionScriptGuidelines.md` used
+verbatim as the system prompt (prompt-cached). Claude answers with a summary,
+its assumptions, and a Playwright `.mjs` script that may only do what a user
+could do with a mouse and keyboard. Every conversion is saved as a new,
+**immutable** version - there is no edit - and the page shows each version's
+summary, assumptions, and code. A text scan flags forbidden features (`.fill(`,
+`page.evaluate`, `force: true`, imports other than `playwright`, ...) as
+**warnings only**: the script is still saved and runnable. **Run script** runs
+the selected version with plain `node` and **no environment variables**,
+opening a **visible browser window on this machine**; it records pass/fail,
+the step log, and a failure screenshot, and stops a run after **5 minutes**.
+Without `ANTHROPIC_API_KEY` the server still boots and conversion answers 503.
+See `server/controllers/README.md` and `server/services/README.md`.
+
 **This project is development-only.** There is no production build, no PM2, no
 Docker, and no CI.
 
@@ -84,6 +100,8 @@ that is already set. `.env.example` documents every key.
 | `SERVER_PORT` / `VITE_PORT` | The two dev ports (see above). |
 | `DATABASE_URL` | PostgreSQL connection string. |
 | `SCREENSHOT_DIR` | Where screenshot PNGs are written and served from. Required; default `screenshots` (gitignored). A relative path resolves against the project root; `~` is not expanded. |
+| `ACTION_SCRIPT_DIR` | Where each script run's folder (`script.mjs`, plus `failure.png` when it fails) is written. Required; default `action-scripts` (gitignored). Must be **inside the project** - generated scripts import `playwright` from its `node_modules` - or the server refuses to start. |
+| `ANTHROPIC_API_KEY` | **Secret** - put it in `.env.local` only. Used by "Convert to script". Optional for boot: without it, conversion answers 503 with an explanation. |
 
 ## Database
 
@@ -128,8 +146,10 @@ which is the honest classification for a dev-only project. **Move them back to
 `npm ci --omit=dev`, but the `postinstall` hook (`prisma generate && prisma db
 push`) still runs and would fail without the Prisma CLI.
 
-`playwright` is already in `dependencies`, because the server imports it at
-runtime. Its browser is not part of the npm package: a production machine also
+`playwright`, `@anthropic-ai/sdk`, and `zod` are already in `dependencies`,
+because the server imports them at runtime (zod is the SDK's peer dependency
+for its structured-output helper). Generated scripts also import `playwright`
+from this project's `node_modules`. Its browser is not part of the npm package: a production machine also
 needs `npx playwright install chromium`.
 
 The production `express.static(dist)` mount and SPA fallback are also omitted; a

@@ -5,10 +5,12 @@ import {
   type UseCase,
   type Action,
   type ScreenshotRun,
+  type ActionScript,
+  type ActionScriptRun,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 
-export type { Website, UseCase, Action, ScreenshotRun };
+export type { Website, UseCase, Action, ScreenshotRun, ActionScript, ActionScriptRun };
 
 /**
  * `DATABASE_URL` is read at MODULE LOAD time, which means `../bootEnv.js` must
@@ -80,6 +82,56 @@ export interface ScreenshotRunInput {
   /** The PNG's path relative to the screenshot directory, or null when nothing was captured. */
   screenshotFileName: string | null;
   /** How long the navigation took, in milliseconds. */
+  durationMs: number;
+}
+
+/**
+ * The fields a caller supplies when saving one generated action script. The
+ * four snapshots record exactly what was sent to Claude; the rest is what came
+ * back, plus the rule scan of the code. Scripts are create-only, so there is
+ * no matching "update" input.
+ */
+export interface ActionScriptInput {
+  /** The website's name at conversion time. */
+  websiteName: string;
+  /** The website's URL at conversion time - the script's START_URL. */
+  startUrl: string;
+  /** The action's title at conversion time. */
+  actionTitle: string;
+  /** The action's description at conversion time. */
+  actionDescription: string;
+  /** Claude's one-line summary of what the script does. */
+  summary: string;
+  /** The assumptions Claude made where the action was ambiguous. */
+  assumptions: string[];
+  /** The complete `.mjs` source. */
+  code: string;
+  /** Warn-only rule scan results; empty when the code is clean. */
+  ruleViolations: string[];
+  /** The model that actually wrote the script. */
+  modelId: string;
+}
+
+/**
+ * The fields a caller supplies when recording one script run. Runs are
+ * create-only, so there is no matching "update" input.
+ */
+export interface ActionScriptRunInput {
+  /** True only for exit code 0, no timeout, and no failure screenshot. */
+  succeeded: boolean;
+  /** The process exit code, or null when it was killed by a signal. */
+  exitCode: number | null;
+  /** The signal that killed the process, or null when it exited on its own. */
+  exitSignal: string | null;
+  /** True when the run hit the time limit and was stopped. */
+  timedOut: boolean;
+  /** Combined stdout + stderr, capped. */
+  output: string;
+  /** True when the cap dropped the start of the output. */
+  outputWasTruncated: boolean;
+  /** The failure PNG's path relative to the action script directory, or null when none was written. */
+  failureScreenshotFileName: string | null;
+  /** How long the process ran, in milliseconds. */
   durationMs: number;
 }
 
@@ -204,10 +256,10 @@ export async function updateWebsite(
 }
 
 /**
- * Soft deletes an active website AND its active use cases, actions, and
- * screenshot runs.
+ * Soft deletes an active website AND its active use cases, actions, screenshot
+ * runs, action scripts, and action script runs.
  *
- * All four updates run in one transaction and share one `deletedAt`
+ * All six updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
@@ -243,6 +295,14 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.screenshotRun.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionScript.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionScriptRun.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -414,7 +474,11 @@ export async function updateActionForWebsite(
 }
 
 /**
- * Soft deletes one active action.
+ * Soft deletes one active action AND its active scripts and script runs.
+ *
+ * All three updates run in one transaction and share one `deletedAt`
+ * timestamp, like `softDeleteWebsite`. When no active action matched, the
+ * scripts and runs are left untouched.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
  * @returns True when an active action was deleted; false when none matched
@@ -423,11 +487,39 @@ export async function softDeleteActionForWebsite(
   websiteId: string,
   actionId: string,
 ): Promise<boolean> {
-  const actionUpdate = await prisma.action.updateMany({
-    where: { id: actionId, websiteId, deletedAt: null },
-    data: { deletedAt: new Date() },
-  });
-  const anActiveActionWasDeleted = actionUpdate.count > 0;
+  const deletedAt = new Date();
+
+  /**
+   * The transaction body. Declared with an explicit parameter type because
+   * the overloaded `$transaction` signature does not contextually type an
+   * inline callback (tsc reports an implicit any).
+   * @param transaction - The transaction-scoped Prisma client
+   * @returns True when the action was active and is now deleted; false when no active action matched
+   */
+  const softDeleteActionAndItsScripts = async (
+    transaction: Prisma.TransactionClient,
+  ): Promise<boolean> => {
+    const actionUpdate = await transaction.action.updateMany({
+      where: { id: actionId, websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    const noActiveActionMatched = actionUpdate.count === 0;
+    if (noActiveActionMatched) {
+      return false;
+    }
+
+    await transaction.actionScript.updateMany({
+      where: { actionId, websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionScriptRun.updateMany({
+      where: { actionId, websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    return true;
+  };
+
+  const anActiveActionWasDeleted = await prisma.$transaction(softDeleteActionAndItsScripts);
   return anActiveActionWasDeleted;
 }
 
@@ -475,5 +567,126 @@ export async function createScreenshotRunForWebsite(
   data: ScreenshotRunInput,
 ): Promise<ScreenshotRun> {
   const created = await prisma.screenshotRun.create({ data: { ...data, websiteId } });
+  return created;
+}
+
+// === Action scripts ===
+// Create-only: there is deliberately no update function for scripts or their
+// runs, which is what makes them immutable. They are soft deleted only through
+// `softDeleteActionForWebsite` and `softDeleteWebsite`.
+
+/**
+ * Lists an action's active scripts, newest first.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @returns The action's active scripts ordered by `createdAt` descending
+ */
+export async function listActionScriptsForAction(
+  websiteId: string,
+  actionId: string,
+): Promise<ActionScript[]> {
+  const actionScripts = await prisma.actionScript.findMany({
+    where: { websiteId, actionId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+  });
+  return actionScripts;
+}
+
+/**
+ * Looks up one active script, scoped to the website and action that own it.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @returns The active script, or null when it does not exist, was soft deleted, or belongs to another action
+ */
+export async function findActionScriptForAction(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+): Promise<ActionScript | null> {
+  const actionScript = await prisma.actionScript.findFirst({
+    where: { id: actionScriptId, websiteId, actionId, deletedAt: null },
+  });
+  return actionScript;
+}
+
+/**
+ * Saves one generated script for an action. The row is never edited after
+ * this; converting the action again saves another row.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param data - The snapshots sent to Claude, what Claude returned, and the rule scan
+ * @returns The created row
+ */
+export async function createActionScriptForAction(
+  websiteId: string,
+  actionId: string,
+  data: ActionScriptInput,
+): Promise<ActionScript> {
+  const created = await prisma.actionScript.create({ data: { ...data, websiteId, actionId } });
+  return created;
+}
+
+// === Action script runs ===
+
+/**
+ * Lists a script's active runs, newest first.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @returns The script's active runs ordered by `createdAt` descending
+ */
+export async function listActionScriptRunsForScript(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+): Promise<ActionScriptRun[]> {
+  const actionScriptRuns = await prisma.actionScriptRun.findMany({
+    where: { websiteId, actionId, actionScriptId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+  });
+  return actionScriptRuns;
+}
+
+/**
+ * Looks up one active script run, scoped to the website, action, and script
+ * that own it.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @param actionScriptRunId - The run's cuid
+ * @returns The active run, or null when it does not exist, was soft deleted, or belongs to another script
+ */
+export async function findActionScriptRunForScript(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+): Promise<ActionScriptRun | null> {
+  const actionScriptRun = await prisma.actionScriptRun.findFirst({
+    where: { id: actionScriptRunId, websiteId, actionId, actionScriptId, deletedAt: null },
+  });
+  return actionScriptRun;
+}
+
+/**
+ * Records one script run. Runs are never edited after this; a failed or
+ * timed-out run is recorded the same way as a passing one, with
+ * `succeeded: false`.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script that was run
+ * @param data - What the run produced
+ * @returns The created row
+ */
+export async function createActionScriptRunForScript(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  data: ActionScriptRunInput,
+): Promise<ActionScriptRun> {
+  const created = await prisma.actionScriptRun.create({
+    data: { ...data, websiteId, actionId, actionScriptId },
+  });
   return created;
 }

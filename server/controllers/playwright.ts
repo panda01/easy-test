@@ -9,6 +9,7 @@ import {
 } from "../services/dbService.js";
 import { captureWebsiteScreenshot } from "../services/playwrightService.js";
 import { describeError } from "../utils/describeError.js";
+import { readSendErrorStatus } from "../utils/readSendErrorStatus.js";
 
 const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
 const SCREENSHOT_RUN_NOT_FOUND_MESSAGE = "Screenshot run not found";
@@ -24,20 +25,6 @@ const SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Screenshot file not found";
  */
 function buildScreenshotFileName(websiteId: string): string {
   return `${websiteId}/${randomUUID()}.png`;
-}
-
-/**
- * Reads the HTTP status `res.sendFile` attached to its error. Express's `send`
- * stamps `.status` on the errors it reports: 404 for a missing file, 403 for
- * a path that tries to climb out of `root`. Read structurally, since the
- * callback only promises a plain `Error`.
- * @param sendError - The error `res.sendFile` passed to its callback
- * @returns The attached status, or null when there is none
- */
-function readSendErrorStatus(sendError: Error): number | null {
-  const attachedStatus: unknown = "status" in sendError ? sendError.status : undefined;
-  const attachedStatusIsANumber = typeof attachedStatus === "number";
-  return attachedStatusIsANumber ? attachedStatus : null;
 }
 
 /**

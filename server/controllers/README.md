@@ -9,6 +9,7 @@ Route registrars. One file per API section.
 | `useCases.ts` | `GET`/`POST /api/websites/:websiteId/use-cases`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/use-cases/:useCaseId` |
 | `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` |
 | `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
+| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot` |
 
 ## The convention
 
@@ -46,7 +47,8 @@ braces** - TypeScript already holds the types.
 - **Deletes are soft.** See `../prisma/README.md`.
 - **Nested routes check the parent first.** Use case, action, and screenshot
   run routes look up the website and answer `404 "Website not found"` before
-  touching the child.
+  touching the child. Action script routes check every parent in order -
+  website, action, script, run - and later lookups use the FOUND rows' ids.
 - **Handlers leave `req`/`res` unannotated.** Express infers
   `req.params.websiteId` as `string` from the literal path; an explicit
   `Request` annotation widens params to `string | string[]`.
@@ -82,3 +84,44 @@ can point it at a fixture directory. The browser work itself lives in
   callback *after* the async handler returned, so the callback answers them
   itself: `404 "Screenshot file not found"` when the file is gone, `500`
   otherwise, and nothing at all when the response had already started.
+
+## The action scripts controller (`actionScripts.ts`)
+
+`registerActionScriptRoutes(app, actionScriptDirectory)` also takes the
+directory as a second argument, resolved once at boot by
+`resolveActionScriptDirectory()` in `server.ts` (from `ACTION_SCRIPT_DIR`), so
+tests can point it at a fixture directory. Claude lives in
+`../services/scriptGenerationService.ts`; running lives in
+`../services/scriptRunnerService.ts`.
+
+- **Scripts and runs are create-only.** There is no `PUT`, `PATCH`, or
+  `DELETE` for them; converting again creates a new version. They are soft
+  deleted only with their action or website.
+- **`POST .../scripts` converts and saves.** It sends snapshots of the FOUND
+  website (name, URL) and action (title, description) to Claude, stores the
+  same snapshots on the script, and stores `findScriptRuleViolations(code)`
+  as `ruleViolations` - warnings only, the script is saved either way. Extra
+  status codes beyond the CRUD set:
+  - `503 { error }` when `ANTHROPIC_API_KEY` is not configured (the server
+    itself boots fine without it);
+  - `502 { error }` when Claude declined (every model in the fallback chain),
+    its reply hit the token limit, or the reply had no usable script.
+  Known failures are recognized structurally (`name: "ScriptGenerationError"`
+  plus a known `reason`); any other error - an Anthropic API error included -
+  answers `500`. The request lasts as long as Claude takes.
+- **`POST .../runs` answers `201` for a failed or timed-out run too**, like
+  the screenshot POST, so the run reaches the client. Each run gets its own
+  folder, `<website.id>/<random uuid>`, under the action script directory;
+  `failureScreenshotFileName` is stored relative to it. Only infrastructure
+  failures answer `500` (the folder cannot be written, node cannot start, a
+  query fails). The request lasts as long as the script, at most 5 minutes
+  plus a few seconds to stop it.
+- **`GET .../failure-screenshot`** serves the PNG with the same
+  `res.sendFile(name, { root }, cb)` pattern as the screenshot route (the
+  shared `readSendErrorStatus` lives in `../utils/`): `404 "This run did not
+  capture a failure screenshot"`, `404 "Failure screenshot file not found"`,
+  `500` otherwise.
+- **A dev server restart mid-request loses that request.** `tsx watch`
+  restarting (any edit under `server/`) or `./stop-dev.sh` during a run drops
+  the response, and the script keeps running on its own - a script waiting in
+  `page.pause()` stays open until it is closed by hand.

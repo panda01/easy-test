@@ -32,9 +32,13 @@ The generator is `prisma-client` (the ESM generator), **not** the legacy
 | `UseCase` | `use_cases` | A scenario to test on one website: title, description (both required). |
 | `Action` | `actions` | A reusable step on one website, e.g. "Log in": title, description (both required). |
 | `ScreenshotRun` | `screenshot_runs` | One visit the Playwright controller made to a website: the URL visited, whether it succeeded, the HTTP status, the failure reason, the screenshot's file name, and how long navigation took. |
+| `ActionScript` | `action_scripts` | One Playwright script Claude generated from an action: snapshots of what was sent (website name, START_URL, action title and description), the summary, `assumptions String[]`, the `.mjs` `code`, the warn-only `ruleViolations String[]`, and the `modelId` that answered. **Immutable** - create-only. |
+| `ActionScriptRun` | `action_script_runs` | One run of a script: `succeeded`, `exitCode` (null when killed by a signal), `exitSignal`, `timedOut`, the capped `output` and `outputWasTruncated`, the failure screenshot's file name, and the duration. Create-only. |
 
 `UseCase`, `Action`, and `ScreenshotRun` each belong to exactly one `Website`
-(`websiteId`, indexed). The foreign keys use Prisma's default `onDelete: Restrict`, which is
+(`websiteId`, indexed). `ActionScript` belongs to one `Action` and, denormalized
+for single-statement cascades, its `Website`; `ActionScriptRun` carries all
+three parent ids (`websiteId`, `actionId`, `actionScriptId`, each indexed). The foreign keys use Prisma's default `onDelete: Restrict`, which is
 fine because rows are never hard deleted.
 
 `ScreenshotRun.screenshotFileName` is **relative** to the configured
@@ -42,6 +46,11 @@ screenshot directory (`SCREENSHOT_DIR`), e.g. `<websiteId>/<uuid>.png`, and is
 null when the visit never reached a page. The PNG itself lives on disk, not in
 the database. `requestedUrl` is a snapshot, because the website's URL can be
 edited after the run.
+
+`ActionScriptRun.failureScreenshotFileName` is likewise **relative** to
+`ACTION_SCRIPT_DIR`, e.g. `<websiteId>/<uuid>/failure.png` (the run folder
+also holds the `script.mjs` that ran). Converting an action again never edits
+a script - it adds a new row, which the UI shows as the next "Version N".
 
 Fields are camelCase and are **not** individually `@map`'d — only table names
 are mapped. Postgres therefore stores quoted mixed-case columns, so
@@ -54,11 +63,14 @@ select createdAt from websites;     -- fails
 
 ## Soft delete
 
-All four models have a nullable `deletedAt`. Deleting sets it instead of
+All six models have a nullable `deletedAt`. Deleting sets it instead of
 removing the row, and every `dbService` query filters `deletedAt: null`.
-Deleting a website also stamps its active use cases, actions, and screenshot
-runs, in one transaction, with the **same** timestamp — so that batch can be
-identified together later. A soft-deleted run's PNG stays on disk.
+Deleting a website also stamps its active use cases, actions, screenshot
+runs, action scripts, and action script runs, in one transaction, with the
+**same** timestamp — so that batch can be identified together later. Deleting
+an action likewise stamps its active scripts and their runs with the action's
+timestamp. A soft-deleted run's PNG (and run folder) stays on disk. Scripts
+and runs are never deleted on their own.
 
 ## The partial unique index on `Website.url`
 
