@@ -65,6 +65,24 @@ describe("CrawlSiteMap", () => {
     ]);
   });
 
+  it("names the button that led to a page found by a click", () => {
+    const yogaPage = buildCrawledPageSummaryRecord({
+      id: "yoga",
+      parentPageId: "blog",
+      url: "https://example.com/sessions/yoga",
+      foundByButtonText: "Open Yoga",
+      title: "Yoga",
+      visitOrder: 4,
+      depth: 2,
+    });
+    renderSiteMap({ pages: [homePage, blogPage, yogaPage] });
+
+    expect(screen.getByRole("button", { name: /^\/sessions\/yoga/ })).toHaveTextContent(
+      "/sessions/yogaSucceeded · HTTP 200 · Yoga · via “Open Yoga”",
+    );
+    expect(screen.getByRole("button", { name: /^\/blog/ })).not.toHaveTextContent("via");
+  });
+
   it("indents each row by its depth in the tree", () => {
     renderSiteMap();
 

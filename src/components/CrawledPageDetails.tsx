@@ -9,12 +9,13 @@ import LoadStatusNotice from "./LoadStatusNotice";
 import { type CrawledPageRecord } from "../hooks/useCrawledPage";
 import { type CrawledPageSummaryRecord } from "../hooks/useCrawlRunProgress";
 import { type JsonResourceState } from "../hooks/useJsonResource";
-import { formatCrawledPagePath } from "../utils/describeCrawlRun";
+import { describeCrawledPagePath, formatCrawledPagePath } from "../utils/describeCrawlRun";
 import { describeScreenshotRunOutcome, formatRunDuration } from "../utils/describeScreenshotRun";
 import { formatCount } from "../utils/formatCount";
 
 const HEADING_ID = "crawled-page-details-heading";
 const LINKS_HEADING_ID = "crawled-page-links-heading";
+const BUTTON_URLS_HEADING_ID = "crawled-page-button-urls-heading";
 
 /** Props for `CrawledPageDetails`. */
 export interface CrawledPageDetailsProps {
@@ -55,12 +56,67 @@ function DetailRow(props: DetailRowProps): ReactElement {
   );
 }
 
+/** Props for `CrawledUrlList`. */
+interface CrawledUrlListProps {
+  /** The id of the heading that names the list. */
+  headingId: string;
+  /** The identity URLs to list, in order. */
+  urls: string[];
+  /** Every visited page of the run by its identity URL, to select the visited ones. */
+  visitedPagesByUrl: ReadonlyMap<string, CrawledPageSummaryRecord>;
+  /** Called with a visited page's id when the user picks it. */
+  onSelectPage: (crawledPageId: string) => void;
+}
+
 /**
- * One crawled page in full: its path and outcome ("Failed · HTTP 404 ·
+ * A list of same-site page URLs, each shown by its path: a page the crawl
+ * visited is a button that selects it, and one it never reached (e.g. the
+ * page limit) is plain text marked "(not visited)".
+ * @param props - The heading id, the URLs, the run's pages by URL, and the select handler
+ * @returns The rendered list
+ */
+function CrawledUrlList(props: CrawledUrlListProps): ReactElement {
+  const { headingId, urls, visitedPagesByUrl, onSelectPage } = props;
+  return (
+    <List dense disablePadding aria-labelledby={headingId}>
+      {urls.map((url) => {
+        const visitedPage = visitedPagesByUrl.get(url);
+        const urlPath = formatCrawledPagePath(url);
+        return (
+          <ListItem key={url} disableGutters sx={{ wordBreak: "break-all" }}>
+            {visitedPage === undefined ? (
+              <Typography variant="body2" color="text.secondary">
+                {urlPath} (not visited)
+              </Typography>
+            ) : (
+              <Link
+                component="button"
+                type="button"
+                variant="body2"
+                onClick={() => {
+                  onSelectPage(visitedPage.id);
+                }}
+              >
+                {urlPath}
+              </Link>
+            )}
+          </ListItem>
+        );
+      })}
+    </List>
+  );
+}
+
+/**
+ * One crawled page in full: its path - with its redirect, e.g. "/calendar
+ * (from /)" (see `describeCrawledPagePath`) - and outcome ("Failed · HTTP 404 ·
  * 1.2 s") with any error, where it was loaded from and ended up, its title,
- * the page it was found on, its Playwright aria snapshot, and the same-origin
- * links on it. The parent and every visited link are buttons that select
- * that page; a link the crawl never reached (the page limit) is plain text.
+ * the page it was found on (and, when a button click led here, which button:
+ * "/sessions, by clicking “Open Yoga”"), its Playwright aria snapshot, the
+ * same-origin links on it, and - when its buttons led anywhere - the pages
+ * its buttons led to. The parent and every visited link or button target are
+ * buttons that select that page; one the crawl never reached (the page limit)
+ * is plain text.
  * @param props - The page, its full record's request state, the run's pages, and the select handler
  * @returns The rendered page details
  */
@@ -72,6 +128,11 @@ export default function CrawledPageDetails(props: CrawledPageDetailsProps): Reac
   const pageIsTheStartPage = page.parentPageId === null;
   const parentPage =
     page.parentPageId === null ? undefined : visitedPagesById.get(page.parentPageId);
+  const { foundByButtonText } = page;
+  const foundByButtonSuffix =
+    foundByButtonText === null ? "" : `, by clicking “${foundByButtonText}”`;
+  const pageHasLinks = fullPage !== null && fullPage.linkedUrls.length > 0;
+  const pageButtonsLedToPages = fullPage !== null && fullPage.buttonUrls.length > 0;
 
   let foundOnContent: ReactNode = "a page no longer listed";
   if (pageIsTheStartPage) {
@@ -98,7 +159,7 @@ export default function CrawledPageDetails(props: CrawledPageDetailsProps): Reac
         component="h2"
         sx={{ wordBreak: "break-all", mb: 0.5 }}
       >
-        {formatCrawledPagePath(page.url)}
+        {describeCrawledPagePath(page)}
       </Typography>
       <Typography sx={{ color: page.succeeded ? "success.main" : "error.main" }}>
         {describeScreenshotRunOutcome(page)} · {formatRunDuration(page.durationMs)}
@@ -113,7 +174,10 @@ export default function CrawledPageDetails(props: CrawledPageDetailsProps): Reac
         <DetailRow label="Loaded">{page.requestedUrl}</DetailRow>
         {pageWasRedirected && <DetailRow label="Ended up at">{page.finalUrl}</DetailRow>}
         <DetailRow label="Title">{page.title ?? "none"}</DetailRow>
-        <DetailRow label="Found on">{foundOnContent}</DetailRow>
+        <DetailRow label="Found on">
+          {foundOnContent}
+          {foundByButtonSuffix}
+        </DetailRow>
         <DetailRow label="Links followed to get here">{String(page.depth)}</DetailRow>
       </Box>
 
@@ -142,34 +206,36 @@ export default function CrawledPageDetails(props: CrawledPageDetailsProps): Reac
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             {formatCount(fullPage.linkedUrls.length, "same-site link", "same-site links")}
           </Typography>
-          {fullPage.linkedUrls.length > 0 && (
-            <List dense disablePadding aria-labelledby={LINKS_HEADING_ID}>
-              {fullPage.linkedUrls.map((linkedUrl) => {
-                const linkedPage = visitedPagesByUrl.get(linkedUrl);
-                const linkedPath = formatCrawledPagePath(linkedUrl);
-                return (
-                  <ListItem key={linkedUrl} disableGutters sx={{ wordBreak: "break-all" }}>
-                    {linkedPage === undefined ? (
-                      <Typography variant="body2" color="text.secondary">
-                        {linkedPath} (not visited)
-                      </Typography>
-                    ) : (
-                      <Link
-                        component="button"
-                        type="button"
-                        variant="body2"
-                        onClick={() => {
-                          onSelectPage(linkedPage.id);
-                        }}
-                      >
-                        {linkedPath}
-                      </Link>
-                    )}
-                  </ListItem>
-                );
-              })}
-            </List>
+          {pageHasLinks && (
+            <CrawledUrlList
+              headingId={LINKS_HEADING_ID}
+              urls={fullPage.linkedUrls}
+              visitedPagesByUrl={visitedPagesByUrl}
+              onSelectPage={onSelectPage}
+            />
           )}
+        </>
+      )}
+
+      {pageButtonsLedToPages && (
+        <>
+          <Typography
+            id={BUTTON_URLS_HEADING_ID}
+            variant="subtitle1"
+            component="h3"
+            sx={{ mt: 3 }}
+          >
+            Pages its buttons led to
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            {formatCount(fullPage.buttonUrls.length, "same-site page", "same-site pages")}
+          </Typography>
+          <CrawledUrlList
+            headingId={BUTTON_URLS_HEADING_ID}
+            urls={fullPage.buttonUrls}
+            visitedPagesByUrl={visitedPagesByUrl}
+            onSelectPage={onSelectPage}
+          />
         </>
       )}
     </Box>

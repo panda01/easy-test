@@ -4,6 +4,8 @@ import AppHeader from "./components/AppHeader";
 import ActionDetailPage from "./pages/ActionDetailPage";
 import ActionScriptComparePage from "./pages/ActionScriptComparePage";
 import CrawlRunPage from "./pages/CrawlRunPage";
+import CredentialCreatePage from "./pages/CredentialCreatePage";
+import CredentialEditPage from "./pages/CredentialEditPage";
 import HomePage from "./pages/HomePage";
 import UseCaseDetailPage from "./pages/UseCaseDetailPage";
 import WebsiteCreatePage from "./pages/WebsiteCreatePage";
@@ -45,6 +47,11 @@ export default function App(): ReactElement {
         <Route path="/websites/:websiteId" element={<WebsiteDetailPage />} />
         <Route path="/websites/:websiteId/edit" element={<WebsiteEditPage />} />
         <Route path="/websites/:websiteId/crawl-runs/:crawlRunId" element={<CrawlRunPage />} />
+        <Route path="/websites/:websiteId/credentials/new" element={<CredentialCreatePage />} />
+        <Route
+          path="/websites/:websiteId/credentials/:credentialId/edit"
+          element={<CredentialEditPage />}
+        />
 
         <Route
           path="/websites/:websiteId/use-cases/new"

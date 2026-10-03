@@ -9,8 +9,10 @@ import {
   type ActionScriptRun,
   type CrawlRun,
   type CrawledPage,
+  type Credential,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
+import type { CrawlButtonMode } from "../utils/crawlButtonModes.js";
 
 export type {
   Website,
@@ -21,6 +23,7 @@ export type {
   ActionScriptRun,
   CrawlRun,
   CrawledPage,
+  Credential,
 };
 
 /**
@@ -62,6 +65,8 @@ export interface WebsiteInput {
   networkIdleTimeoutMs?: number;
   /** The floor on the time from page load to screenshot; the column default applies when omitted on create. */
   screenshotMinimumWaitMs?: number;
+  /** The website's login page, or null when it does not require login. */
+  loginUrl?: string | null;
 }
 
 /** The fields a caller supplies when creating or replacing a use case or an action. */
@@ -172,7 +177,28 @@ export interface CrawlRunInput {
   startUrl: string;
   /** The most pages the crawl may visit. */
   pageLimit: number;
+  /** The credential the crawl logs in as, or null for a crawl as a logged-out visitor. */
+  credentialId: string | null;
+  /** Which buttons the crawl clicks; the column default (`linksOnly`) applies when omitted. */
+  buttonMode?: CrawlButtonMode;
 }
+
+/** The credential a crawl run was started with, as the run's API responses name it. */
+export interface CrawlRunCredentialSummary {
+  /** The credential's cuid. */
+  id: string;
+  /** The credential's name (kept even after the credential is soft deleted). */
+  name: string;
+}
+
+/**
+ * A crawl run together with the id and name of the credential it was started
+ * with (null for a logged-out crawl) - what the crawl run reads return, so the
+ * UI can say who the crawl was logged in as.
+ */
+export type CrawlRunWithCredential = CrawlRun & {
+  credential: CrawlRunCredentialSummary | null;
+};
 
 /** A crawl's live progress counters, written each time a page is recorded. */
 export interface CrawlProgress {
@@ -190,6 +216,11 @@ export interface CrawlRunFinish {
   waitingUrlCount: number;
   /** Why the crawl failed, or null when it did not. */
   errorMessage: string | null;
+  /**
+   * The screenshot taken when the crawl's login failed, relative to the
+   * screenshot directory (`<websiteId>/<uuid>.png`), or null when there is none.
+   */
+  loginFailureScreenshotFileName: string | null;
   /** How long the whole crawl took, in milliseconds. */
   durationMs: number;
 }
@@ -201,12 +232,22 @@ export interface CrawlRunFinish {
 export interface CrawledPageInput {
   /** The page whose link led here, or null for the start page. */
   parentPageId: string | null;
-  /** The page's identity within the run: origin + path, no query or hash. */
+  /**
+   * The page's identity within the run: origin + path, no query or hash -
+   * where the browser LANDED, or the requested page when the landing page is
+   * already recorded in this run (see the model's doc comment).
+   */
   url: string;
   /** What the browser loaded: the first link that reached the page, hash dropped. */
   requestedUrl: string;
   /** Where the browser ended up after redirects and client-side navigation. */
   finalUrl: string;
+  /** True when the browser landed on a different page (origin + path) than it requested. */
+  wasRedirected: boolean;
+  /** The text of the button whose click first led to this page, or null when a link (or the start URL) did. */
+  foundByButtonText: string | null;
+  /** The same-site pages (identities) this page's buttons led to, in click order. */
+  buttonUrls: string[];
   /** The page's position in visiting order, counting from 0. */
   visitOrder: number;
   /** How many links were followed from the start page to reach it. */
@@ -228,11 +269,42 @@ export interface CrawledPageInput {
 }
 
 /**
- * A crawled page without its two large fields - what the crawl run's page
- * list returns, because the UI polls that list while the crawl runs. The full
- * page comes from `findCrawledPageForRun`.
+ * The fields a caller supplies when creating or replacing a credential -
+ * everything except the password, which is passed separately and already
+ * encrypted (see `../utils/credentialEncryption.ts`).
  */
-export type CrawledPageSummary = Omit<CrawledPage, "ariaSnapshot" | "linkedUrls">;
+export interface CredentialInput {
+  /** The user's label for the credential. */
+  name: string;
+  /** An optional longer note; null when there is none. */
+  description: string | null;
+  /** What the crawler types into the username field. */
+  username: string;
+  /** The credential's own login page, or null to use its website's `loginUrl`. */
+  loginUrl: string | null;
+  /** A CSS selector for the username field, or null to let the crawler find it. */
+  usernameSelector: string | null;
+  /** A CSS selector for the password field, or null to let the crawler find it. */
+  passwordSelector: string | null;
+  /** A CSS selector for the submit button, or null to let the crawler find it. */
+  submitSelector: string | null;
+}
+
+/**
+ * A credential WITHOUT its encrypted password - the only shape of a
+ * credential that may leave the server. Every credential read that feeds an
+ * API response returns this; only `findCredentialWithPasswordForWebsite`
+ * (used to start a crawl) returns the password column.
+ */
+export type CredentialSummary = Omit<Credential, "encryptedPassword">;
+
+/**
+ * A crawled page without its large fields (the aria snapshot and the link
+ * and button lists) - what the crawl run's page list returns, because the UI
+ * polls that list while the crawl runs. The full page comes from
+ * `findCrawledPageForRun`.
+ */
+export type CrawledPageSummary = Omit<CrawledPage, "ariaSnapshot" | "linkedUrls" | "buttonUrls">;
 
 /**
  * Checks whether a thrown value carries the given Prisma error code.
@@ -327,6 +399,24 @@ export async function findWebsiteById(websiteId: string): Promise<Website | null
 }
 
 /**
+ * Saves a login page URL the website LEARNED from a crawl that logged in
+ * successfully with a credential's own login URL - but only while the website
+ * has none: the `loginUrl: null` condition is part of the update, so a URL
+ * already set (by the user, or by an earlier crawl) is never overwritten.
+ * @param websiteId - The website's cuid
+ * @param loginUrl - The login page URL that worked
+ * @returns True when the website adopted the URL; false when it already had one, or is not active
+ */
+export async function adoptWebsiteLoginUrl(websiteId: string, loginUrl: string): Promise<boolean> {
+  const websiteUpdate = await prisma.website.updateMany({
+    where: { id: websiteId, loginUrl: null, deletedAt: null },
+    data: { loginUrl },
+  });
+  const websiteAdoptedTheUrl = websiteUpdate.count > 0;
+  return websiteAdoptedTheUrl;
+}
+
+/**
  * Replaces the editable fields of an active website.
  *
  * The `deletedAt: null` condition is part of the update itself, so a website
@@ -356,9 +446,10 @@ export async function updateWebsite(
 
 /**
  * Soft deletes an active website AND its active use cases, actions, screenshot
- * runs, action scripts, action script runs, crawl runs, and crawled pages.
+ * runs, action scripts, action script runs, crawl runs, crawled pages, and
+ * credentials.
  *
- * All eight updates run in one transaction and share one `deletedAt`
+ * All nine updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
@@ -410,6 +501,10 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.crawledPage.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.credential.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -804,20 +899,34 @@ export async function createActionScriptRunForScript(
 // deleted only through `softDeleteWebsite`.
 
 /**
- * Lists a website's active crawl runs, newest first.
+ * What the crawl run reads include alongside each run: the id and name of the
+ * credential it was started with. Deliberately NOT filtered by `deletedAt`, so
+ * a run keeps naming a credential that was deleted after it ran.
+ */
+const CRAWL_RUN_CREDENTIAL_INCLUDE = {
+  credential: { select: { id: true, name: true } },
+} as const;
+
+/**
+ * Lists a website's active crawl runs, newest first, each with the id and name
+ * of the credential it was started with.
  * @param websiteId - The owning website's cuid
  * @returns The website's active crawl runs ordered by `createdAt` descending
  */
-export async function listCrawlRunsForWebsite(websiteId: string): Promise<CrawlRun[]> {
+export async function listCrawlRunsForWebsite(
+  websiteId: string,
+): Promise<CrawlRunWithCredential[]> {
   const crawlRuns = await prisma.crawlRun.findMany({
     where: { websiteId, deletedAt: null },
     orderBy: { createdAt: "desc" },
+    include: CRAWL_RUN_CREDENTIAL_INCLUDE,
   });
   return crawlRuns;
 }
 
 /**
- * Looks up one active crawl run, scoped to the website that owns it.
+ * Looks up one active crawl run, scoped to the website that owns it, with the
+ * id and name of the credential it was started with.
  * @param websiteId - The owning website's cuid
  * @param crawlRunId - The crawl run's cuid
  * @returns The active crawl run, or null when it does not exist, was soft deleted, or belongs to another website
@@ -825,26 +934,29 @@ export async function listCrawlRunsForWebsite(websiteId: string): Promise<CrawlR
 export async function findCrawlRunForWebsite(
   websiteId: string,
   crawlRunId: string,
-): Promise<CrawlRun | null> {
+): Promise<CrawlRunWithCredential | null> {
   const crawlRun = await prisma.crawlRun.findFirst({
     where: { id: crawlRunId, websiteId, deletedAt: null },
+    include: CRAWL_RUN_CREDENTIAL_INCLUDE,
   });
   return crawlRun;
 }
 
 /**
- * Records the start of a crawl: a new run with `status: "running"` and both
- * progress counters at 0.
+ * Records the start of a crawl: a new run with `status: "running"`, both
+ * progress counters at 0, and `isLoggedIn: false` (a crawl with a credential
+ * turns it true through `markCrawlRunLoggedIn` once its login succeeds).
  * @param websiteId - The owning website's cuid
- * @param data - Where the crawl starts and its page limit
- * @returns The created row
+ * @param data - Where the crawl starts, its page limit, and the credential it logs in as (or null)
+ * @returns The created row, with the id and name of its credential (like the other crawl run reads)
  */
 export async function createCrawlRunForWebsite(
   websiteId: string,
   data: CrawlRunInput,
-): Promise<CrawlRun> {
+): Promise<CrawlRunWithCredential> {
   const created = await prisma.crawlRun.create({
     data: { ...data, websiteId, status: "running" },
+    include: CRAWL_RUN_CREDENTIAL_INCLUDE,
   });
   return created;
 }
@@ -903,12 +1015,34 @@ export async function recordCrawledPage(
 }
 
 /**
+ * Records that a crawl's login succeeded: sets `isLoggedIn: true`. The crawler
+ * calls this BEFORE it records the first page, so every page of a logged-in
+ * run was viewed logged in. Only an active run that is still `running` is
+ * changed - like `recordCrawledPage`, a false result tells the crawler its run
+ * was deleted (with its website) and it should stop.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns True when the run was marked; false when no active running run matched
+ */
+export async function markCrawlRunLoggedIn(
+  websiteId: string,
+  crawlRunId: string,
+): Promise<boolean> {
+  const crawlRunUpdate = await prisma.crawlRun.updateMany({
+    where: { id: crawlRunId, websiteId, status: "running", deletedAt: null },
+    data: { isLoggedIn: true },
+  });
+  const runWasMarked = crawlRunUpdate.count > 0;
+  return runWasMarked;
+}
+
+/**
  * Records how a running crawl ended. Only an active run that is still
  * `running` is changed, so finishing a run whose website was deleted
  * meanwhile is a harmless no-op.
  * @param websiteId - The owning website's cuid
  * @param crawlRunId - The crawl run's cuid
- * @param finish - The final status, waiting links, error, and duration
+ * @param finish - The final status, waiting links, error, login failure screenshot, and duration
  * @returns True when the run was finished; false when no active running run matched
  */
 export async function finishCrawlRun(
@@ -940,7 +1074,7 @@ export async function markRunningCrawlRunsInterrupted(): Promise<number> {
 
 /**
  * Lists a crawl run's active pages in visiting order, without their aria
- * snapshots and link lists (see `CrawledPageSummary`).
+ * snapshots and link and button lists (see `CrawledPageSummary`).
  * @param websiteId - The owning website's cuid
  * @param crawlRunId - The crawl run's cuid
  * @returns The run's page summaries ordered by `visitOrder`
@@ -952,7 +1086,7 @@ export async function listCrawledPageSummariesForRun(
   const pageSummaries = await prisma.crawledPage.findMany({
     where: { websiteId, crawlRunId, deletedAt: null },
     orderBy: { visitOrder: "asc" },
-    omit: { ariaSnapshot: true, linkedUrls: true },
+    omit: { ariaSnapshot: true, linkedUrls: true, buttonUrls: true },
   });
   return pageSummaries;
 }
@@ -974,4 +1108,134 @@ export async function findCrawledPageForRun(
     where: { id: crawledPageId, websiteId, crawlRunId, deletedAt: null },
   });
   return crawledPage;
+}
+
+// === Credentials ===
+// Every read that can reach an API response omits `encryptedPassword` (see
+// `CredentialSummary`); only `findCredentialWithPasswordForWebsite` returns it.
+
+/** Leaves the encrypted password out of a credential query's result. */
+const OMIT_ENCRYPTED_PASSWORD = { encryptedPassword: true } as const;
+
+/**
+ * Lists a website's active credentials, newest first, without their passwords.
+ * @param websiteId - The owning website's cuid
+ * @returns The website's active credentials ordered by `createdAt` descending
+ */
+export async function listCredentialsForWebsite(
+  websiteId: string,
+): Promise<CredentialSummary[]> {
+  const credentials = await prisma.credential.findMany({
+    where: { websiteId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    omit: OMIT_ENCRYPTED_PASSWORD,
+  });
+  return credentials;
+}
+
+/**
+ * Looks up one active credential, scoped to the website that owns it, without
+ * its password.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The credential's cuid
+ * @returns The active credential, or null when it does not exist, was soft deleted, or belongs to another website
+ */
+export async function findCredentialForWebsite(
+  websiteId: string,
+  credentialId: string,
+): Promise<CredentialSummary | null> {
+  const credential = await prisma.credential.findFirst({
+    where: { id: credentialId, websiteId, deletedAt: null },
+    omit: OMIT_ENCRYPTED_PASSWORD,
+  });
+  return credential;
+}
+
+/**
+ * Looks up one active credential WITH its encrypted password - the only read
+ * that returns it. Used to start a crawl that logs in; never send its result
+ * to a client.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The credential's cuid
+ * @returns The active credential including `encryptedPassword`, or null when it does not exist, was soft deleted, or belongs to another website
+ */
+export async function findCredentialWithPasswordForWebsite(
+  websiteId: string,
+  credentialId: string,
+): Promise<Credential | null> {
+  const credential = await prisma.credential.findFirst({
+    where: { id: credentialId, websiteId, deletedAt: null },
+  });
+  return credential;
+}
+
+/**
+ * Inserts a credential belonging to the given website.
+ * @param websiteId - The owning website's cuid
+ * @param data - The credential's fields, except the password
+ * @param encryptedPassword - The password, already encrypted by `encryptCredentialPassword`
+ * @returns The created row, without its password
+ */
+export async function createCredentialForWebsite(
+  websiteId: string,
+  data: CredentialInput,
+  encryptedPassword: string,
+): Promise<CredentialSummary> {
+  const created = await prisma.credential.create({
+    data: { ...data, encryptedPassword, websiteId },
+    omit: OMIT_ENCRYPTED_PASSWORD,
+  });
+  return created;
+}
+
+/**
+ * Replaces the fields of an active credential. The password is only replaced
+ * when a new one is given, so editing the other fields keeps the saved
+ * password.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The credential's cuid
+ * @param data - The credential's new fields, except the password
+ * @param encryptedPassword - The new password, already encrypted, or null to keep the saved one
+ * @returns The updated row without its password, or null when no active credential with that id belongs to the website
+ */
+export async function updateCredentialForWebsite(
+  websiteId: string,
+  credentialId: string,
+  data: CredentialInput,
+  encryptedPassword: string | null,
+): Promise<CredentialSummary | null> {
+  const passwordIsBeingReplaced = encryptedPassword !== null;
+  const updateData = passwordIsBeingReplaced ? { ...data, encryptedPassword } : data;
+  try {
+    const updated = await prisma.credential.update({
+      where: { id: credentialId, websiteId, deletedAt: null },
+      data: updateData,
+      omit: OMIT_ENCRYPTED_PASSWORD,
+    });
+    return updated;
+  } catch (error: unknown) {
+    if (isRecordNotFound(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Soft deletes one active credential. Crawl runs that used it keep their link
+ * to it, so their history still names it.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The credential's cuid
+ * @returns True when an active credential was deleted; false when none matched
+ */
+export async function softDeleteCredentialForWebsite(
+  websiteId: string,
+  credentialId: string,
+): Promise<boolean> {
+  const credentialUpdate = await prisma.credential.updateMany({
+    where: { id: credentialId, websiteId, deletedAt: null },
+    data: { deletedAt: new Date() },
+  });
+  const anActiveCredentialWasDeleted = credentialUpdate.count > 0;
+  return anActiveCredentialWasDeleted;
 }

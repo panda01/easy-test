@@ -167,6 +167,82 @@ describe("CrawlRunPage", () => {
     expect(countRequests(fetchStub, "GET", ABOUT_PAGE_API_URL)).toBe(0);
   });
 
+  it("adds which buttons the crawl clicked to its Started line, unless it only followed links", async () => {
+    stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: {
+        status: 200,
+        body: buildCrawlRunWithPagesRecord({ ...finishedRun, buttonMode: "allButRisky" }),
+      },
+    });
+
+    renderCrawlRunPage();
+
+    const startedAtText = new Date(finishedRun.createdAt).toLocaleString();
+    expect(
+      await screen.findByText(
+        `Started ${startedAtText} at https://example.com/ · clicked buttons except risky ones`,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a page found by a button with that button, and lists the pages its buttons led to", async () => {
+    const user = userEvent.setup();
+    const sessionsPage = buildCrawledPageSummaryRecord({
+      id: "sessions",
+      parentPageId: "home",
+      url: "https://example.com/sessions",
+      title: "Sessions",
+      visitOrder: 1,
+      depth: 1,
+    });
+    const yogaPage = buildCrawledPageSummaryRecord({
+      id: "yoga",
+      parentPageId: "sessions",
+      url: "https://example.com/sessions/yoga",
+      foundByButtonText: "Open Yoga",
+      title: "Yoga",
+      visitOrder: 2,
+      depth: 2,
+    });
+    stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: {
+        status: 200,
+        body: buildCrawlRunWithPagesRecord({
+          ...finishedRun,
+          buttonMode: "openOnly",
+          pages: [homePage, sessionsPage, yogaPage],
+        }),
+      },
+      [`GET ${RUN_API_URL}/pages/sessions`]: {
+        status: 200,
+        body: buildCrawledPageRecord({
+          ...sessionsPage,
+          buttonUrls: ["https://example.com/sessions/yoga"],
+        }),
+      },
+      [`GET ${RUN_API_URL}/pages/yoga`]: {
+        status: 200,
+        body: buildCrawledPageRecord({ ...yogaPage, ariaSnapshot: '- heading "Yoga" [level=1]' }),
+      },
+    });
+    renderCrawlRunPage(`${RUN_PATH}?page=sessions`);
+
+    const siteMap = await screen.findByRole("list", { name: "Site map" });
+    expect(
+      within(siteMap).getByRole("button", { name: /^\/sessions\/yoga/ }),
+    ).toHaveTextContent("Succeeded · HTTP 200 · Yoga · via “Open Yoga”");
+    const buttonTargets = await screen.findByRole("list", { name: "Pages its buttons led to" });
+    await user.click(within(buttonTargets).getByRole("button", { name: "/sessions/yoga" }));
+
+    expect(await screen.findByLabelText("Aria snapshot")).toHaveTextContent(
+      '- heading "Yoga" [level=1]',
+    );
+    expect(screen.getByRole("region", { name: "/sessions/yoga" })).toHaveTextContent(
+      "Found on: /sessions, by clicking “Open Yoga”",
+    );
+    expect(screen.getByTestId("probe-search").textContent).toBe("?page=yoga");
+  });
+
   it("shows a page picked from the site map, and keeps the choice in the query string (replaced)", async () => {
     const user = userEvent.setup();
     const fetchStub = stubFinishedRun();
@@ -260,6 +336,129 @@ describe("CrawlRunPage", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       /^Interrupted \(the server restarted or the browser closed\) · 2 pages$/,
     );
+  });
+
+  it("labels redirected pages with where they landed, and lets a link to a requested URL select the page it led to", async () => {
+    const user = userEvent.setup();
+    const calendarPage = buildCrawledPageSummaryRecord({
+      id: "calendar",
+      url: "https://example.com/calendar",
+      requestedUrl: "https://example.com/",
+      finalUrl: "https://example.com/calendar",
+      wasRedirected: true,
+      title: "Calendar",
+    });
+    const oldAccountPage = buildCrawledPageSummaryRecord({
+      id: "old-account",
+      parentPageId: "calendar",
+      url: "https://example.com/old-account",
+      requestedUrl: "https://example.com/old-account",
+      finalUrl: "https://example.com/calendar",
+      wasRedirected: true,
+      visitOrder: 1,
+      depth: 1,
+    });
+    stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: {
+        status: 200,
+        body: buildCrawlRunWithPagesRecord({ ...finishedRun, pages: [calendarPage, oldAccountPage] }),
+      },
+      [`GET ${RUN_API_URL}/pages/calendar`]: {
+        status: 200,
+        body: buildCrawledPageRecord({ ...calendarPage, linkedUrls: [] }),
+      },
+      [`GET ${RUN_API_URL}/pages/old-account`]: {
+        status: 200,
+        body: buildCrawledPageRecord({ ...oldAccountPage, linkedUrls: ["https://example.com/"] }),
+      },
+    });
+    renderCrawlRunPage(`${RUN_PATH}?page=old-account`);
+
+    const siteMap = await screen.findByRole("list", { name: "Site map" });
+    expect(within(siteMap).getByRole("button", { name: /^\/calendar \(from \/\)/ })).toBeInTheDocument();
+    expect(within(siteMap).getByRole("button", { name: /^\/old-account → \/calendar/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(screen.getByRole("heading", { level: 2, name: "/old-account → /calendar" })).toBeInTheDocument();
+
+    // "/" was only ever requested: the page it led to is recorded as /calendar.
+    const links = await screen.findByRole("list", { name: "Links on this page" });
+    await user.click(within(links).getByRole("button", { name: "/" }));
+
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "/calendar (from /)" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("probe-search").textContent).toBe("?page=calendar");
+  });
+
+  it("notes that a crawl without a credential was crawled logged out, with no login screenshot", async () => {
+    stubFinishedRun();
+
+    renderCrawlRunPage();
+
+    expect(await screen.findByRole("note")).toHaveTextContent("Crawled logged out (no credential)");
+    expect(
+      screen.queryByRole("region", { name: "Login failure screenshot" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("notes which credential a logged-in crawl viewed every page as", async () => {
+    stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: {
+        status: 200,
+        body: buildCrawlRunWithPagesRecord({
+          ...finishedRun,
+          credentialId: "credential-1",
+          isLoggedIn: true,
+          credential: { id: "credential-1", name: "Admin" },
+        }),
+      },
+    });
+
+    renderCrawlRunPage();
+
+    const loginNote = await screen.findByRole("note");
+    expect(loginNote).toHaveTextContent('Logged in as "Admin"');
+    expect(loginNote).toHaveClass("MuiAlert-colorSuccess");
+  });
+
+  it("shows a failed login's reason, an error note, and the screenshot of what the browser showed", async () => {
+    stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: {
+        status: 200,
+        body: buildCrawlRunWithPagesRecord({
+          status: "failed",
+          visitedPageCount: 0,
+          durationMs: 1600,
+          credentialId: "credential-2",
+          credential: { id: "credential-2", name: "Wrong password" },
+          errorMessage:
+            'Login as "Wrong password" failed: Still on the login form after submitting - check the username and password',
+          loginFailureScreenshotFileName: "website-1/failed-login.png",
+          createdAt: "2026-03-04T05:06:07.000Z",
+          pages: [],
+        }),
+      },
+    });
+
+    renderCrawlRunPage();
+
+    const loginNote = await screen.findByRole("note");
+    expect(loginNote).toHaveTextContent(
+      'Not logged in - the login as "Wrong password" did not succeed',
+    );
+    expect(loginNote).toHaveClass("MuiAlert-colorError");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      'Login as "Wrong password" failed: Still on the login form after submitting',
+    );
+    const screenshotSection = screen.getByRole("region", { name: "Login failure screenshot" });
+    const startedAtText = new Date("2026-03-04T05:06:07.000Z").toLocaleString();
+    expect(
+      within(screenshotSection).getByRole("img", {
+        name: `Login failure screenshot of the crawl started ${startedAtText}`,
+      }),
+    ).toHaveAttribute("src", `${RUN_API_URL}/login-failure-screenshot`);
   });
 });
 

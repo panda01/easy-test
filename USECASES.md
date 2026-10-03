@@ -1,6 +1,7 @@
 - A user should be able to create a WebApp in the webapp console
   - A webapp will contain a name, a description as to the purpose of that app for context
 - Credentials, You should be able to add credentials for that specific website, should be able to add multiple credentials
+  - Done: a website's Credentials section (name, description, username, encrypted password, login page URL, optional login form selectors). A crawl can be started "as" a credential: it logs in first and the run records `isLoggedIn` and which credential it used.
 - A user should be able to add Actions for their website.
   - A basic action, like log in -> Go to /login enter the credentials we should use
 - A user should be able to add multiple UseCases to their web app.

@@ -15,12 +15,20 @@ import { type CrawledPageSummaryRecord, useCrawlRunProgress } from "../hooks/use
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useWebsite } from "../hooks/useWebsites";
 import {
+  crawlRunLoginSeverity,
   crawlRunSeverity,
+  describeCrawlRunLogin,
   describeCrawlRunProgress,
   describeCrawlRunStatus,
+  formatCrawlButtonModeSuffix,
+  identifyCrawledUrl,
 } from "../utils/describeCrawlRun";
 import { formatRunDuration } from "../utils/describeScreenshotRun";
-import { WEBSITE_LIST_PATH, websiteDetailPath } from "../utils/routePaths";
+import {
+  WEBSITE_LIST_PATH,
+  crawlRunLoginFailureScreenshotApiUrl,
+  websiteDetailPath,
+} from "../utils/routePaths";
 
 /** The query parameter naming the selected page. */
 const PAGE_QUERY_PARAMETER = "page";
@@ -42,10 +50,37 @@ function findSelectedPage(
 }
 
 /**
+ * Maps every URL a link can name to the visited page it leads to: each
+ * page's recorded identity, and - for a page recorded where a redirect
+ * landed - the identity it was requested at too, so a link to "/" selects the
+ * page recorded as "/calendar". A recorded identity always wins over a
+ * requested one.
+ * @param pages - The crawl's pages
+ * @returns The pages, keyed by every identity that leads to them
+ */
+function mapVisitedPagesByUrl(
+  pages: CrawledPageSummaryRecord[],
+): Map<string, CrawledPageSummaryRecord> {
+  const visitedPagesByUrl = new Map(pages.map((page) => [page.url, page]));
+  for (const page of pages) {
+    const requestedIdentityUrl = identifyCrawledUrl(page.requestedUrl);
+    const requestedIdentityLeadsNowhereYet = !visitedPagesByUrl.has(requestedIdentityUrl);
+    if (requestedIdentityLeadsNowhereYet) {
+      visitedPagesByUrl.set(requestedIdentityUrl, page);
+    }
+  }
+  return visitedPagesByUrl;
+}
+
+/**
  * One crawl of a website (`/websites/:websiteId/crawl-runs/:crawlRunId`):
- * how it is going or how it ended, the "Site map" of every page it found (a
- * tree: each page under the page whose link first led to it), and the
- * selected page in full, aria snapshot included.
+ * when and where it started (and which buttons it clicked, unless it only
+ * followed links), how it is going or how it ended, who it viewed the site as (logged out, or
+ * logged in as a credential - the same for every page, because a logged-in
+ * crawl records nothing until its login works), a screenshot of the login
+ * page when the login failed, the "Site map" of every page
+ * it found (a tree: each page under the page whose link first led to it),
+ * and the selected page in full, aria snapshot included.
  *
  * While the crawl runs, the run is re-fetched every 2 seconds (see
  * `useCrawlRunProgress`), so the progress line and the site map grow live;
@@ -69,7 +104,7 @@ export default function CrawlRunPage(): ReactElement {
   const pages = crawlRun?.pages ?? [];
   const selectedPage = findSelectedPage(pages, searchParams.get(PAGE_QUERY_PARAMETER));
   const selectedPageResource = useCrawledPage(websiteId, crawlRunId, selectedPage?.id ?? null);
-  const visitedPagesByUrl = new Map(pages.map((page) => [page.url, page]));
+  const visitedPagesByUrl = mapVisitedPagesByUrl(pages);
   const visitedPagesById = new Map(pages.map((page) => [page.id, page]));
 
   /**
@@ -87,6 +122,8 @@ export default function CrawlRunPage(): ReactElement {
     crawlDurationMs === null ? "" : ` · ${formatRunDuration(crawlDurationMs)}`;
   const crawlHasErrorMessage = crawlRun !== null && crawlRun.errorMessage !== null;
   const pollFailed = crawlRunResource.pollErrorMessage !== null;
+  const crawlHasLoginFailureScreenshot =
+    crawlRun !== null && crawlRun.loginFailureScreenshotFileName !== null;
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -111,8 +148,13 @@ export default function CrawlRunPage(): ReactElement {
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2, wordBreak: "break-all" }}>
             Started {startedAtText} at {crawlRun.startUrl}
+            {formatCrawlButtonModeSuffix(crawlRun.buttonMode)}
           </Typography>
 
+          {/* A standing fact about the run, not an urgent message: "note", not MUI's default "alert". */}
+          <Alert role="note" severity={crawlRunLoginSeverity(crawlRun)} sx={{ mb: 1 }}>
+            {describeCrawlRunLogin(crawlRun)}
+          </Alert>
           <Alert role="status" severity={crawlRunSeverity(crawlRun.status)}>
             {describeCrawlRunStatus(crawlRun)}
             {crawlDurationText}
@@ -132,6 +174,36 @@ export default function CrawlRunPage(): ReactElement {
             <Alert severity="warning" sx={{ mt: 1 }}>
               Could not refresh the crawl ({crawlRunResource.pollErrorMessage}); still trying.
             </Alert>
+          )}
+
+          {crawlHasLoginFailureScreenshot && (
+            <Box component="section" aria-labelledby="login-failure-screenshot-heading" sx={{ mt: 3 }}>
+              <Typography
+                id="login-failure-screenshot-heading"
+                variant="h6"
+                component="h2"
+                sx={{ mb: 1 }}
+              >
+                Login failure screenshot
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                What the browser showed when the login stopped.
+              </Typography>
+              <Box
+                component="img"
+                src={crawlRunLoginFailureScreenshotApiUrl(websiteId, crawlRunId)}
+                alt={`Login failure screenshot of the crawl started ${startedAtText}`}
+                sx={{
+                  display: "block",
+                  width: "100%",
+                  maxWidth: 960,
+                  height: "auto",
+                  border: 1,
+                  borderColor: "divider",
+                  borderRadius: 1,
+                }}
+              />
+            </Box>
           )}
 
           <Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ mt: 3 }}>

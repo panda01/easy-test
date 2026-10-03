@@ -18,6 +18,7 @@ import {
   type CrawlRunWithPagesRecord,
 } from "../../../src/hooks/useCrawlRunProgress";
 import { type CrawlRunRecord } from "../../../src/hooks/useCrawlRuns";
+import { type CredentialRecord } from "../../../src/hooks/useCredentials";
 import {
   type ScriptModelCatalog,
   type ScriptModelOption,
@@ -203,6 +204,7 @@ export function buildWebsiteRecord(overrides: Partial<WebsiteRecord> = {}): Webs
     description: "The example site",
     networkIdleTimeoutMs: 5000,
     screenshotMinimumWaitMs: 1,
+    loginUrl: "https://example.com/login",
     createdAt: "2026-01-02T03:04:05.000Z",
     updatedAt: "2026-01-03T03:04:05.000Z",
     deletedAt: null,
@@ -265,16 +267,47 @@ export function buildCrawlRunRecord(overrides: Partial<CrawlRunRecord> = {}): Cr
   return {
     id: "crawl-run-1",
     websiteId: "website-1",
+    credentialId: null,
+    isLoggedIn: false,
+    credential: null,
+    buttonMode: "linksOnly",
     startUrl: "https://example.com/",
     status: "finished",
     pageLimit: 50,
     visitedPageCount: 3,
     waitingUrlCount: 0,
     errorMessage: null,
+    loginFailureScreenshotFileName: null,
     durationMs: 6400,
     finishedAt: "2026-03-04T05:06:13.000Z",
     createdAt: "2026-03-04T05:06:07.000Z",
     updatedAt: "2026-03-04T05:06:13.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a website credential as the API returns it (never with a password):
+ * by default "Admin" on website-1, logging in at its /login page with the
+ * fields found automatically.
+ * @param overrides - Fields to replace in the default credential
+ * @returns The credential record
+ */
+export function buildCredentialRecord(overrides: Partial<CredentialRecord> = {}): CredentialRecord {
+  return {
+    id: "credential-1",
+    websiteId: "website-1",
+    name: "Admin",
+    description: "The admin account",
+    username: "admin@example.com",
+    loginUrl: "https://example.com/login",
+    usernameSelector: null,
+    passwordSelector: null,
+    submitSelector: null,
+    hasPassword: true,
+    createdAt: "2026-03-01T00:00:00.000Z",
+    updatedAt: "2026-03-01T00:00:00.000Z",
     deletedAt: null,
     ...overrides,
   };
@@ -297,6 +330,8 @@ export function buildCrawledPageSummaryRecord(
     url: "https://example.com/",
     requestedUrl: "https://example.com/",
     finalUrl: "https://example.com/",
+    wasRedirected: false,
+    foundByButtonText: null,
     visitOrder: 0,
     depth: 0,
     succeeded: true,
@@ -324,6 +359,7 @@ export function buildCrawledPageRecord(
     ...buildCrawledPageSummaryRecord(),
     ariaSnapshot: '- heading "Example" [level=1]',
     linkedUrls: [],
+    buttonUrls: [],
     ...overrides,
   };
 }

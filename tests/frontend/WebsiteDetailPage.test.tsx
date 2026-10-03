@@ -5,6 +5,7 @@ import { Route } from "react-router-dom";
 import WebsiteDetailPage from "../../src/pages/WebsiteDetailPage";
 import {
   buildCrawlRunRecord,
+  buildCredentialRecord,
   buildJsonResponse,
   buildScreenshotRunRecord,
   buildWebsiteItemRecord,
@@ -27,6 +28,7 @@ const USE_CASES_API_URL = "/api/websites/website-1/use-cases";
 const ACTIONS_API_URL = "/api/websites/website-1/actions";
 const SCREENSHOT_RUNS_API_URL = "/api/websites/website-1/screenshot-runs";
 const CRAWL_RUNS_API_URL = "/api/websites/website-1/crawl-runs";
+const CREDENTIALS_API_URL = "/api/websites/website-1/credentials";
 
 /** History as it is after clicking the website on the list. */
 const OPENED_FROM_LIST: RouterStart = {
@@ -50,7 +52,8 @@ function renderWebsiteDetailPage(routerStart: RouterStart): RenderResult {
 
 /**
  * Stubs a successful load of the website with one use case, two actions, no
- * screenshot runs, and no crawl runs, plus any extra or replacement routes.
+ * screenshot runs, no crawl runs, and no credentials, plus any extra or
+ * replacement routes.
  * @param extraRoutes - More replies, e.g. for the DELETE, or replacements for the GETs
  * @returns The installed fetch stub
  */
@@ -70,6 +73,7 @@ function stubLoadedWebsite(extraRoutes: StubbedRouteTable = {}): FetchStub {
     },
     [`GET ${SCREENSHOT_RUNS_API_URL}`]: { status: 200, body: [] },
     [`GET ${CRAWL_RUNS_API_URL}`]: { status: 200, body: [] },
+    [`GET ${CREDENTIALS_API_URL}`]: { status: 200, body: [] },
     ...extraRoutes,
   });
 }
@@ -148,6 +152,30 @@ describe("WebsiteDetailPage", () => {
     expect(await screen.findByText("No description.")).toBeInTheDocument();
   });
 
+  it("shows the website's login page as a link under its URL", async () => {
+    stubLoadedWebsite();
+
+    renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+    const loginPageLink = await screen.findByRole("link", { name: "https://example.com/login" });
+    expect(loginPageLink).toHaveAttribute("href", "https://example.com/login");
+    expect(loginPageLink).toHaveAttribute("target", "_blank");
+    expect(loginPageLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(loginPageLink.parentElement).toHaveTextContent("Login page: https://example.com/login");
+    expect(screen.queryByText("Doesn't require login")).not.toBeInTheDocument();
+  });
+
+  it("says so when the website doesn't require login", async () => {
+    stubLoadedWebsite({
+      [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+    });
+
+    renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+    expect(await screen.findByText("Doesn't require login")).toBeInTheDocument();
+    expect(screen.queryByText(/^Login page:/)).not.toBeInTheDocument();
+  });
+
   it("shows the use case and action sections with their items", async () => {
     stubLoadedWebsite();
 
@@ -194,7 +222,7 @@ describe("WebsiteDetailPage", () => {
     const dialog = await openDeleteDialog(user);
 
     expect(dialog).toHaveTextContent(
-      '"Example" will be deleted, along with its 1 use case, 2 actions, 0 screenshot runs, and 0 crawl runs.',
+      '"Example" will be deleted, along with its 1 use case, 2 actions, 0 screenshot runs, 0 crawl runs, and 0 credentials.',
     );
   });
 
@@ -211,7 +239,7 @@ describe("WebsiteDetailPage", () => {
 
     const dialog = await openDeleteDialog(user);
 
-    expect(dialog).toHaveTextContent("1 use case, 2 actions, 1 screenshot run, and 0 crawl runs.");
+    expect(dialog).toHaveTextContent("1 use case, 2 actions, 1 screenshot run, 0 crawl runs, and 0 credentials.");
   });
 
   it("counts zero items when the item lists failed to load", async () => {
@@ -229,7 +257,7 @@ describe("WebsiteDetailPage", () => {
     await user.click(screen.getByRole("button", { name: "Delete" }));
 
     expect(await screen.findByRole("dialog")).toHaveTextContent(
-      "along with its 0 use cases, 0 actions, 0 screenshot runs, and 0 crawl runs.",
+      "along with its 0 use cases, 0 actions, 0 screenshot runs, 0 crawl runs, and 0 credentials.",
     );
   });
 
@@ -529,8 +557,86 @@ describe("WebsiteDetailPage", () => {
 
       const landing = await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
       expect(landing.navigationType).toBe("PUSH");
-      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, { method: "POST" });
+      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId: null, buttonMode: "linksOnly" }),
+      });
       expect(countRequests(fetchStub, "POST", CRAWL_RUNS_API_URL)).toBe(1);
+    });
+
+    it("crawls logged in as the credential picked in Crawl as", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedWebsite({
+        [`GET ${CREDENTIALS_API_URL}`]: {
+          status: 200,
+          body: [buildCredentialRecord({ id: "credential-1", name: "Admin" })],
+        },
+        [`POST ${CRAWL_RUNS_API_URL}`]: { status: 201, body: runningCrawlRun },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+      await screen.findByRole("list", { name: "Credentials" });
+
+      await user.click(screen.getByRole("combobox", { name: /^Crawl as/ }));
+      await user.click(await screen.findByRole("option", { name: "Admin" }));
+      await user.click(screen.getByRole("button", { name: "Crawl website" }));
+
+      await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
+      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId: "credential-1", buttonMode: "linksOnly" }),
+      });
+    });
+
+    it("crawls with the button mode picked in Buttons", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedWebsite({
+        [`POST ${CRAWL_RUNS_API_URL}`]: { status: 201, body: runningCrawlRun },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const buttonsPicker = await screen.findByRole("combobox", { name: /^Buttons/ });
+      expect(buttonsPicker).toHaveTextContent("Links only (no buttons)");
+      await user.click(buttonsPicker);
+      await user.click(await screen.findByRole("option", { name: "Buttons, except risky ones" }));
+      expect(buttonsPicker).toHaveTextContent("Buttons, except risky ones");
+      await user.click(screen.getByRole("button", { name: "Crawl website" }));
+
+      await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
+      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId: null, buttonMode: "allButRisky" }),
+      });
+    });
+
+    it("hides Crawl as and crawls logged out when neither the website nor a credential has a login page", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedWebsite({
+        [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+        [`GET ${CREDENTIALS_API_URL}`]: {
+          status: 200,
+          body: [buildCredentialRecord({ id: "credential-1", loginUrl: null })],
+        },
+        [`POST ${CRAWL_RUNS_API_URL}`]: { status: 201, body: runningCrawlRun },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+      const section = await screen.findByRole("region", { name: "Crawls" });
+      await waitFor(() => {
+        expect(countRequests(fetchStub, "GET", CREDENTIALS_API_URL)).toBe(1);
+      });
+
+      expect(within(section).queryByRole("combobox", { name: /^Crawl as/ })).not.toBeInTheDocument();
+      expect(within(section).getByRole("combobox", { name: /^Buttons/ })).toBeInTheDocument();
+      await user.click(within(section).getByRole("button", { name: "Crawl website" }));
+
+      await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
+      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId: null, buttonMode: "linksOnly" }),
+      });
     });
 
     it("disables the button and says so while the crawl is being started", async () => {
@@ -590,7 +696,164 @@ describe("WebsiteDetailPage", () => {
 
       const dialog = await openDeleteDialog(user);
 
-      expect(dialog).toHaveTextContent("1 use case, 2 actions, 0 screenshot runs, and 1 crawl run.");
+      expect(dialog).toHaveTextContent(
+        "1 use case, 2 actions, 0 screenshot runs, 1 crawl run, and 0 credentials.",
+      );
+    });
+  });
+
+  describe("credentials", () => {
+    it("lists the website's credentials, each linking to its edit page, with a New credential link", async () => {
+      stubLoadedWebsite({
+        [`GET ${CREDENTIALS_API_URL}`]: {
+          status: 200,
+          body: [
+            buildCredentialRecord({ id: "credential-1", name: "Admin" }),
+            buildCredentialRecord({
+              id: "credential-2",
+              name: "Viewer",
+              username: "viewer@example.com",
+              description: null,
+            }),
+          ],
+        },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const section = await screen.findByRole("region", { name: "Credentials" });
+      const credentialList = await within(section).findByRole("list", { name: "Credentials" });
+      const credentialLinks = within(credentialList).getAllByRole("link");
+      expect(credentialLinks).toHaveLength(2);
+      expect(credentialLinks[0]).toHaveTextContent("Admin");
+      expect(credentialLinks[0]).toHaveTextContent("admin@example.com · The admin account");
+      expect(credentialLinks[0]).toHaveAttribute(
+        "href",
+        "/websites/website-1/credentials/credential-1/edit",
+      );
+      expect(credentialLinks[1]).toHaveTextContent("viewer@example.com");
+      expect(within(section).getByRole("link", { name: "New credential" })).toHaveAttribute(
+        "href",
+        "/websites/website-1/credentials/new",
+      );
+    });
+
+    it("shows the empty state when the website has no credentials", async () => {
+      stubLoadedWebsite();
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const section = await screen.findByRole("region", { name: "Credentials" });
+
+      expect(await within(section).findByText("No credentials yet.")).toBeInTheDocument();
+    });
+
+    it("opens the new credential form with this page as its return state", async () => {
+      const user = userEvent.setup();
+      stubLoadedWebsite();
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      await user.click(await screen.findByRole("link", { name: "New credential" }));
+
+      const landing = await readProbeAfterLanding("/websites/website-1/credentials/new");
+      expect(landing.state).toBe(JSON.stringify({ returnTo: DETAIL_PATH }));
+    });
+
+    it("hides the section when neither the website nor any credential has a login page, still counting the credentials in the delete dialog", async () => {
+      const user = userEvent.setup();
+      stubLoadedWebsite({
+        [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+        [`GET ${CREDENTIALS_API_URL}`]: {
+          status: 200,
+          body: [
+            buildCredentialRecord({ id: "credential-1", loginUrl: null }),
+            buildCredentialRecord({ id: "credential-2", loginUrl: null }),
+          ],
+        },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const dialog = await openDeleteDialog(user);
+
+      expect(dialog).toHaveTextContent("0 crawl runs, and 2 credentials.");
+      expect(screen.queryByRole("region", { name: "Credentials" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "New credential" })).not.toBeInTheDocument();
+    });
+
+    it("hides the section for a website without a login page and no credentials", async () => {
+      stubLoadedWebsite({
+        [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      await screen.findByRole("region", { name: "Crawls" });
+      await screen.findByRole("list", { name: "Actions" });
+
+      expect(screen.queryByRole("region", { name: "Credentials" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("combobox", { name: /^Crawl as/ })).not.toBeInTheDocument();
+    });
+
+    it("shows the section and Crawl as when only a credential has its own login page", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedWebsite({
+        [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+        [`GET ${CREDENTIALS_API_URL}`]: {
+          status: 200,
+          body: [
+            buildCredentialRecord({
+              id: "credential-1",
+              name: "Gym teacher",
+              loginUrl: "https://example.com/sign-in",
+            }),
+          ],
+        },
+        [`POST ${CRAWL_RUNS_API_URL}`]: {
+          status: 201,
+          body: buildCrawlRunRecord({ id: "crawl-run-3", status: "running" }),
+        },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const section = await screen.findByRole("region", { name: "Credentials" });
+      expect(await within(section).findByRole("list", { name: "Credentials" })).toBeInTheDocument();
+      expect(screen.getByText("Doesn't require login")).toBeInTheDocument();
+      await user.click(screen.getByRole("combobox", { name: /^Crawl as/ }));
+      await user.click(await screen.findByRole("option", { name: "Gym teacher" }));
+      await user.click(screen.getByRole("button", { name: "Crawl website" }));
+
+      await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-3");
+      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId: "credential-1", buttonMode: "linksOnly" }),
+      });
+    });
+
+    it("shows a credential list failure in the section", async () => {
+      stubLoadedWebsite({
+        [`GET ${CREDENTIALS_API_URL}`]: { status: 500, body: { error: "Database unavailable" } },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+      const section = await screen.findByRole("region", { name: "Credentials" });
+
+      expect(await within(section).findByRole("alert")).toHaveTextContent("Database unavailable");
+    });
+
+    it("counts the website's credentials in the delete dialog", async () => {
+      const user = userEvent.setup();
+      stubLoadedWebsite({
+        [`GET ${CREDENTIALS_API_URL}`]: {
+          status: 200,
+          body: [
+            buildCredentialRecord({ id: "credential-1" }),
+            buildCredentialRecord({ id: "credential-2" }),
+          ],
+        },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+      await screen.findByRole("list", { name: "Credentials" });
+
+      const dialog = await openDeleteDialog(user);
+
+      expect(dialog).toHaveTextContent("0 crawl runs, and 2 credentials.");
     });
   });
 });

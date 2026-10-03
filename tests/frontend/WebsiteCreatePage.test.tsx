@@ -62,6 +62,7 @@ describe("WebsiteCreatePage", () => {
     expect(screen.getByRole("textbox", { name: "URL" })).toHaveValue("");
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("");
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Login page URL" })).toHaveValue("");
     expect(screen.getByRole("spinbutton", { name: "Network idle cap (ms)" })).toHaveValue(5000);
     expect(screen.getByRole("spinbutton", { name: "Minimum wait (ms)" })).toHaveValue(1);
     expect(screen.getByRole("button", { name: "Create website" })).toBeDisabled();
@@ -101,12 +102,42 @@ describe("WebsiteCreatePage", () => {
         description: "Notes",
         networkIdleTimeoutMs: 5000,
         screenshotMinimumWaitMs: 1,
+        loginUrl: "",
       }),
     });
 
     // The form's entry is gone, so Back goes straight to the list.
     await user.click(screen.getByRole("button", { name: "Probe: go back" }));
     await readProbeAfterLanding(LIST_PATH);
+  });
+
+  it("POSTs the typed login page URL with the new website", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubFetchRoutes({
+      "POST /api/websites": { status: 201, body: buildWebsiteRecord({ id: "website-9" }) },
+    });
+    renderWebsiteCreatePage(OPENED_FROM_LIST);
+
+    await fillRequiredFields(user);
+    await user.type(
+      screen.getByRole("textbox", { name: "Login page URL" }),
+      "https://example.com/login",
+    );
+    await user.click(screen.getByRole("button", { name: "Create website" }));
+
+    await readProbeAfterLanding("/websites/website-9");
+    expect(fetchStub).toHaveBeenCalledWith("/api/websites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: "https://example.com",
+        name: "Example",
+        description: "",
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
+        loginUrl: "https://example.com/login",
+      }),
+    });
   });
 
   it("disables submit while the create request is in flight", async () => {

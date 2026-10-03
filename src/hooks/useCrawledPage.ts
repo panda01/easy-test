@@ -8,6 +8,8 @@ export interface CrawledPageRecord extends CrawledPageSummaryRecord {
   ariaSnapshot: string | null;
   /** Every same-origin link found on the page (identity URLs), in page order. */
   linkedUrls: string[];
+  /** The same-site pages (identities) this page's buttons led to, in click order. */
+  buttonUrls: string[];
 }
 
 /**

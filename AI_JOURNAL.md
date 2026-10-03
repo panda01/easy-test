@@ -4,6 +4,355 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-03 14:37 EDT — Website login URL (inherited, learned) + crawl button modes (built by multiple agents)
+
+**Intent:**
+- **Part A: a website login URL.**
+  - A website gets an optional login page URL; blank means it doesn't require login.
+  - Credentials inherit it unless they set their own.
+  - A website without one **learns** it from a crawl that logged in successfully: once now for existing data, and from then on.
+- **Part B: button modes for crawls.**
+  - **Links only:** the default; no buttons are clicked.
+  - **All except risky:** create, delete, update, logout, pay, confirm and similar are never clicked.
+  - **Open only:** only "open" buttons, the strictest.
+  - A click only counts when it lands on a new same-site URL. That URL is crawled like a link.
+- At the user's request the work was split across **multiple agents** with disjoint file ownership. I did the shared groundwork first, then three agents worked in parallel, then I integrated and verified.
+
+### Decisions (made by the user)
+- **Login URL:**
+  - A credential's login URL is an optional override; blank inherits the website's.
+  - Credentials and "Crawl as" are hidden only when **neither** the website nor any credential has a login URL. A website with a login URL keeps "Logged out" as the crawl default.
+  - The API answers 400 only when no login URL exists anywhere.
+  - The website learns a login URL from a successful login, and the existing data was backfilled.
+- **Buttons:**
+  - Three modes, as above.
+  - Only clicks that land on new same-site URLs are recorded.
+  - The risky-word list, the 20-buttons-per-page cap, and never clicking unlabelled or disabled buttons were my proposals; the plan was approved with them.
+
+### Data backfill (run once with psql, preview shown first)
+- Each active website without a login URL took one from a credential whose crawl had logged in (`isLoggedIn`), using the most recent such run. Only **Forge Gym management** changed: it got `https://forge.aikazi.com/login`, from "Gym Owner".
+- Its credentials keep their own matching URL, which can be blanked so they inherit.
+
+### Step 0, groundwork (me)
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | `Website.loginUrl String?`, `Credential.loginUrl String?` (was required), `CrawlRun.buttonMode String @default("linksOnly")`, `CrawledPage.buttonUrls String[] @default([])`, `CrawledPage.foundByButtonText String?`, and the doc comments. Ran `prisma db push` and `prisma generate`. |
+| `server/utils/crawlButtonModes.ts` (new) | `CRAWL_BUTTON_MODES`, `CrawlButtonMode`, `DEFAULT_CRAWL_BUTTON_MODE`, `isCrawlButtonMode`. |
+| `server/services/dbService.ts` | **New:** `adoptWebsiteLoginUrl(websiteId, loginUrl)` (an `updateMany` where `loginUrl` is null, so it never overwrites). **Changed:** `WebsiteInput.loginUrl?`, `CredentialInput.loginUrl: string \| null`, `CrawlRunInput.buttonMode?`, `CrawledPageInput.foundByButtonText` and `buttonUrls`; `CrawledPageSummary` and `listCrawledPageSummariesForRun` also omit `buttonUrls`. |
+| `server/services/crawlerService.ts` | `crawlWebsite(..., buttonMode = DEFAULT_CRAWL_BUTTON_MODE)` with `CrawlContext.buttonMode` (Agent 2 then wired it). |
+| `server/services/crawlRunService.ts` | `buildCredentialLogin(credential, website, ...)` uses the effective login URL `credential.loginUrl ?? website.loginUrl` and throws when both are null (Agent 1 took it from there). |
+| Client record types | `WebsiteRecord.loginUrl`, `CredentialRecord.loginUrl` (nullable), `CrawlRunRecord.buttonMode` + `CrawlButtonModeRecord`, `CrawledPageSummaryRecord.foundByButtonText`, `CrawledPageRecord.buttonUrls`. |
+| Tests | Builder fields in `tests/frontend/support/frontendTestHelpers.tsx`; fixture fields in `crawlRunService`, `dbService` and `crawlerService` specs; `dbService.test.ts`: `adoptWebsiteLoginUrl` (2 tests) and the summary omit; `tests/backend/server.test.ts`: `loginUrl: null` in the website wiring expectation, which Agent 1 flagged. |
+
+### Step 1, agents (each owned its own files)
+- **Agent 1, server API and run start:**
+  - **`validateRequestBodies.ts`:**
+    - New: `readOptionalHttpUrl`, `LOGIN_URL_INVALID_MESSAGE`, `readOptionalCrawlButtonMode`, `BUTTON_MODE_INVALID_MESSAGE`.
+    - `validateWebsiteInput` returns `loginUrl`; `validateCredentialInput` makes `loginUrl` optional; `validateCrawlRunStartInput` and `CrawlRunStartInput` gain `buttonMode`.
+  - **`credentials.ts`:** `NO_LOGIN_URL_ANYWHERE_MESSAGE` and `credentialHasNoEffectiveLoginUrl`; POST and PUT answer 400 when neither the body nor the website has a URL.
+  - **`crawlRuns.ts`:** `CREDENTIAL_HAS_NO_EFFECTIVE_LOGIN_URL_MESSAGE`, a 400 for a credential with no effective URL, and `buttonMode` passed through.
+  - **`websites.ts`:** JSDoc for `loginUrl`.
+  - **`crawlRunService.ts`:** new `learnWebsiteLoginUrl` (calls `adoptWebsiteLoginUrl` and logs failures) and `buildCrawlLogin` (`recordLoginSucceeded` learns the URL when the website has none); `startCrawlRun(..., buttonMode = DEFAULT_CRAWL_BUTTON_MODE)` stores the mode and passes it on.
+  - **Specs:** 5 specs, 287 tests (59 new).
+- **Agent 2, crawler engine:**
+  - **`pageActionService.ts` (new),** moved out of `crawlerLoginService`: `trackPageRequests`, `PageRequestTracker`, `waitForTrackedRequestsToFinish`, `waitOutMinimumWaitSince`, `ACTION_REQUESTS_QUIET_WINDOW_MS`, `ACTION_REQUESTS_POLL_INTERVAL_MS`.
+  - **`crawlerButtonService.ts` (new):**
+    - Constants: `CLICKABLE_BUTTON_SELECTOR`, `RISKY_BUTTON_WORDS`, `RISKY_BUTTON_TEXT_PATTERN`, `OPEN_BUTTON_TEXT_PATTERN`, `BUTTON_CLICKS_PER_PAGE_LIMIT` (20), `BUTTON_CLICK_TIMEOUT_MS`.
+    - Exported: `readRawPageButtons` (runs in the browser, anonymous), `chooseButtonsToClick`, `followPageButtons`, and the `RawPageButton`, `ChosenButton` and `ButtonLink` types.
+    - Private helpers: `buildRiskyWordPatternSource`, `buttonTextPassesMode`, `readPageButtons`, `reloadButtonPage`, `clickAndWaitForResult`, `readButtonLink`, `followOneButton`.
+  - **`crawlerService.ts`:**
+    - `QueuedCrawlUrl.foundByButtonText`, `PageVisit.buttonLinks`.
+    - New `followButtonsWhenAsked`, `isUnseenAndSafeToQueue`, `claimUnseenButtonLinks`, `closePopupQuietly`.
+    - `visitCrawlPage` takes the context and clicks buttons only on fully succeeded, same-origin pages, after the snapshot and links are read; its `durationMs` includes the clicks.
+    - `crawlNextPage` claims links first, then buttons.
+    - `crawlWithPage` closes pop-ups when buttons are on.
+  - **`crawlerLoginService.ts`:** the helpers moved out, with no behaviour change.
+  - **Specs:** 4 specs, 180 tests (new `pageActionService` with 12 and `crawlerButtonService` with 74; `crawlerService` gained 11).
+- **Agent 3, frontend:**
+  - `WebsiteForm` gets the "Login page URL" field (`WebsiteRequestBody.loginUrl`), passed through by `WebsiteCreatePage` and `WebsiteEditPage`.
+  - `WebsiteDetailPage`:
+    - shows the login line;
+    - `loginFeaturesAreShown` hides Credentials and "Crawl as" when no URL exists anywhere;
+    - holds the Buttons mode and POSTs `{ credentialId, buttonMode }`.
+  - `CredentialForm` gains the `websiteLoginUrl` prop: an optional override with a placeholder, or required.
+  - `CredentialCreatePage` uses `NEW_CREDENTIAL_VALUES` (all blank) instead of `buildNewCredentialValues`.
+  - `CredentialEditPage` waits for both the credential and the website.
+  - `describeCrawlRun` gets `describeCrawlButtonMode` and `formatCrawlButtonModeSuffix`.
+  - `CrawlRunsSection`:
+    - the Buttons select;
+    - `crawlAsPickerIsShown`, `selectedButtonMode` and `onSelectedButtonModeChange` props;
+    - `DEFAULT_CRAWL_BUTTON_MODE`;
+    - the description no longer says "never clicks buttons";
+    - history mode text.
+  - `CrawlRunPage` shows the mode text.
+  - `CrawlSiteMap` adds the "via “…”" suffix.
+  - `CrawledPageDetails` gets the found-by text, a new internal `CrawledUrlList`, and a "Pages its buttons led to" list.
+  - **Specs:** 587 frontend tests (37 new).
+
+### Docs (me)
+- `server/services/README.md` covers the new modules, the button modes section with the risky-word list, and the run start and learning.
+- Also updated: `server/controllers/README.md`, `server/utils/README.md`, `server/prisma/README.md`, `src/pages/README.md`, `src/components/README.md`, `src/hooks/README.md` and `README.md`.
+
+### Tests
+- No test was removed or skipped.
+- Updated expectations only where the behaviour changed: request bodies now carry `loginUrl` and `buttonMode`; the credential login URL starts blank; the run outcome objects gained fields.
+
+### Verification performed
+- **Checks:**
+  - `npm run test:coverage`: **1462 tests in 95 files, all passing**. Statements 99.49%, branches 98.9%, functions 100%, lines 99.81%.
+  - `npm run lint`, `npm run tsc`, and `npm run tsc:client`: clean.
+- **Live API runs** against the user's dev server and the fixture site, extended with a buttons-only `/sessions` page. The site has open, neutral, risky, icon-only and disabled buttons, plus a dialog button, and counts hits on the forbidden targets.
+
+  | Run | Result |
+  |---|---|
+  | Links only | no `/sessions/*` pages |
+  | All except risky | yoga, pilates (a `pushState` URL change) and details, each with `foundByButtonText`; `/sessions.buttonUrls` lists all three |
+  | Open only | yoga and pilates only |
+
+  - **Across all three modes,** every risky, icon, disabled and logout target got **0 hits**.
+  - **Part A:**
+    - A credential with a blank URL inherits the website's and logs in.
+    - A credential overriding with a broken URL fails with HTTP 404, which proves its own URL is used.
+    - Website B, with no URL, learned `http://localhost:3099/login` from a credential's successful login.
+    - Website C: creating a credential without a URL answers 400.
+    - An unknown button mode answers 400.
+- **Manual-verifier agent (Playwright MCP): VERIFIED.**
+  - The login line on the website pages, with C hiding Credentials and "Crawl as".
+  - The website and credential form fields, with C's credential URL required.
+  - The Buttons select options.
+  - The history and run page mode text.
+  - The "via" labels and the "Pages its buttons led to" list.
+  - Forge shows its backfilled login URL; it was not crawled.
+  - 0 console errors.
+
+### Notable during implementation
+- **Every Prisma model type resolves to `any`** under `tsconfig.server.json` (`npm run tsc`, nodenext), so the server typecheck never catches Prisma field mistakes. `npm run tsc:client` (the bundler resolution, which includes the tests) resolves them correctly and caught them. This predates the change; no config was edited.
+- The agents noted lint errors in `tests/` that predate the change (not covered by `npm run lint`); they were left alone.
+
+---
+
+## 2026-10-03 13:46 EDT — Crawled pages: record redirects where they landed
+
+**Intent:**
+- The user asked why Forge's `/calendar` page was "excluded" from a crawl. It wasn't. Forge redirects `/` to `/calendar` when you're logged in. The start page was recorded under the URL it was requested at (`/`), so the site map labelled the calendar page "/".
+- The user wants redirects visible both in the data and on the crawled page.
+
+### Decisions (made by the user)
+- **"Name the row by where it landed":**
+  - A redirected page is recorded under the origin + path the browser ended up on, with a new `wasRedirected` flag. `requestedUrl` keeps where it was sent.
+  - If the landing page is already recorded in the crawl, the page keeps the identity it was requested at, so there are no duplicate rows, and its `finalUrl` names the page it landed on.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **`CrawledPage`:** added `wasRedirected Boolean @default(false)`. The doc comment now explains that `url` is where the browser landed, and gives the exception. `prisma format` realigned the block. Ran `prisma db push` and `prisma generate`. |
+| `server/services/dbService.ts` | `CrawledPageInput` gained `wasRedirected`; the `url` doc was updated. |
+| `server/services/crawlerService.ts` | **New module-private:** `RecordedIdentity`; `decideRecordedIdentity(state, queuedUrl, finalUrl)`, which picks the landing identity unless it's already recorded; and `claimRecordedIdentity(state, url)`, which remembers the identity and drops it from the queue. **Changed:** `CrawlState` gained `recordedIdentityUrls`; `visitCrawlPage` and `buildUnreadablePageVisit` record the decided identity plus `wasRedirected`; `crawlNextPage` claims the identity before counting progress. The `crawlWebsite` doc was updated. |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/hooks/useCrawlRunProgress.ts` | `CrawledPageSummaryRecord` gained `wasRedirected`. |
+| `src/utils/describeCrawlRun.ts` | **New:** `identifyCrawledUrl` (origin + path, like the crawler); `describeCrawledPagePath(page)`, which gives "/schools", "/calendar (from /)" or "/old-account → /account", and shows the full origin when a redirect left the site; and `CrawledPageLabelFields`. **Module-private:** `formatRedirectEnd`. |
+| `src/components/CrawlSiteMap.tsx` | Rows are labelled with `describeCrawledPagePath`. |
+| `src/components/CrawledPageDetails.tsx` | The heading uses `describeCrawledPagePath`. |
+| `src/pages/CrawlRunPage.tsx` | **New module-private** `mapVisitedPagesByUrl`: pages are also found by their requested identity, so a link to "/" selects the page recorded as "/calendar". A recorded identity always wins. |
+
+### Docs
+`server/services/README.md`, `server/prisma/README.md`, `src/components/README.md`, and `src/pages/README.md`.
+
+### Tests
+- **`crawlerService.test.ts`:**
+  - Updated to the new identity rule, as the user requested: the http→https www start page is now recorded as `https://www.example.com/`; the off-site redirect is recorded under its landing URL; "never loads a page a link already redirected to" became "records a redirected page under where it landed, and never loads that page again"; `wasRedirected: false` was added to two full-object expectations.
+  - **New tests:**
+    - The start page redirect (`/` → `/calendar`).
+    - A redirect onto a still-queued page, which is taken off the queue and visited once.
+    - A redirect onto an already-recorded page, which keeps the requested identity.
+    - A query-string-only change, which is not a redirect.
+    - A redirected page that never became ready.
+- **`describeCrawlRun.test.tsx`:** `identifyCrawledUrl`, and six `describeCrawledPagePath` cases (none, landed, already recorded, off-site, already-recorded off-site, unparseable).
+- **`CrawlRunPage.test.tsx`:** the site map and heading labels, plus a link to "/" from another page selecting the "/calendar (from /)" page.
+- Fixtures (`crawlRunService`, `dbService`, `frontendTestHelpers`) gained `wasRedirected`.
+- No test was removed or skipped.
+
+### Verification performed
+- **Checks:**
+  - `npm run test:coverage`: **1267 tests, all passing**. Statements 99.45%, branches 98.79%, functions 100%, lines 99.8%.
+  - `npm run lint`, `npm run tsc`, and `npm run tsc:client`: clean.
+- **Live crawl** of the fixture site (`claude_tmp/loginFixtureSite.mts`), logged in, after adding four redirect cases:
+  - `/` → `/dashboard` in the browser was recorded as `/dashboard`, `wasRedirected`.
+  - `/to-settings` → 302 → `/account/settings`, while that page was still queued, was recorded as `/account/settings` and visited once.
+  - `/account` was not redirected.
+  - `/old-account` → 302 → the already-recorded `/account` was recorded as `/old-account` with `finalUrl` `/account`.
+  - `/home` → `/dashboard`, already recorded, was recorded as `/home`.
+- **Manual-verifier agent (Playwright MCP): VERIFIED.**
+  - Site map rows read "/dashboard (from /)", "/account/settings (from /to-settings)", "/account", "/old-account → /account", and "/home → /dashboard".
+  - The headings match.
+  - The "/" link selects the dashboard page.
+  - Logout links show as not visited.
+  - 0 console errors.
+
+### Notable during implementation
+- Crawls run before this change keep their old rows: no backfill was done, so they still show "/" for a redirected start page. A new crawl records redirects the new way.
+
+---
+
+## 2026-10-03 13:30 EDT — Login: wait for the site's answer before judging it
+
+**Intent:**
+- The user saw logged-in crawls of their Forge site fail too soon.
+- Diagnosis:
+  - After the submit click, the crawler waited for `load` and for `waitForPageReadiness`. Both return at once on a single-page app that signs in with `fetch`: the page never navigates, and it was already network-idle before the click.
+  - So the crawler judged the login about 30 ms after the click.
+  - Evidence: Forge's failure screenshot showed the button still reading **"Signing in…"**, and the whole crawl took 1.5 s.
+
+### Decisions (made by the user)
+- Picked "wait for the form to go":
+  - **On success**, the crawl goes on as soon as the password field disappears.
+  - **A failure is only declared** once the requests the submit started have finished (capped by the website's network idle cap), the website's minimum wait has passed, and the password field is still there after a 15 s limit.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/services/crawlerLoginService.ts` | **Removed:** `LOGIN_NAVIGATION_TIMEOUT_MS` and the post-submit `waitForLoadState` + `waitForPageReadiness` step, with its "did not become ready" failure. **New constants:** `LOGIN_RESULT_TIMEOUT_MS` (15 s), `SIGN_IN_REQUESTS_QUIET_WINDOW_MS` (500 ms), `SIGN_IN_REQUESTS_POLL_INTERVAL_MS` (100 ms). **New module-private:** `SignInRequestTracker` and `trackSignInRequests` (count `request` / `requestfinished` / `requestfailed` from just before the submit, then detach); `waitForSignInRequestsToFinish`; `waitOutMinimumWaitSinceSubmit`; `waitForLoginFormToGo`; and `waitForLoginResult`, which waits for the form to go, then for the requests to finish, then for the minimum wait, then looks at the password field once more. **Changed:** `logInWithCredential` fills the fields, starts tracking, submits, and returns `waitForLoginResult`'s verdict. The tracker is always stopped in a `finally`. |
+
+### Docs
+- `server/services/README.md`: the login steps were rewritten.
+- `README.md`: the crawl paragraph was extended.
+
+### Tests
+`tests/backend/services/crawlerLoginService.test.ts`. The fake page gained request events (`on`/`off`), `waitForTimeout`, a "hidden" state for `waitFor`, and click failures.
+- **New tests:**
+  - The exact order: ready → type → submit → wait for the form to go → 5 quiet checks → final look.
+  - Waits for in-flight sign-in requests (7 busy checks + 5 quiet).
+  - Stops at the website's idle cap.
+  - Skips the wait when the cap is 0.
+  - Honours the minimum wait since the submit.
+  - Stops listening once done.
+  - A click failure.
+  - The form vanishing for a moment and coming back, which must fail.
+  - The form outlasting the 15 s but gone at the final look, which succeeds.
+- **Replaced:** "fails when the page after submitting never loads" became "fails when the page closes while waiting for the sign-in". The step it tested was removed as part of this requested change.
+- **Changed:** the wrong-password test now checks the 15 s wait.
+
+### Verification performed
+- **Checks:**
+  - `npm run test:coverage`: **1253 tests, all passing**. Statements 99.44%, branches 98.77%, functions 100%, lines 99.79%. `crawlerLoginService.ts` is at 100%.
+  - `npm run lint`, `npm run tsc`, and `npm run tsc:client`: clean.
+- **Live run** against the user's `npm run dev`. The fixture site (`claude_tmp/loginFixtureSite.mts`) gained `/spa-login`, a Forge-like app login: `fetch` to an API that answers after 2 s, "Signing in…" meanwhile, and a client-side swap to the dashboard. The test website used Forge's settings (5000 ms cap, 1 ms minimum).
+
+  | Login | Result | Crawl time |
+  |---|---|---|
+  | App login, right password | **logged in**, 5 pages (the old code would have failed this) | 6.9 s |
+  | App login, wrong password | failed, with "Still on the login form" | 16.4 s |
+  | Classic form, right password | logged in | 4.3 s |
+  | Classic form, wrong password | failed; the mid-reload vanish was not taken for success | 16.4 s |
+
+  - The failure screenshot now shows the site's answer ("Wrong email or password", button back to "Sign in"), not "Signing in…".
+  - Logout links were hit 0 times.
+  - The app-login and classic-form runs were re-run after the final refactor, with the same results.
+
+### Notable during implementation
+- Forge's other failure (17:17:25, "No visible password field") is a separate problem. Its screenshot shows that `/login` rendered Forge's welcome card ("Log in / Create an account") instead of the form for the full 10 s, while the next run got the form. Not addressed here.
+
+---
+
+## 2026-10-03 13:08 EDT — Website credentials + logged-in crawls (with a login failure screenshot)
+
+**Intent:**
+- Add a **Credentials** table: a name, description, username, and password per website, with the password stored securely.
+- Let a crawl be started **as a chosen credential**. The crawler logs in first and records nothing until the login has worked.
+- Note on the **crawl run** whether it viewed the site logged in, and which credential produced it.
+- Mid-task follow-ups from the user:
+  - Take a **screenshot when the login fails**.
+  - Make sure the crawler **waits for the page to finish loading** before it types the password, using the website's own timing minimums.
+
+### Decisions (all made by the user)
+- **Passwords are encrypted, not hashed.** The crawler has to type the real password, so it uses AES-256-GCM with `CREDENTIAL_ENCRYPTION_KEY`, 32 random bytes in base64. The user had already put a valid key in `.env.local`; it was kept, not regenerated. The API never returns the password or its ciphertext.
+- **Finding the login form:** the credential stores a `loginUrl`. The crawler finds the username field, password field, and submit button itself. Optional CSS selectors on the credential override each guess.
+- **A credential belongs to one website** (`websiteId`).
+- **`isLoggedIn` lives on `CrawlRun`, not `CrawledPage`.** This was the user's correction to the first plan. No page is recorded until the login succeeds, so the run-level flag holds for every page. The run also keeps `credentialId`.
+- **A failed login ends the run `failed`** with no pages, and `errorMessage` says `Login as "<name>" failed: <reason>`. The user first chose "crawl logged out" and then changed it to this.
+- **While logged in, logout links are never followed** (`logout`, `log-out`, `sign_out`, `logoff`, and similar). They are still listed in the page's `linkedUrls`.
+- **Login waits follow the website's own settings.** The login page gets the same `waitForPageReadiness` every crawled page gets: network idle up to `networkIdleTimeoutMs`, then paint, then the rest of `screenshotMinimumWaitMs`. Only after that are the fields typed into. The page after submitting gets the same wait before the result is checked.
+- **The login failure screenshot follows the screenshot-run convention:** a PNG at `<websiteId>/<uuid>.png` in `SCREENSHOT_DIR`, served by a new route, and shown on the crawl run page.
+- **My default:** `description` is optional, like `Website.description`.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **New model:** `Credential` (`credentials`) with `name`, `description?`, `username`, `encryptedPassword`, `loginUrl`, and `usernameSelector?` / `passwordSelector?` / `submitSelector?`. **`CrawlRun`:** added `credentialId?` (with relation and index), `isLoggedIn` (default false), and `loginFailureScreenshotFileName?`. **`Website`:** added `credentials`. Doc comments updated. Ran `prisma db push` and `prisma generate`. |
+| `server/utils/credentialEncryption.ts` (new) | `readCredentialEncryptionKey`, `credentialEncryptionIsConfigured`, `encryptCredentialPassword`, `decryptCredentialPassword`, `CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE`, `CREDENTIAL_ENCRYPTION_KEY_VARIABLE`. **Module-private:** `requireCredentialEncryptionKey`. |
+| `server/services/dbService.ts` | **New:** `listCredentialsForWebsite`, `findCredentialForWebsite`, `findCredentialWithPasswordForWebsite`, `createCredentialForWebsite`, `updateCredentialForWebsite`, `softDeleteCredentialForWebsite`, `markCrawlRunLoggedIn`. **New types:** `CredentialInput`, `CredentialSummary`, `CrawlRunWithCredential`, `CrawlRunCredentialSummary`; `Credential` is re-exported. **Changed:** `softDeleteWebsite` also deletes credentials (nine tables); `CrawlRunInput` gained `credentialId`; `CrawlRunFinish` gained `loginFailureScreenshotFileName`; `listCrawlRunsForWebsite`, `findCrawlRunForWebsite`, and `createCrawlRunForWebsite` include `credential { id, name }`. **Module-private:** `CRAWL_RUN_CREDENTIAL_INCLUDE`, `OMIT_ENCRYPTED_PASSWORD`. |
+| `server/utils/validateRequestBodies.ts` | **New:** `validateCredentialInput(body, { passwordIsRequired })`, `CredentialRequestInput`, `validateCrawlRunStartInput`, `CrawlRunStartInput`. **Module-private:** `readOptionalTrimmedText`, `CREDENTIAL_SELECTOR_FIELDS`. |
+| `server/controllers/credentials.ts` (new) | `registerCredentialRoutes`: `GET`/`POST /api/websites/:websiteId/credentials` and `GET`/`PUT`/`DELETE .../credentials/:credentialId`. Responses carry `hasPassword: true` and never the password. PUT keeps the saved password when none is sent. **Module-private:** `toCredentialResponse`, `CredentialResponse`. |
+| `server/controllers/crawlRuns.ts` | `registerCrawlRunRoutes(app, screenshotDirectory)`. **POST** reads an optional `{ credentialId }`: 400 for a bad id, 404 "Credential not found", 503 when the key is missing. **New route** `GET .../crawl-runs/:crawlRunId/login-failure-screenshot`. |
+| `server/services/crawlerLoginService.ts` (new) | `logInWithCredential`, `captureLoginFailureScreenshot`, `CrawlLoginDetails`, `LoginAttempt`. **Constants:** `LOGIN_STEP_TIMEOUT_MS`, `LOGIN_NAVIGATION_TIMEOUT_MS`, `DEFAULT_PASSWORD_FIELD_SELECTOR`, `DEFAULT_USERNAME_FIELD_SELECTOR`, `DEFAULT_SUBMIT_BUTTON_SELECTOR`, `STILL_ON_LOGIN_FORM_MESSAGE`. **Module-private:** `loginFailed`, `describeSelectorSource`, `waitUntilVisible`, `locateLoginFormScope`, `submitLoginForm`. |
+| `server/services/crawlerService.ts` | `crawlWebsite(..., login: CrawlLogin \| null = null)`. **New:** `isLogoutLink`, `CrawlLogin`; stop reason `loginFailed`; `CrawlOutcome` gained `loginErrorMessage` and `loginFailureScreenshotWasCaptured`. **Module-private:** `LOGOUT_PATH_PATTERN`, `LoginStep`, `logInWhenAsked`; `CrawlState` gained `isLoggedIn`. **Changed:** `claimUnseenLinks` skips logout links while logged in; `crawlWithPage` logs in first. |
+| `server/services/crawlRunService.ts` | `startCrawlRun(website, credential, screenshotDirectory)` decrypts the password before claiming the website. **Module-private:** `CredentialLogin`, `CrawlRunEnding`, `buildCredentialLogin`, `describeCrawlRunEnding`. **Changed:** `runCrawlInBackground` marks the run logged in, maps `loginFailed` to a `failed` status, and records the screenshot name; `recordCrawlFailure` writes `loginFailureScreenshotFileName: null`. |
+| `server/server.ts` | Registers `registerCredentialRoutes` and passes `SCREENSHOT_DIRECTORY` to `registerCrawlRunRoutes`. |
+| `.env.example` | Documents `CREDENTIAL_ENCRYPTION_KEY` and how to generate it. |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/hooks/useCredentials.ts` (new) | `useCredentials`, `useCredential`, `CredentialRecord`, `CredentialRequestBody`. |
+| `src/hooks/useCrawlRuns.ts` | `CrawlRunRecord` gained `credentialId`, `isLoggedIn`, `credential`, and `loginFailureScreenshotFileName`. New `CrawlRunCredentialRecord`. |
+| `src/utils/routePaths.ts` | **New:** `newCredentialPath`, `credentialEditPath`, `credentialsApiUrl`, `credentialApiUrl`, `crawlRunLoginFailureScreenshotApiUrl`. |
+| `src/utils/describeCrawlRun.ts` | **New:** `describeCrawlRunLogin`, `crawlRunLoginSeverity`, `CrawlRunLoginFields`. |
+| `src/components/CredentialForm.tsx` (new) | The credential form, including the optional "Login form selectors" group. On edit, a blank password keeps the saved one. |
+| `src/components/CredentialsSection.tsx` (new) | The "Credentials" section on a website's page. **Module-private:** `describeCredentialRow`. |
+| `src/components/CrawlRunsSection.tsx` | "Crawl as" picker (`TextField select` with `displayEmpty`); new props `credentials`, `selectedCredentialId`, `onSelectedCredentialChange`; exports `CRAWL_LOGGED_OUT_VALUE`. History rows now show the login line. |
+| `src/pages/CredentialCreatePage.tsx`, `src/pages/CredentialEditPage.tsx` (new) | Create and edit pages. Delete lives on the edit page. Routes added in `src/App.tsx`. |
+| `src/pages/WebsiteDetailPage.tsx` | Fetches credentials, renders `CredentialsSection`, and holds the "Crawl as" state. `startCrawl` POSTs `{ credentialId }`. The delete dialog counts credentials. |
+| `src/pages/CrawlRunPage.tsx` | A `role="note"` login line, plus a "Login failure screenshot" section when the run has one. |
+
+### Docs
+`README.md`, `USECASES.md`, `server/controllers/README.md`, `server/services/README.md`, `server/utils/README.md`, `server/prisma/README.md`, `src/pages/README.md`, `src/components/README.md`, and `src/hooks/README.md`.
+
+### Tests
+- **Backend, new:**
+  - `tests/backend/api/credentials.test.ts`: every route and status, and that no response contains a password.
+  - `tests/backend/utils/credentialEncryption.test.ts`: round trip, fresh IV, wrong or missing key, tampered values.
+  - `tests/backend/services/crawlerLoginService.test.ts`: a fake login form; a test pinning **load → readiness with the website's settings → typing → submit → load → readiness**; every failure message; the failure screenshot.
+- **Backend, updated:**
+  - `crawlRuns.test.ts`: the credential body, 400, 404, 503, and the screenshot route.
+  - `crawlRunService.test.ts`: decryption, login marking, failed login, screenshot name.
+  - `crawlerService.test.ts`: login before the first page, logout links skipped, `isLogoutLink`, failed-login screenshot. The outcome objects gained two fields.
+  - `dbService.test.ts`: credential queries, `omit`, the cascade to nine tables, `markCrawlRunLoggedIn`.
+  - `validateRequestBodies.test.ts` and `server.test.ts` wiring.
+- **Frontend, new:** `CredentialForm`, `CredentialCreatePage`, `CredentialEditPage`, `useCredentials`.
+- **Frontend, updated:**
+  - `CrawlRunsSection`: the picker and login labels.
+  - `WebsiteDetailPage`: the credentials section, the POST body, the dialog text.
+  - `CrawlRunPage`: the login note and screenshot.
+  - `describeCrawlRun`, `routePaths`, `App` routes, and `frontendTestHelpers` (`buildCredentialRecord`, new run fields).
+- No test was removed or skipped.
+
+### Verification performed
+- **Checks:**
+  - `npm run test:coverage`: **1245 tests in 93 files, all passing**. Statements 99.43%, branches 98.77%, functions 100%, lines 99.79%.
+  - `npm run lint`, `npm run tsc`, and `npm run tsc:client`: clean.
+- **Live run** against the user's running `npm run dev` and a throwaway login fixture site (`claude_tmp/loginFixtureSite.mts` on :3099):
+  - **Correct password:** run `finished` with `isLoggedIn: true` and the credential named. `/dashboard`, `/account`, and `/account/settings` were reached without redirecting to `/login`. The fixture's logout URLs were hit 0 times.
+  - **Wrong password:** run `failed` with `Login as "Wrong password" failed: Still on the login form...` and 0 pages. The served screenshot shows the fixture's "Wrong email or password".
+  - **No credential:** run logged out; protected pages ended at `/login`.
+  - **API errors:** 400 and 404 behave as specified.
+  - **Database:** the stored passwords are ciphertext only.
+- **Manual-verifier agent (Playwright MCP), two passes, both VERIFIED:**
+  - Credential create, edit (blank password keeps the saved one; a crawl still logs in), and delete (history keeps the name).
+  - The "Crawl as" picker, history labels, and run page login notes.
+  - The website delete dialog's credential count.
+  - The login failure screenshot section, which appears only on failed-login runs.
+  - No console errors.
+
+### Notable during implementation
+- The manual-verifier noticed the "Crawl as" select looked empty on first load: MUI renders a `""` value as blank. Fixed with `displayEmpty` and a shrunk label.
+- MUI's `Alert` defaults to `role="alert"`. The login line is a standing fact, so it uses `role="note"` and no longer competes with real alerts.
+- `prisma format` realigned the `CrawlRun` field block; nothing else in the schema changed.
+
+---
+
 ## 2026-10-03 11:59 EDT — Website crawler: page tree + aria snapshot per page
 
 **Intent:**

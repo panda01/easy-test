@@ -9,6 +9,11 @@ import {
   crawlRunApiUrl,
   crawlRunDetailPath,
   crawlRunsApiUrl,
+  crawlRunLoginFailureScreenshotApiUrl,
+  credentialApiUrl,
+  credentialEditPath,
+  credentialsApiUrl,
+  newCredentialPath,
   NEW_WEBSITE_PATH,
   WEBSITE_LIST_PATH,
   WEBSITES_API_URL,
@@ -194,6 +199,43 @@ describe("routePaths: crawl runs", () => {
     );
     expect(crawledPageApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID)).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/crawl-runs/${ENCODED_UNSAFE_ID}/pages/${ENCODED_UNSAFE_ID}`,
+    );
+  });
+});
+
+describe("routePaths: credentials", () => {
+  it("builds the new credential page path", () => {
+    expect(newCredentialPath("website-1")).toBe("/websites/website-1/credentials/new");
+  });
+
+  it("builds a credential's edit page path", () => {
+    expect(credentialEditPath("website-1", "credential-1")).toBe(
+      "/websites/website-1/credentials/credential-1/edit",
+    );
+  });
+
+  it("builds a website's credential collection url", () => {
+    expect(credentialsApiUrl("website-1")).toBe("/api/websites/website-1/credentials");
+  });
+
+  it("builds one credential's url", () => {
+    expect(credentialApiUrl("website-1", "credential-1")).toBe(
+      "/api/websites/website-1/credentials/credential-1",
+    );
+  });
+
+  it("builds a crawl run's login failure screenshot url", () => {
+    expect(crawlRunLoginFailureScreenshotApiUrl("website-1", "crawl-run-1")).toBe(
+      "/api/websites/website-1/crawl-runs/crawl-run-1/login-failure-screenshot",
+    );
+  });
+
+  it("encodes every id in credential paths and urls", () => {
+    expect(credentialEditPath(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/websites/${ENCODED_UNSAFE_ID}/credentials/${ENCODED_UNSAFE_ID}/edit`,
+    );
+    expect(credentialApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/credentials/${ENCODED_UNSAFE_ID}`,
     );
   });
 });

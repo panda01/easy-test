@@ -7,14 +7,15 @@ than inline in a component.
 |---|---|
 | `useHealth` | `{ health, isLoading, errorMessage }` from `GET /api/health` |
 | `useJsonResource` | `{ data, isLoading, errorMessage }` for any `GET` url; `data` is `unknown`. A `null` url stays idle (no request, not loading) |
-| `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website |
+| `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website; `WebsiteRecord.loginUrl` is null when the website doesn't require login |
 | `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them |
 | `useScreenshotRuns` | `{ runs, isLoading, errorMessage, addTakenRun }` for a website's screenshot runs; see below |
 | `useRecordListWithAdditions` | `{ records, isLoading, errorMessage, addRecord }`: the generic "fetched list plus rows a POST just created" behind the two hooks below |
 | `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript }` for an action's saved script versions |
 | `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun }` for one script's runs; a `null` script id fetches nothing |
 | `useScriptModels` | Typed `useJsonResource` wrapper for `GET /api/script-models`: the live model list, each model's effort levels and fallback, and the default choice |
-| `useCrawlRuns` | Typed `useJsonResource` wrapper for a website's crawl runs (newest first, no pages); exports `CrawlRunRecord` |
+| `useCrawlRuns` | Typed `useJsonResource` wrapper for a website's crawl runs (newest first, no pages); exports `CrawlRunRecord` (with `credentialId`, `isLoggedIn`, `credential: { id, name }`, and `buttonMode`) and `CrawlButtonModeRecord` |
+| `useCredentials` / `useCredential` | Typed wrappers for a website's credentials / one of them; export `CredentialRecord` (no password - only `hasPassword: true`) and `CredentialRequestBody` |
 | `usePolledJsonResource` | `useJsonResource` plus `pollErrorMessage`, GETting the url again every interval while a `keepPolling(data)` check says so; see below |
 | `useCrawlRunProgress` | One crawl run with its page summaries, polled every 2 s while it is `running` (`CRAWL_RUN_POLL_INTERVAL_MS`); exports `CrawlRunWithPagesRecord`, `CrawledPageSummaryRecord` |
 | `useCrawledPage` | One crawled page in full (aria snapshot and links); a `null` page id fetches nothing |

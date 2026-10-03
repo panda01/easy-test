@@ -16,6 +16,7 @@ import { registerPlaywrightRoutes } from "./controllers/playwright.js";
 import { registerActionScriptRoutes } from "./controllers/actionScripts.js";
 import { registerScriptModelRoutes } from "./controllers/scriptModels.js";
 import { registerCrawlRunRoutes } from "./controllers/crawlRuns.js";
+import { registerCredentialRoutes } from "./controllers/credentials.js";
 import { markUnfinishedCrawlRunsInterrupted } from "./services/crawlRunService.js";
 
 const app = express();
@@ -56,7 +57,8 @@ registerActionRoutes(app);
 registerPlaywrightRoutes(app, SCREENSHOT_DIRECTORY);
 registerActionScriptRoutes(app, ACTION_SCRIPT_DIRECTORY);
 registerScriptModelRoutes(app);
-registerCrawlRunRoutes(app);
+registerCrawlRunRoutes(app, SCREENSHOT_DIRECTORY);
+registerCredentialRoutes(app);
 
 /**
  * Binds the Express app to a TCP port and logs the resolved URL.

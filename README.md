@@ -39,6 +39,38 @@ shows the "Site map" tree beside the selected page's snapshot. One crawl per
 website runs at a time; a dev server restart ends a running crawl as
 "interrupted". See `server/services/README.md` and `src/pages/README.md`.
 
+A website can also have **Credentials** (name, description, username,
+password, login page URL, and optional login form CSS selectors). Picking one
+in the Crawls section's **Crawl as** dropdown makes the crawler **log in
+first** - it finds the login form's fields itself unless the credential names
+selectors - and record nothing until the login works; the run is then marked
+`isLoggedIn` with that credential, and logout links are never followed. A
+failed login ends the run "failed" with no pages, and the crawl's page shows
+a screenshot of what the browser saw. The login page is only typed into once
+it has loaded and waited out the website's own timing settings (network idle
+cap and minimum wait), like every crawled page. After submitting, the crawler
+gives the site time to answer: up to 15 s for the login form to go, the
+sign-in's own requests to finish (capped by the network idle cap), and the
+minimum wait - so a login is never judged while it still says "Signing in…".
+
+A website can also have a **login page URL** (blank = it doesn't require
+login). Its credentials inherit it unless they set their own, and a website
+without one learns it from the first crawl that logs in with a credential's
+own URL. The Credentials section and "Crawl as" only show when the website or
+one of its credentials has a login URL.
+
+A crawl can also **click buttons**, picked in the Crawls section's
+**Buttons** dropdown: "Links only (no buttons)" (the default), "Buttons,
+except risky ones", or "Only “Open” buttons". A click only counts when it
+lands on another page of the same site, which is then crawled like a link
+and shown as "via “Open Yoga”". Risky buttons - create, delete, update, log
+out, pay, confirm, and similar (the full list is in
+`server/services/README.md`) - and unlabelled or disabled ones are never
+clicked. Passwords are stored
+**encrypted** (AES-256-GCM) with `CREDENTIAL_ENCRYPTION_KEY` from `.env.local`
+and are never sent back to the browser; see `.env.example` for how to
+generate the key.
+
 An action's page has **Model** and **Effort** dropdowns and a **Convert to
 script** button. The dropdowns list every Claude model Anthropic's Models API
 offers (live, so new models appear on their own) and exactly the effort levels

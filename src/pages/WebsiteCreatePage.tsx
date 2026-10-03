@@ -13,8 +13,9 @@ import {
 } from "../utils/routePaths";
 
 /**
- * A new website's form: blank text fields, and the screenshot timing settings
- * at their defaults. The two numbers mirror the server's defaults
+ * A new website's form: blank text fields (a blank login page URL means the
+ * website doesn't require login), and the screenshot timing settings at their
+ * defaults. The two numbers mirror the server's defaults
  * (`DEFAULT_NETWORK_IDLE_TIMEOUT_MS` / `DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS` in
  * `server/utils/validateRequestBodies.ts`); the client never imports server code.
  */
@@ -24,6 +25,7 @@ const NEW_WEBSITE_VALUES: WebsiteRequestBody = {
   description: "",
   networkIdleTimeoutMs: 5000,
   screenshotMinimumWaitMs: 1,
+  loginUrl: "",
 };
 
 /**
@@ -43,7 +45,7 @@ export default function WebsiteCreatePage(): ReactElement {
    * POSTs the new website and, when the server accepts it, moves on to the
    * created website's page. On failure the form stays put and shows the
    * server's reason.
-   * @param values - The form's URL, name, description, and screenshot timing settings
+   * @param values - The form's URL, name, description, login page URL, and screenshot timing settings
    * @returns Resolves once the request (and any navigation) is done
    */
   const createWebsite = async (values: WebsiteRequestBody): Promise<void> => {
@@ -56,7 +58,7 @@ export default function WebsiteCreatePage(): ReactElement {
   /**
    * Hands the form values to `createWebsite` without returning its promise,
    * because the form's `onSubmit` prop expects a plain void callback.
-   * @param values - The form's URL, name, description, and screenshot timing settings
+   * @param values - The form's URL, name, description, login page URL, and screenshot timing settings
    */
   const handleSubmit = (values: WebsiteRequestBody): void => {
     void createWebsite(values);

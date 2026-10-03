@@ -18,7 +18,8 @@ import {
  * The edit-website page (`/websites/:websiteId/edit`).
  *
  * Loads the website first and only then mounts the form, keyed by the
- * website's id, so the fields always start from the saved values. Save and
+ * website's id, so the fields always start from the saved values (a website
+ * without a login page starts with that field blank). Save and
  * Cancel both return to the website's detail page history-aware (see
  * `useReturnNavigation`), so the form never lingers in Back/Forward history.
  * @returns The rendered edit-website page
@@ -34,7 +35,7 @@ export default function WebsiteEditPage(): ReactElement {
   /**
    * PUTs the edited website and, when the server accepts it, returns to its
    * detail page. On failure the form stays put and shows the server's reason.
-   * @param values - The form's URL, name, description, and screenshot timing settings
+   * @param values - The form's URL, name, description, login page URL, and screenshot timing settings
    * @returns Resolves once the request (and any navigation) is done
    */
   const saveWebsite = async (values: WebsiteRequestBody): Promise<void> => {
@@ -46,7 +47,7 @@ export default function WebsiteEditPage(): ReactElement {
   /**
    * Hands the form values to `saveWebsite` without returning its promise,
    * because the form's `onSubmit` prop expects a plain void callback.
-   * @param values - The form's URL, name, description, and screenshot timing settings
+   * @param values - The form's URL, name, description, login page URL, and screenshot timing settings
    */
   const handleSubmit = (values: WebsiteRequestBody): void => {
     void saveWebsite(values);
@@ -85,6 +86,7 @@ export default function WebsiteEditPage(): ReactElement {
             description: website.description ?? "",
             networkIdleTimeoutMs: website.networkIdleTimeoutMs,
             screenshotMinimumWaitMs: website.screenshotMinimumWaitMs,
+            loginUrl: website.loginUrl ?? "",
           }}
           submitLabel="Save changes"
           isSubmitting={isSubmitting}

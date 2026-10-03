@@ -31,8 +31,9 @@ generator client {
 ///
 /// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
 /// timestamp on the website's active use cases, actions, screenshot runs,
-/// action scripts, action script runs, crawl runs, and crawled pages) instead
-/// of removing the row. Every dbService query filters `deletedAt: null`.
+/// action scripts, action script runs, crawl runs, crawled pages, and
+/// credentials) instead of removing the row. Every dbService query filters
+/// `deletedAt: null`.
 ///
 /// Two per-website settings control WHEN the Playwright controller takes a
 /// screenshot, after the page's `load` event:
@@ -43,6 +44,12 @@ generator client {
 ///   screenshot. After idle + paint, only the remainder (if any) is waited.
 /// Both are whole milliseconds from 0 to 30000, and the cap may not be lower
 /// than the minimum (enforced by `validateWebsiteInput`).
+///
+/// `loginUrl` is the website's login page. Null means the website does not
+/// require login. Its credentials inherit it (a credential may override it
+/// with its own `loginUrl`). When it is null and a crawl logs in successfully
+/// with a credential's own login URL, the website LEARNS it: that URL is
+/// saved here (`adoptWebsiteLoginUrl`), never overwriting one already set.
 model Website {
   id                      String            @id @default(cuid())
   url                     String
@@ -50,6 +57,7 @@ model Website {
   description             String?
   networkIdleTimeoutMs    Int               @default(5000)
   screenshotMinimumWaitMs Int               @default(1)
+  loginUrl                String?
   createdAt               DateTime          @default(now())
   updatedAt               DateTime          @updatedAt
   deletedAt               DateTime?
@@ -60,6 +68,7 @@ model Website {
   actionScriptRuns        ActionScriptRun[]
   crawlRuns               CrawlRun[]
   crawledPages            CrawledPage[]
+  credentials             Credential[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -244,8 +253,9 @@ model ActionScriptRun {
 /// - `stoppedAtPageLimit`: `pageLimit` pages were visited with links still
 ///   waiting.
 /// - `stoppedAtTimeLimit`: the crawl's time limit ran out with links waiting.
-/// - `failed`: the crawl itself broke (e.g. the browser could not launch);
-///   `errorMessage` says why. A page that 404s is NOT a failed crawl.
+/// - `failed`: the crawl itself broke (e.g. the browser could not launch), or
+///   it could not log in with its credential; `errorMessage` says why. A page
+///   that 404s is NOT a failed crawl.
 /// - `interrupted`: the server restarted while it was running - either the
 ///   crawl saw its browser close (Playwright closes it on SIGTERM) and
 ///   stopped, or the next boot found the run still `running`.
@@ -254,24 +264,53 @@ model ActionScriptRun {
 /// the cap the crawl ran with. `visitedPageCount` and `waitingUrlCount` are the
 /// live progress counters (pages recorded so far, links queued but not yet
 /// visited). `durationMs` and `finishedAt` are null while the crawl runs.
+///
+/// LOGGING IN: `credentialId` is the credential chosen when the crawl was
+/// started, or null for a crawl as a logged-out visitor. With a credential,
+/// the crawler logs in FIRST and records no page until that succeeds:
+/// - while it logs in the run is `running` with 0 pages and
+///   `isLoggedIn: false`;
+/// - once the login succeeds `isLoggedIn` turns true, BEFORE the first page
+///   is recorded - so every page of a run with `isLoggedIn: true` was viewed
+///   logged in as that credential;
+/// - when the login fails the run ends `failed` (`errorMessage` says why),
+///   keeps its `credentialId`, and has no pages. What the browser showed at
+///   that moment is saved as a PNG: `loginFailureScreenshotFileName` is its
+///   path RELATIVE to the screenshot directory (`SCREENSHOT_DIR`), e.g.
+///   `<websiteId>/<uuid>.png`, or null when there is none (the login did not
+///   fail, or the screenshot could not be taken).
+/// A run without a credential always has `isLoggedIn: false`.
+///
+/// BUTTONS: `buttonMode` is which buttons the crawl clicks on each page, on top
+/// of following its links - `linksOnly` (none), `allButRisky` (every labelled
+/// button except risky ones: create, delete, update, logout, pay, confirm,
+/// ...), or `openOnly` (only "open" buttons). A click only counts when it
+/// lands on a different page of the same site; that page is then crawled like
+/// a link (see `CrawledPage.foundByButtonText` and `buttonUrls`).
 model CrawlRun {
-  id               String        @id @default(cuid())
-  websiteId        String
-  startUrl         String
-  status           String
-  pageLimit        Int
-  visitedPageCount Int           @default(0)
-  waitingUrlCount  Int           @default(0)
-  errorMessage     String?
-  durationMs       Int?
-  finishedAt       DateTime?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
-  deletedAt        DateTime?
-  website          Website       @relation(fields: [websiteId], references: [id])
-  pages            CrawledPage[]
+  id                             String        @id @default(cuid())
+  websiteId                      String
+  credentialId                   String?
+  isLoggedIn                     Boolean       @default(false)
+  buttonMode                     String        @default("linksOnly")
+  startUrl                       String
+  status                         String
+  pageLimit                      Int
+  visitedPageCount               Int           @default(0)
+  waitingUrlCount                Int           @default(0)
+  errorMessage                   String?
+  loginFailureScreenshotFileName String?
+  durationMs                     Int?
+  finishedAt                     DateTime?
+  createdAt                      DateTime      @default(now())
+  updatedAt                      DateTime      @updatedAt
+  deletedAt                      DateTime?
+  website                        Website       @relation(fields: [websiteId], references: [id])
+  credential                     Credential?   @relation(fields: [credentialId], references: [id])
+  pages                          CrawledPage[]
 
   @@index([websiteId])
+  @@index([credentialId])
   @@map("crawl_runs")
 }
 
@@ -286,11 +325,25 @@ model CrawlRun {
 ///
 /// Three URLs are kept:
 /// - `url`: the page's identity within the run - origin + path, with the
-///   query string and hash dropped. Unique per run.
+///   query string and hash dropped. Unique per run. It is WHERE THE BROWSER
+///   LANDED: a link to `/` that redirects to `/calendar` is recorded as
+///   `/calendar`. The one exception: when the page it landed on is already
+///   recorded in this run, the page is recorded under the URL it was
+///   requested at instead (no duplicate rows), and `finalUrl` names the page
+///   it landed on.
 /// - `requestedUrl`: what the browser actually loaded - the first link that
 ///   reached the page, hash dropped (the query string is kept).
-/// - `finalUrl`: where the browser ended up after redirects and client-side
-///   navigation.
+/// - `finalUrl`: where the browser ended up after redirects (HTTP 3xx) and
+///   client-side navigation.
+///
+/// `wasRedirected` is true when the browser landed on a different page
+/// (origin + path) than the one it requested - a server redirect or a
+/// client-side one alike.
+///
+/// Buttons (when the run's `buttonMode` clicks them): `buttonUrls` holds the
+/// same-site pages (identities) this page's buttons led to, in click order,
+/// alongside `linkedUrls`. `foundByButtonText` is the text of the button whose
+/// click first led to THIS page, or null when a link (or the start URL) did.
 ///
 /// `visitOrder` counts from 0 in the order pages were visited (breadth first),
 /// and `depth` is the number of links followed from the start page.
@@ -298,32 +351,77 @@ model CrawlRun {
 /// HTTP 400, AND its aria snapshot was taken. `ariaSnapshot` is Playwright's
 /// YAML aria snapshot of `<body>`, or null when it could not be taken.
 model CrawledPage {
-  id           String        @id @default(cuid())
-  crawlRunId   String
-  websiteId    String
-  parentPageId String?
-  url          String
-  requestedUrl String
-  finalUrl     String
-  visitOrder   Int
-  depth        Int
-  succeeded    Boolean
-  httpStatus   Int?
-  errorMessage String?
-  title        String?
-  ariaSnapshot String?
-  linkedUrls   String[]
-  durationMs   Int
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  deletedAt    DateTime?
-  crawlRun     CrawlRun      @relation(fields: [crawlRunId], references: [id])
-  website      Website       @relation(fields: [websiteId], references: [id])
-  parentPage   CrawledPage?  @relation("CrawledPageTree", fields: [parentPageId], references: [id])
-  childPages   CrawledPage[] @relation("CrawledPageTree")
+  id                String        @id @default(cuid())
+  crawlRunId        String
+  websiteId         String
+  parentPageId      String?
+  url               String
+  requestedUrl      String
+  finalUrl          String
+  wasRedirected     Boolean       @default(false)
+  visitOrder        Int
+  depth             Int
+  succeeded         Boolean
+  httpStatus        Int?
+  errorMessage      String?
+  title             String?
+  ariaSnapshot      String?
+  linkedUrls        String[]
+  buttonUrls        String[]      @default([])
+  foundByButtonText String?
+  durationMs        Int
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  deletedAt         DateTime?
+  crawlRun          CrawlRun      @relation(fields: [crawlRunId], references: [id])
+  website           Website       @relation(fields: [websiteId], references: [id])
+  parentPage        CrawledPage?  @relation("CrawledPageTree", fields: [parentPageId], references: [id])
+  childPages        CrawledPage[] @relation("CrawledPageTree")
 
   @@unique([crawlRunId, url])
   @@index([websiteId])
   @@index([parentPageId])
   @@map("crawled_pages")
+}
+
+/// A login for a website - what the crawler types into the website's login
+/// form when a crawl is started "as" this credential. Belongs to exactly one
+/// website; a website can have any number. Soft deleted on its own or
+/// together with its website. A soft-deleted credential stays linked to the
+/// crawl runs that used it, so their history still names it.
+///
+/// `name` and `description` are the user's own label for it (the description
+/// is optional). `username` is stored as typed.
+///
+/// The password is NEVER stored in plain text and is NEVER sent back by the
+/// API. `encryptedPassword` holds it AES-256-GCM encrypted with the server's
+/// `CREDENTIAL_ENCRYPTION_KEY`, as `iv.authTag.ciphertext` (each part base64)
+/// - see `server/utils/credentialEncryption.ts`. It is encrypted rather than
+/// hashed because the crawler has to type the real password; changing or
+/// losing the key makes every saved password unreadable.
+///
+/// Logging in: the crawler opens the login page - the credential's own
+/// `loginUrl` when it has one, otherwise its website's `loginUrl` (null here
+/// means "inherit") - finds the username field, the password field, and the
+/// submit button on its own, fills them in, and submits. The three optional selectors are CSS selectors that replace that
+/// guess, one field at a time, for forms the guess gets wrong.
+model Credential {
+  id                String     @id @default(cuid())
+  websiteId         String
+  name              String
+  description       String?
+  username          String
+  encryptedPassword String
+  loginUrl          String?
+  usernameSelector  String?
+  passwordSelector  String?
+  submitSelector    String?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  deletedAt         DateTime?
+  website           Website    @relation(fields: [websiteId], references: [id])
+  crawlRuns         CrawlRun[]
+
+  @@index([websiteId])
+  @@map("credentials")
 }

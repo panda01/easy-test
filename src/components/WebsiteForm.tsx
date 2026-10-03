@@ -9,7 +9,10 @@ import { type WebsiteRequestBody } from "../hooks/useWebsites";
 
 /** Props for `WebsiteForm`. */
 export interface WebsiteFormProps {
-  /** The values the fields start with: blank text and default timing settings for create, the saved website for edit. */
+  /**
+   * The values the fields start with: blank text (login page URL included)
+   * and default timing settings for create, the saved website for edit.
+   */
   initialValues: WebsiteRequestBody;
   /** The submit button's text, e.g. "Create website". */
   submitLabel: string;
@@ -25,19 +28,21 @@ export interface WebsiteFormProps {
 
 /**
  * The URL / name / description form shared by the create and edit website
- * pages, plus the website's two screenshot timing settings (network idle cap
- * and minimum wait, in milliseconds). It owns only the field values; saving
- * and navigation belong to the page.
+ * pages, plus the optional login page URL (blank = the website doesn't
+ * require login; its credentials inherit it otherwise) and the website's two
+ * screenshot timing settings (network idle cap and minimum wait, in
+ * milliseconds). It owns only the field values; saving and navigation belong
+ * to the page.
  *
  * Field state is seeded from `initialValues` once, on mount. The edit page
  * therefore mounts this form only after the website has loaded, keyed by its
  * id, so a different website always gets a fresh form.
  *
- * Submit is disabled until URL, name, and both timing settings are non-blank.
- * The timing settings are held as text while editing and sent as numbers. The
- * server still validates everything (URL format, the 0-30000 range, whole
- * numbers, and the cap not being lower than the minimum) and its message is
- * shown via `errorMessage`.
+ * Submit is disabled until URL, name, and both timing settings are non-blank;
+ * the login page URL may stay blank. The timing settings are held as text
+ * while editing and sent as numbers. The server still validates everything
+ * (URL formats, the 0-30000 range, whole numbers, and the cap not being lower
+ * than the minimum) and its message is shown via `errorMessage`.
  * @param props - Initial values, labels, request state, and callbacks
  * @returns The website form
  */
@@ -46,6 +51,7 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
   const [url, setUrl] = useState(initialValues.url);
   const [name, setName] = useState(initialValues.name);
   const [description, setDescription] = useState(initialValues.description);
+  const [loginUrl, setLoginUrl] = useState(initialValues.loginUrl);
   const [networkIdleTimeoutMs, setNetworkIdleTimeoutMs] = useState(
     String(initialValues.networkIdleTimeoutMs),
   );
@@ -89,6 +95,16 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
   };
 
   /**
+   * Keeps the login page URL field's state in sync with what the user types.
+   * @param event - The input's change event
+   */
+  const handleLoginUrlChange = (
+    event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+  ): void => {
+    setLoginUrl(event.target.value);
+  };
+
+  /**
    * Keeps the network idle cap field's state in sync with what the user types.
    * @param event - The input's change event
    */
@@ -122,6 +138,7 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
       description,
       networkIdleTimeoutMs: Number(networkIdleTimeoutMs),
       screenshotMinimumWaitMs: Number(screenshotMinimumWaitMs),
+      loginUrl,
     });
   };
 
@@ -143,6 +160,14 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
           onChange={handleDescriptionChange}
           multiline
           minRows={3}
+          fullWidth
+        />
+        <TextField
+          label="Login page URL"
+          value={loginUrl}
+          onChange={handleLoginUrlChange}
+          placeholder="https://example.com/login"
+          helperText="Leave blank if the website doesn't require login"
           fullWidth
         />
         <Typography variant="subtitle1" component="h2">

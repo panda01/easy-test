@@ -15,6 +15,8 @@ export interface WebsiteRecord {
   networkIdleTimeoutMs: number;
   /** A screenshot is never taken sooner than this after the page loads, in ms. */
   screenshotMinimumWaitMs: number;
+  /** The website's login page, or null when it does not require login. Credentials inherit it. */
+  loginUrl: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -29,6 +31,8 @@ export interface WebsiteRequestBody {
   networkIdleTimeoutMs: number;
   /** Whole milliseconds, 0-30000. */
   screenshotMinimumWaitMs: number;
+  /** The website's login page; blank when it does not require login (the server stores null). */
+  loginUrl: string;
 }
 
 /**

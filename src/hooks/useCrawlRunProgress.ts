@@ -16,12 +16,20 @@ export interface CrawledPageSummaryRecord {
   websiteId: string;
   /** The page whose link led here; null for the start page. Makes the page tree. */
   parentPageId: string | null;
-  /** The page's identity: origin + path, without query string or hash. */
+  /**
+   * The page's identity: origin + path, without query string or hash - where
+   * the browser landed, or the requested page when the landing page was
+   * already recorded in this crawl.
+   */
   url: string;
   /** What the browser loaded (the first link that reached the page). */
   requestedUrl: string;
   /** Where the browser ended up after redirects. */
   finalUrl: string;
+  /** True when the browser landed on a different page (origin + path) than it requested. */
+  wasRedirected: boolean;
+  /** The text of the button whose click first led to this page, or null when a link (or the start URL) did. */
+  foundByButtonText: string | null;
   /** Position in visiting order, counting from 0. */
   visitOrder: number;
   /** Links followed from the start page to reach it. */

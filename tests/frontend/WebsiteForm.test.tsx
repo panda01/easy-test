@@ -11,7 +11,16 @@ const BLANK_VALUES: WebsiteRequestBody = {
   description: "",
   networkIdleTimeoutMs: 5000,
   screenshotMinimumWaitMs: 1,
+  loginUrl: "",
 };
+
+/**
+ * Finds the optional login page URL field.
+ * @returns The "Login page URL" input
+ */
+function getLoginUrlField(): HTMLElement {
+  return screen.getByRole("textbox", { name: "Login page URL" });
+}
 
 /**
  * Finds the network idle cap field (a number input, so its role is spinbutton).
@@ -75,13 +84,41 @@ describe("WebsiteForm", () => {
         description: "Notes",
         networkIdleTimeoutMs: 4000,
         screenshotMinimumWaitMs: 1000,
+        loginUrl: "https://example.com/login",
       },
     });
     expect(screen.getByRole("textbox", { name: "URL" })).toHaveValue("https://example.com");
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Example");
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("Notes");
+    expect(getLoginUrlField()).toHaveValue("https://example.com/login");
     expect(getNetworkIdleCapField()).toHaveValue(4000);
     expect(getMinimumWaitField()).toHaveValue(1000);
+  });
+
+  it("offers an optional login page URL field, explaining that blank means no login", () => {
+    renderWebsiteForm();
+
+    const loginUrlField = getLoginUrlField();
+    expect(loginUrlField).toHaveValue("");
+    expect(loginUrlField).not.toBeRequired();
+    expect(loginUrlField).toHaveAttribute("placeholder", "https://example.com/login");
+    expect(loginUrlField).toHaveAccessibleDescription(
+      "Leave blank if the website doesn't require login",
+    );
+  });
+
+  it("submits the typed login page URL", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderWebsiteForm();
+
+    await user.type(screen.getByRole("textbox", { name: "URL" }), "https://example.com");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "Example");
+    await user.type(getLoginUrlField(), "https://example.com/sign-in");
+    await user.click(getSubmitButton());
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ loginUrl: "https://example.com/sign-in" }),
+    );
   });
 
   it("shows the screenshot settings under their own heading, with explanations", () => {
@@ -154,6 +191,7 @@ describe("WebsiteForm", () => {
       description: "Line one",
       networkIdleTimeoutMs: 5000,
       screenshotMinimumWaitMs: 1,
+      loginUrl: "",
     });
   });
 

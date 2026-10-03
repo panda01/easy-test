@@ -7,12 +7,17 @@ import Link from "@mui/material/Link";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import ConfirmDeleteDialog from "../components/ConfirmDeleteDialog";
-import CrawlRunsSection from "../components/CrawlRunsSection";
+import CrawlRunsSection, {
+  CRAWL_LOGGED_OUT_VALUE,
+  DEFAULT_CRAWL_BUTTON_MODE,
+} from "../components/CrawlRunsSection";
+import CredentialsSection from "../components/CredentialsSection";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import ScreenshotRunsSection from "../components/ScreenshotRunsSection";
 import WebsiteItemListSection from "../components/WebsiteItemListSection";
-import { type CrawlRunRecord, useCrawlRuns } from "../hooks/useCrawlRuns";
+import { type CrawlButtonModeRecord, type CrawlRunRecord, useCrawlRuns } from "../hooks/useCrawlRuns";
+import { useCredentials } from "../hooks/useCredentials";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnNavigation, useReturnToHereState } from "../hooks/useReturnNavigation";
@@ -31,9 +36,10 @@ import {
 import { ACTION_KIND, USE_CASE_KIND } from "../utils/websiteItemKinds";
 
 /**
- * A website's own page (`/websites/:websiteId`): its URL, description, and
- * timestamps, Take screenshot / Edit / Delete buttons, the website's
- * screenshot timing settings and screenshot runs, its crawls, and a section
+ * A website's own page (`/websites/:websiteId`): its URL, its login page (or
+ * that it doesn't require login), description, and timestamps, Take
+ * screenshot / Edit / Delete buttons, the website's screenshot timing
+ * settings and screenshot runs, its crawls, its credentials, and a section
  * each for its use cases and actions.
  *
  * "Take screenshot" POSTs to the Playwright controller, which visits the
@@ -42,14 +48,22 @@ import { ACTION_KIND, USE_CASE_KIND } from "../utils/websiteItemKinds";
  * button is disabled and a progress bar shows meanwhile. The recorded run is
  * added to the top of the run list and selected.
  *
- * "Crawl website" POSTs a new crawl run, which the server crawls in the
- * background; the request answers at once, and the page then navigates to
- * the new run's own page to watch it grow.
+ * "Crawl website" POSTs a new crawl run - logged out, or logged in as the
+ * credential picked in "Crawl as", clicking the buttons picked in "Buttons" -
+ * which the server crawls in the background; the request answers at once,
+ * and the page then navigates to the new run's own page to watch it grow.
  *
- * The page fetches the website, both item lists, the screenshot runs, AND
- * the crawl runs itself (rather than letting each section fetch), so the
- * delete dialog can say exactly how many use cases, actions, screenshot runs,
- * and crawl runs will be deleted along with the website.
+ * The login features - the Credentials section and the "Crawl as" picker -
+ * show only when the website or one of its credentials has a login page URL.
+ * Otherwise nothing can log in, so both are hidden and every crawl is logged
+ * out.
+ *
+ * The page fetches the website, both item lists, the screenshot runs, the
+ * crawl runs, AND the credentials itself (rather than letting each section
+ * fetch), so the delete dialog can say exactly how many of each will be
+ * deleted along with the website, the login features can be shown or hidden
+ * by the credentials' login page URLs, and the crawl section can offer the
+ * same credentials the Credentials section lists.
  *
  * After a delete it returns to the website list history-aware (see
  * `useReturnNavigation`); a later Forward onto this deleted website shows the
@@ -65,6 +79,8 @@ export default function WebsiteDetailPage(): ReactElement {
   const { addTakenRun } = screenshotRuns;
   const crawlRunsResource = useCrawlRuns(websiteId);
   const crawlRuns = crawlRunsResource.data ?? [];
+  const credentialsResource = useCredentials(websiteId);
+  const credentials = credentialsResource.data ?? [];
   const website = websiteResource.data;
   const navigate = useNavigate();
 
@@ -83,6 +99,16 @@ export default function WebsiteDetailPage(): ReactElement {
     isSubmitting: crawlStartIsInFlight,
     errorMessage: crawlStartErrorMessage,
   } = useJsonMutation();
+  const [selectedCredentialId, setSelectedCredentialId] = useState(CRAWL_LOGGED_OUT_VALUE);
+  const [selectedButtonMode, setSelectedButtonMode] =
+    useState<CrawlButtonModeRecord>(DEFAULT_CRAWL_BUTTON_MODE);
+
+  const websiteLoginUrl = website?.loginUrl ?? null;
+  const websiteRequiresLogin = websiteLoginUrl !== null;
+  const aCredentialHasItsOwnLoginUrl = credentials.some(
+    (credential) => credential.loginUrl !== null,
+  );
+  const loginFeaturesAreShown = websiteRequiresLogin || aCredentialHasItsOwnLoginUrl;
 
   const useCaseCount = useCasesResource.data?.length ?? 0;
   const actionCount = actionsResource.data?.length ?? 0;
@@ -102,6 +128,7 @@ export default function WebsiteDetailPage(): ReactElement {
     "screenshot runs",
   );
   const crawlRunCountText = formatCount(crawlRuns.length, "crawl run", "crawl runs");
+  const credentialCountText = formatCount(credentials.length, "credential", "credentials");
 
   /**
    * POSTs a new screenshot run for this website and, when the server recorded
@@ -128,13 +155,22 @@ export default function WebsiteDetailPage(): ReactElement {
   };
 
   /**
-   * POSTs a new crawl run for this website and, when the server started it,
-   * opens the run's own page to watch it. A refused start (e.g. a crawl is
-   * already running) shows the error alert in the Crawls section.
+   * POSTs a new crawl run for this website - with the credential picked in
+   * "Crawl as", or `credentialId: null` to crawl logged out (always, while the
+   * login features are hidden), and the button mode picked in "Buttons" -
+   * and, when the server started it, opens the run's own page to watch it. A
+   * refused start (e.g. a crawl is already running) shows the error alert in
+   * the Crawls section.
    * @returns Resolves once the request (and any navigation) is done
    */
   const startCrawl = async (): Promise<void> => {
-    const result = await sendCrawlRequest("POST", crawlRunsApiUrl(websiteId));
+    const loggedOutIsPicked = selectedCredentialId === CRAWL_LOGGED_OUT_VALUE;
+    const crawlIsLoggedOut = loggedOutIsPicked || !loginFeaturesAreShown;
+    const credentialId = crawlIsLoggedOut ? null : selectedCredentialId;
+    const result = await sendCrawlRequest("POST", crawlRunsApiUrl(websiteId), {
+      credentialId,
+      buttonMode: selectedButtonMode,
+    });
     if (!result.succeeded) return;
     // The API is the contract for this shape, as in the typed resource hooks.
     const startedRun = result.data as CrawlRunRecord;
@@ -161,7 +197,7 @@ export default function WebsiteDetailPage(): ReactElement {
 
   /**
    * DELETEs the website (the server soft deletes its use cases, actions,
-   * screenshot runs, scripts, and crawls with it) and, when that succeeds, returns to the website list. On failure
+   * screenshot runs, scripts, crawls, and credentials with it) and, when that succeeds, returns to the website list. On failure
    * the dialog stays open and shows the server's reason.
    * @returns Resolves once the request (and any navigation) is done
    */
@@ -206,6 +242,18 @@ export default function WebsiteDetailPage(): ReactElement {
               <Link href={website.url} target="_blank" rel="noopener noreferrer">
                 {website.url}
               </Link>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                {websiteRequiresLogin ? (
+                  <>
+                    Login page:{" "}
+                    <Link href={websiteLoginUrl} target="_blank" rel="noopener noreferrer">
+                      {websiteLoginUrl}
+                    </Link>
+                  </>
+                ) : (
+                  "Doesn't require login"
+                )}
+              </Typography>
             </Box>
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
               <Button
@@ -258,7 +306,21 @@ export default function WebsiteDetailPage(): ReactElement {
             isStartingCrawl={crawlStartIsInFlight}
             startCrawlErrorMessage={crawlStartErrorMessage}
             onCrawlClick={handleCrawlClick}
+            crawlAsPickerIsShown={loginFeaturesAreShown}
+            credentials={credentials}
+            selectedCredentialId={selectedCredentialId}
+            onSelectedCredentialChange={setSelectedCredentialId}
+            selectedButtonMode={selectedButtonMode}
+            onSelectedButtonModeChange={setSelectedButtonMode}
           />
+
+          {loginFeaturesAreShown && (
+            <CredentialsSection
+              websiteId={website.id}
+              credentialsResource={credentialsResource}
+              returnToHereState={returnToHereState}
+            />
+          )}
 
           <WebsiteItemListSection
             itemKind={USE_CASE_KIND}
@@ -276,7 +338,7 @@ export default function WebsiteDetailPage(): ReactElement {
           <ConfirmDeleteDialog
             isOpen={deleteDialogIsOpen}
             title="Delete website?"
-            message={`"${website.name}" will be deleted, along with its ${useCaseCountText}, ${actionCountText}, ${screenshotRunCountText}, and ${crawlRunCountText}.`}
+            message={`"${website.name}" will be deleted, along with its ${useCaseCountText}, ${actionCountText}, ${screenshotRunCountText}, ${crawlRunCountText}, and ${credentialCountText}.`}
             isDeleting={isSubmitting}
             errorMessage={deleteErrorMessage}
             onCancel={handleDeleteCancel}

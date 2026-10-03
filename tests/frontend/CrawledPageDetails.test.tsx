@@ -99,6 +99,78 @@ describe("CrawledPageDetails", () => {
     expect(onSelectPage).toHaveBeenCalledWith("home");
   });
 
+  it("says which button on the page it was found on led here", async () => {
+    const user = userEvent.setup();
+    const onSelectPage = vi.fn();
+    const yogaPage = buildCrawledPageSummaryRecord({
+      id: "yoga",
+      parentPageId: "about",
+      url: "https://example.com/sessions/yoga",
+      foundByButtonText: "Open Yoga",
+      depth: 2,
+    });
+    renderDetails({
+      page: yogaPage,
+      pageResource: loadedPage({ ...yogaPage, linkedUrls: [] }),
+      onSelectPage,
+    });
+
+    const foundOnRow = screen.getByText("Found on:").parentElement;
+    if (foundOnRow === null) throw new Error("The Found on row is missing");
+    expect(foundOnRow).toHaveTextContent("Found on: /about, by clicking “Open Yoga”");
+    await user.click(within(foundOnRow).getByRole("button", { name: "/about" }));
+
+    expect(onSelectPage).toHaveBeenCalledWith("about");
+  });
+
+  it("says which button led here even when the page it was found on is no longer listed", () => {
+    const yogaPage = buildCrawledPageSummaryRecord({
+      id: "yoga",
+      parentPageId: "gone",
+      url: "https://example.com/sessions/yoga",
+      foundByButtonText: "Open Yoga",
+    });
+
+    renderDetails({ page: yogaPage, pageResource: loadedPage({ ...yogaPage, linkedUrls: [] }) });
+
+    expect(screen.getByRole("region", { name: "/sessions/yoga" })).toHaveTextContent(
+      "Found on: a page no longer listed, by clicking “Open Yoga”",
+    );
+  });
+
+  it("lists the pages its buttons led to: visited ones select their page, the others are marked not visited", async () => {
+    const user = userEvent.setup();
+    const onSelectPage = vi.fn();
+    renderDetails({
+      pageResource: loadedPage({
+        ...aboutPage,
+        linkedUrls: [],
+        buttonUrls: ["https://example.com/", "https://example.com/sessions/pilates"],
+      }),
+      onSelectPage,
+    });
+
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Pages its buttons led to" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 same-site pages")).toBeInTheDocument();
+    const buttonTargets = screen.getByRole("list", { name: "Pages its buttons led to" });
+    expect(within(buttonTargets).getByText("/sessions/pilates (not visited)")).toBeInTheDocument();
+    await user.click(within(buttonTargets).getByRole("button", { name: "/" }));
+
+    expect(onSelectPage).toHaveBeenCalledWith("home");
+  });
+
+  it("leaves out the button list and the found-by text for a page reached by links only", () => {
+    renderDetails();
+
+    expect(
+      screen.queryByRole("heading", { name: "Pages its buttons led to" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Pages its buttons led to" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "/about" })).not.toHaveTextContent("by clicking");
+  });
+
   it("says where the crawl started for the start page, and leaves out an unchanged final URL", () => {
     renderDetails({
       page: homePage,

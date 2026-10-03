@@ -99,6 +99,26 @@ export function crawlRunDetailPath(websiteId: string, crawlRunId: string): strin
   return `${websiteDetailPath(websiteId)}/crawl-runs/${encodeURIComponent(crawlRunId)}`;
 }
 
+/**
+ * Builds the path of the create form page for a website's credential.
+ * @param websiteId - The owning website's cuid
+ * @returns `/websites/<websiteId>/credentials/new`
+ */
+export function newCredentialPath(websiteId: string): string {
+  return `${websiteDetailPath(websiteId)}/credentials/new`;
+}
+
+/**
+ * Builds the path of a credential's edit form page (which also holds its
+ * Delete button - a credential has no separate detail page).
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The credential's cuid
+ * @returns `/websites/<websiteId>/credentials/<credentialId>/edit`
+ */
+export function credentialEditPath(websiteId: string, credentialId: string): string {
+  return `${websiteDetailPath(websiteId)}/credentials/${encodeURIComponent(credentialId)}/edit`;
+}
+
 // === API urls (relative: the Vite dev server proxies /api to Express) ===
 
 /** The website collection endpoint. */
@@ -228,6 +248,17 @@ export function crawlRunApiUrl(websiteId: string, crawlRunId: string): string {
 }
 
 /**
+ * Builds the API url of the screenshot a crawl took when its login failed,
+ * for an `<img src>`.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns `/api/websites/<websiteId>/crawl-runs/<crawlRunId>/login-failure-screenshot`
+ */
+export function crawlRunLoginFailureScreenshotApiUrl(websiteId: string, crawlRunId: string): string {
+  return `${crawlRunApiUrl(websiteId, crawlRunId)}/login-failure-screenshot`;
+}
+
+/**
  * Builds the API url of one crawled page in full, aria snapshot included.
  * @param websiteId - The owning website's cuid
  * @param crawlRunId - The crawl run's cuid
@@ -240,4 +271,25 @@ export function crawledPageApiUrl(
   crawledPageId: string,
 ): string {
   return `${crawlRunApiUrl(websiteId, crawlRunId)}/pages/${encodeURIComponent(crawledPageId)}`;
+}
+
+/**
+ * Builds the API url of a website's credential collection: GET lists them
+ * (never with passwords), POST creates one.
+ * @param websiteId - The owning website's cuid
+ * @returns `/api/websites/<websiteId>/credentials`
+ */
+export function credentialsApiUrl(websiteId: string): string {
+  return `${websiteApiUrl(websiteId)}/credentials`;
+}
+
+/**
+ * Builds the API url of one credential: GET reads it, PUT replaces it, DELETE
+ * removes it.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The credential's cuid
+ * @returns `/api/websites/<websiteId>/credentials/<credentialId>`
+ */
+export function credentialApiUrl(websiteId: string, credentialId: string): string {
+  return `${credentialsApiUrl(websiteId)}/${encodeURIComponent(credentialId)}`;
 }

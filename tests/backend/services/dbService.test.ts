@@ -15,6 +15,7 @@ const {
   mockActionScriptRunDelegate,
   mockCrawlRunDelegate,
   mockCrawledPageDelegate,
+  mockCredentialDelegate,
   mockTransaction,
 } = vi.hoisted(
   () => {
@@ -24,7 +25,8 @@ const {
      * Builds a stand-in for one Prisma model delegate (`prisma.website`,
      * `prisma.useCase`, `prisma.action`, `prisma.screenshotRun`,
      * `prisma.actionScript`, `prisma.actionScriptRun`, `prisma.crawlRun`,
-     * `prisma.crawledPage`) carrying every method dbService calls.
+     * `prisma.crawledPage`, `prisma.credential`) carrying every method
+     * dbService calls.
      * @returns An object whose query methods are bare vitest mocks
      */
     function createMockModelDelegate() {
@@ -45,6 +47,7 @@ const {
     const actionScriptRunDelegate = createMockModelDelegate();
     const crawlRunDelegate = createMockModelDelegate();
     const crawledPageDelegate = createMockModelDelegate();
+    const credentialDelegate = createMockModelDelegate();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
@@ -56,6 +59,7 @@ const {
       actionScriptRun: actionScriptRunDelegate,
       crawlRun: crawlRunDelegate,
       crawledPage: crawledPageDelegate,
+      credential: credentialDelegate,
     };
 
     return {
@@ -67,6 +71,7 @@ const {
       mockActionScriptRunDelegate: actionScriptRunDelegate,
       mockCrawlRunDelegate: crawlRunDelegate,
       mockCrawledPageDelegate: crawledPageDelegate,
+      mockCredentialDelegate: credentialDelegate,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
@@ -96,6 +101,7 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     actionScriptRun = mockActionScriptRunDelegate;
     crawlRun = mockCrawlRunDelegate;
     crawledPage = mockCrawledPageDelegate;
+    credential = mockCredentialDelegate;
     $transaction = mockTransaction;
   },
 }));
@@ -136,6 +142,14 @@ import {
   markRunningCrawlRunsInterrupted,
   listCrawledPageSummariesForRun,
   findCrawledPageForRun,
+  markCrawlRunLoggedIn,
+  listCredentialsForWebsite,
+  findCredentialForWebsite,
+  findCredentialWithPasswordForWebsite,
+  createCredentialForWebsite,
+  updateCredentialForWebsite,
+  softDeleteCredentialForWebsite,
+  adoptWebsiteLoginUrl,
 } from "../../../server/services/dbService.js";
 
 const sampleWebsite = {
@@ -222,6 +236,9 @@ const sampleActionScriptRun = {
 const sampleCrawlRun = {
   id: "crawl-run-1",
   websiteId: "cuid-1",
+  credentialId: "credential-1",
+  isLoggedIn: false,
+  credential: { id: "credential-1", name: "Admin" },
   startUrl: "https://example.com",
   status: "running",
   pageLimit: 50,
@@ -241,6 +258,9 @@ const sampleCrawledPageInput = {
   url: "https://example.com/about",
   requestedUrl: "https://example.com/about?ref=nav",
   finalUrl: "https://example.com/about",
+  wasRedirected: false,
+  foundByButtonText: null,
+  buttonUrls: [],
   visitOrder: 1,
   depth: 1,
   succeeded: true,
@@ -261,6 +281,36 @@ const sampleCrawledPage = {
   updatedAt: new Date("2026-01-07T00:00:01.000Z"),
   deletedAt: null,
 };
+
+/** What every crawl run read includes: the credential's id and name, deleted or not. */
+const CRAWL_RUN_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true } } };
+
+/** What every credential read that can reach the API leaves out. */
+const OMIT_ENCRYPTED_PASSWORD = { encryptedPassword: true };
+
+/** The fields a caller supplies for a credential (see `CredentialInput`). */
+const sampleCredentialInput = {
+  name: "Admin",
+  description: null,
+  username: "admin@example.com",
+  loginUrl: "https://example.com/login",
+  usernameSelector: null,
+  passwordSelector: "#password",
+  submitSelector: null,
+};
+
+/** A credential without its encrypted password, as the summary reads return it. */
+const sampleCredentialSummary = {
+  ...sampleCredentialInput,
+  id: "credential-1",
+  websiteId: "cuid-1",
+  createdAt: new Date("2026-01-08T00:00:00.000Z"),
+  updatedAt: new Date("2026-01-08T00:00:00.000Z"),
+  deletedAt: null,
+};
+
+/** The same credential with its encrypted password, as only the crawl start reads it. */
+const sampleCredential = { ...sampleCredentialSummary, encryptedPassword: "iv.tag.ciphertext" };
 
 /** What Prisma rejects with when an `update` matches no row. */
 const recordNotFoundError = { code: "P2025", message: "Record to update not found." };
@@ -478,7 +528,7 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, crawl runs, and crawled pages inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, crawl runs, crawled pages, and credentials inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
@@ -487,6 +537,7 @@ describe("dbService", () => {
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 5 });
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 30 });
+      mockCredentialDelegate.updateMany.mockResolvedValue({ count: 2 });
 
       const websiteWasDeleted = await softDeleteWebsite("cuid-1");
 
@@ -525,9 +576,13 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockCredentialDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
     });
 
-    it("softDeleteWebsite writes one shared deletedAt timestamp to all eight tables", async () => {
+    it("softDeleteWebsite writes one shared deletedAt timestamp to all nine tables", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
@@ -536,6 +591,7 @@ describe("dbService", () => {
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockCredentialDelegate.updateMany.mockResolvedValue({ count: 0 });
       const millisecondsBeforeCall = Date.now();
 
       await softDeleteWebsite("cuid-1");
@@ -551,6 +607,7 @@ describe("dbService", () => {
       );
       const crawlRunDeletedAt = readDeletedAtWrittenBy(mockCrawlRunDelegate.updateMany);
       const crawledPageDeletedAt = readDeletedAtWrittenBy(mockCrawledPageDelegate.updateMany);
+      const credentialDeletedAt = readDeletedAtWrittenBy(mockCredentialDelegate.updateMany);
 
       expect(websiteDeletedAt).toBeInstanceOf(Date);
       expect(useCaseDeletedAt).toBe(websiteDeletedAt);
@@ -560,6 +617,7 @@ describe("dbService", () => {
       expect(actionScriptRunDeletedAt).toBe(websiteDeletedAt);
       expect(crawlRunDeletedAt).toBe(websiteDeletedAt);
       expect(crawledPageDeletedAt).toBe(websiteDeletedAt);
+      expect(credentialDeletedAt).toBe(websiteDeletedAt);
       const deletedAtMilliseconds = (websiteDeletedAt as Date).getTime();
       expect(deletedAtMilliseconds).toBeGreaterThanOrEqual(millisecondsBeforeCall);
       expect(deletedAtMilliseconds).toBeLessThanOrEqual(millisecondsAfterCall);
@@ -579,6 +637,25 @@ describe("dbService", () => {
       expect(mockActionScriptRunDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockCrawlRunDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockCrawledPageDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockCredentialDelegate.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("adoptWebsiteLoginUrl saves a learned login URL only on an active website that has none", async () => {
+      mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const websiteAdoptedTheUrl = await adoptWebsiteLoginUrl("cuid-1", "https://example.com/login");
+
+      expect(websiteAdoptedTheUrl).toBe(true);
+      expect(mockWebsiteDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "cuid-1", loginUrl: null, deletedAt: null },
+        data: { loginUrl: "https://example.com/login" },
+      });
+    });
+
+    it("adoptWebsiteLoginUrl returns false, changing nothing, when the website already has a login URL", async () => {
+      mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await adoptWebsiteLoginUrl("cuid-1", "https://example.com/other-login")).toBe(false);
     });
 
     it("softDeleteWebsite propagates a failure inside the transaction", async () => {
@@ -1000,7 +1077,7 @@ describe("dbService", () => {
   });
 
   describe("crawl runs", () => {
-    it("listCrawlRunsForWebsite returns the website's active runs, newest first", async () => {
+    it("listCrawlRunsForWebsite returns the website's active runs, newest first, each with its credential's id and name", async () => {
       mockCrawlRunDelegate.findMany.mockResolvedValue([sampleCrawlRun]);
 
       const crawlRuns = await listCrawlRunsForWebsite("cuid-1");
@@ -1008,6 +1085,7 @@ describe("dbService", () => {
       expect(mockCrawlRunDelegate.findMany).toHaveBeenCalledWith({
         where: { websiteId: "cuid-1", deletedAt: null },
         orderBy: { createdAt: "desc" },
+        include: CRAWL_RUN_CREDENTIAL_INCLUDE,
       });
       expect(crawlRuns).toEqual([sampleCrawlRun]);
     });
@@ -1019,6 +1097,7 @@ describe("dbService", () => {
 
       expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledWith({
         where: { id: "crawl-run-1", websiteId: "cuid-1", deletedAt: null },
+        include: CRAWL_RUN_CREDENTIAL_INCLUDE,
       });
       expect(found).toBe(sampleCrawlRun);
     });
@@ -1029,23 +1108,44 @@ describe("dbService", () => {
       expect(await findCrawlRunForWebsite("cuid-1", "other-run")).toBeNull();
     });
 
-    it("createCrawlRunForWebsite inserts a running run under the website", async () => {
+    it("createCrawlRunForWebsite inserts a running run under the website, with its credential", async () => {
       mockCrawlRunDelegate.create.mockResolvedValue(sampleCrawlRun);
 
       const created = await createCrawlRunForWebsite("cuid-1", {
         startUrl: "https://example.com",
         pageLimit: 50,
+        credentialId: "credential-1",
       });
 
       expect(mockCrawlRunDelegate.create).toHaveBeenCalledWith({
         data: {
           startUrl: "https://example.com",
           pageLimit: 50,
+          credentialId: "credential-1",
           websiteId: "cuid-1",
           status: "running",
         },
+        include: CRAWL_RUN_CREDENTIAL_INCLUDE,
       });
       expect(created).toBe(sampleCrawlRun);
+    });
+
+    it("markCrawlRunLoggedIn sets isLoggedIn on the active running run only", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const runWasMarked = await markCrawlRunLoggedIn("cuid-1", "crawl-run-1");
+
+      expect(runWasMarked).toBe(true);
+      expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "crawl-run-1", websiteId: "cuid-1", status: "running", deletedAt: null },
+        data: { isLoggedIn: true },
+      });
+    });
+
+    it("markCrawlRunLoggedIn returns false when no active running run matched", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await markCrawlRunLoggedIn("cuid-1", "deleted-run")).toBe(false);
     });
 
     it("recordCrawledPage updates the running run's counters, then inserts the page, inside one transaction", async () => {
@@ -1093,6 +1193,7 @@ describe("dbService", () => {
         status: "stoppedAtPageLimit" as const,
         waitingUrlCount: 12,
         errorMessage: null,
+        loginFailureScreenshotFileName: null,
         durationMs: 64000,
       };
 
@@ -1112,6 +1213,7 @@ describe("dbService", () => {
         status: "finished",
         waitingUrlCount: 0,
         errorMessage: null,
+        loginFailureScreenshotFileName: null,
         durationMs: 10,
       });
 
@@ -1130,9 +1232,13 @@ describe("dbService", () => {
       });
     });
 
-    it("listCrawledPageSummariesForRun lists the run's active pages in visiting order, without snapshots or links", async () => {
-      const { ariaSnapshot: _ariaSnapshot, linkedUrls: _linkedUrls, ...pageSummary } =
-        sampleCrawledPage;
+    it("listCrawledPageSummariesForRun lists the run's active pages in visiting order, without snapshots, links, or button pages", async () => {
+      const {
+        ariaSnapshot: _ariaSnapshot,
+        linkedUrls: _linkedUrls,
+        buttonUrls: _buttonUrls,
+        ...pageSummary
+      } = sampleCrawledPage;
       mockCrawledPageDelegate.findMany.mockResolvedValue([pageSummary]);
 
       const pageSummaries = await listCrawledPageSummariesForRun("cuid-1", "crawl-run-1");
@@ -1140,7 +1246,7 @@ describe("dbService", () => {
       expect(mockCrawledPageDelegate.findMany).toHaveBeenCalledWith({
         where: { websiteId: "cuid-1", crawlRunId: "crawl-run-1", deletedAt: null },
         orderBy: { visitOrder: "asc" },
-        omit: { ariaSnapshot: true, linkedUrls: true },
+        omit: { ariaSnapshot: true, linkedUrls: true, buttonUrls: true },
       });
       expect(pageSummaries).toEqual([pageSummary]);
     });
@@ -1165,6 +1271,130 @@ describe("dbService", () => {
       mockCrawledPageDelegate.findFirst.mockResolvedValue(null);
 
       expect(await findCrawledPageForRun("cuid-1", "crawl-run-1", "other-page")).toBeNull();
+    });
+  });
+
+  describe("credentials", () => {
+    it("listCredentialsForWebsite returns the website's active credentials, newest first, without passwords", async () => {
+      mockCredentialDelegate.findMany.mockResolvedValue([sampleCredentialSummary]);
+
+      const credentials = await listCredentialsForWebsite("cuid-1");
+
+      expect(mockCredentialDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        omit: OMIT_ENCRYPTED_PASSWORD,
+      });
+      expect(credentials).toEqual([sampleCredentialSummary]);
+    });
+
+    it("findCredentialForWebsite scopes the lookup to the website and to active rows, without the password", async () => {
+      mockCredentialDelegate.findFirst.mockResolvedValue(sampleCredentialSummary);
+
+      const found = await findCredentialForWebsite("cuid-1", "credential-1");
+
+      expect(mockCredentialDelegate.findFirst).toHaveBeenCalledWith({
+        where: { id: "credential-1", websiteId: "cuid-1", deletedAt: null },
+        omit: OMIT_ENCRYPTED_PASSWORD,
+      });
+      expect(found).toBe(sampleCredentialSummary);
+    });
+
+    it("findCredentialWithPasswordForWebsite is the one lookup that keeps the encrypted password", async () => {
+      mockCredentialDelegate.findFirst.mockResolvedValue(sampleCredential);
+
+      const found = await findCredentialWithPasswordForWebsite("cuid-1", "credential-1");
+
+      expect(mockCredentialDelegate.findFirst).toHaveBeenCalledWith({
+        where: { id: "credential-1", websiteId: "cuid-1", deletedAt: null },
+      });
+      expect(found).toBe(sampleCredential);
+    });
+
+    it("createCredentialForWebsite inserts the credential with its encrypted password, answering without it", async () => {
+      mockCredentialDelegate.create.mockResolvedValue(sampleCredentialSummary);
+
+      const created = await createCredentialForWebsite(
+        "cuid-1",
+        sampleCredentialInput,
+        "iv.tag.ciphertext",
+      );
+
+      expect(mockCredentialDelegate.create).toHaveBeenCalledWith({
+        data: { ...sampleCredentialInput, encryptedPassword: "iv.tag.ciphertext", websiteId: "cuid-1" },
+        omit: OMIT_ENCRYPTED_PASSWORD,
+      });
+      expect(created).toBe(sampleCredentialSummary);
+    });
+
+    it("updateCredentialForWebsite replaces the password when a new one is given", async () => {
+      mockCredentialDelegate.update.mockResolvedValue(sampleCredentialSummary);
+
+      const updated = await updateCredentialForWebsite(
+        "cuid-1",
+        "credential-1",
+        sampleCredentialInput,
+        "new.encrypted.value",
+      );
+
+      expect(mockCredentialDelegate.update).toHaveBeenCalledWith({
+        where: { id: "credential-1", websiteId: "cuid-1", deletedAt: null },
+        data: { ...sampleCredentialInput, encryptedPassword: "new.encrypted.value" },
+        omit: OMIT_ENCRYPTED_PASSWORD,
+      });
+      expect(updated).toBe(sampleCredentialSummary);
+    });
+
+    it("updateCredentialForWebsite leaves the saved password alone when none is given", async () => {
+      mockCredentialDelegate.update.mockResolvedValue(sampleCredentialSummary);
+
+      await updateCredentialForWebsite("cuid-1", "credential-1", sampleCredentialInput, null);
+
+      expect(mockCredentialDelegate.update).toHaveBeenCalledWith({
+        where: { id: "credential-1", websiteId: "cuid-1", deletedAt: null },
+        data: sampleCredentialInput,
+        omit: OMIT_ENCRYPTED_PASSWORD,
+      });
+    });
+
+    it("updateCredentialForWebsite returns null when no active credential of that website matched", async () => {
+      mockCredentialDelegate.update.mockRejectedValue(recordNotFoundError);
+
+      const updated = await updateCredentialForWebsite(
+        "cuid-1",
+        "deleted-credential",
+        sampleCredentialInput,
+        null,
+      );
+
+      expect(updated).toBeNull();
+    });
+
+    it("updateCredentialForWebsite rethrows any other failure unchanged", async () => {
+      const connectionError = new Error("connection refused");
+      mockCredentialDelegate.update.mockRejectedValue(connectionError);
+
+      await expect(
+        updateCredentialForWebsite("cuid-1", "credential-1", sampleCredentialInput, null),
+      ).rejects.toBe(connectionError);
+    });
+
+    it("softDeleteCredentialForWebsite stamps deletedAt on the active credential and reports it", async () => {
+      mockCredentialDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const credentialWasDeleted = await softDeleteCredentialForWebsite("cuid-1", "credential-1");
+
+      expect(credentialWasDeleted).toBe(true);
+      expect(mockCredentialDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "credential-1", websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
+    });
+
+    it("softDeleteCredentialForWebsite returns false when no active credential matched", async () => {
+      mockCredentialDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await softDeleteCredentialForWebsite("cuid-1", "deleted-credential")).toBe(false);
     });
   });
 });

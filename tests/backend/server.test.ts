@@ -5,7 +5,7 @@ import path from "node:path";
 
 /**
  * server.ts registers the website, use case, action, Playwright, action
- * script, and crawl run controllers, and each of them imports dbService - whose module body
+ * script, crawl run, and credential controllers, and each of them imports dbService - whose module body
  * constructs a real PrismaClient. Every exported dbService function is
  * replaced so loading the full app never builds a client, and the wiring
  * tests below can choose what a query returns.
@@ -46,6 +46,13 @@ const mockDbService = vi.hoisted(() => ({
   markRunningCrawlRunsInterrupted: vi.fn(),
   listCrawledPageSummariesForRun: vi.fn(),
   findCrawledPageForRun: vi.fn(),
+  markCrawlRunLoggedIn: vi.fn(),
+  listCredentialsForWebsite: vi.fn(),
+  findCredentialForWebsite: vi.fn(),
+  findCredentialWithPasswordForWebsite: vi.fn(),
+  createCredentialForWebsite: vi.fn(),
+  updateCredentialForWebsite: vi.fn(),
+  softDeleteCredentialForWebsite: vi.fn(),
 }));
 
 /** The Playwright service is replaced so loading the full app can never launch a browser. */
@@ -276,6 +283,28 @@ describe("server.ts", () => {
     expect(startResponse.body).toEqual(runningCrawlRun);
   });
 
+  it("wires the credential routes into the full app", async () => {
+    const savedCredential = {
+      id: "credential-1",
+      websiteId: sampleWebsite.id,
+      name: "Admin",
+      description: null,
+      username: "admin@example.com",
+      loginUrl: "https://example.com/login",
+      usernameSelector: null,
+      passwordSelector: null,
+      submitSelector: null,
+    };
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.listCredentialsForWebsite.mockResolvedValue([savedCredential]);
+
+    const res = await request(app).get(`/api/websites/${sampleWebsite.id}/credentials`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([{ ...savedCredential, hasPassword: true }]);
+    expect(mockDbService.listCredentialsForWebsite).toHaveBeenCalledWith(sampleWebsite.id);
+  });
+
   it("does not mark crawl runs interrupted when imported under test (that boot step only runs with the real listener)", () => {
     // The module body ran once, at import, with NODE_ENV=test.
     expect(interruptedMarkCallsAtImport).toBe(0);
@@ -331,6 +360,7 @@ describe("server.ts", () => {
       description: null,
       networkIdleTimeoutMs: 5000,
       screenshotMinimumWaitMs: 1,
+      loginUrl: null,
     });
   });
 

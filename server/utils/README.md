@@ -15,7 +15,9 @@ is erased at runtime.)
 | `statusForScriptGenerationFailure.ts` | `statusForScriptGenerationFailure(error)`: 503 for `missingApiKey`, 400 for `unsupportedModel`, 502 for `refused`/`truncated`/`unparseable`, 500 otherwise - recognized structurally, so it needs no service import. Shared by the two controllers that talk to Claude. |
 | `describeError.ts` | `describeError(error)`: an Error's message, or the stringified value. Used by every route `catch`. |
 | `normalizeCrawlUrl.ts` | `normalizeCrawlUrl(rawHref, baseUrl)`: resolves a link as a browser would and returns `{ identityUrl, loadUrl }` - identity is origin + path (query and hash dropped), load keeps the query - or null for anything not followable (non-http(s), unparseable, blank, longer than `MAX_CRAWL_URL_LENGTH` = 2000). `isSameOriginUrl(url, origin)`. Used by the crawler. |
-| `validateRequestBodies.ts` | `validateWebsiteInput` and `validateTitleDescriptionInput`: check, trim, and normalize request bodies, returning `{ isValid: true, input }` or `{ isValid: false, errorMessage }`. |
+| `validateRequestBodies.ts` | `validateWebsiteInput`, `validateTitleDescriptionInput`, `validateScriptModelChoiceInput`, `validateCredentialInput`, and `validateCrawlRunStartInput`: check, trim, and normalize request bodies, returning `{ isValid: true, input }` or `{ isValid: false, errorMessage }`. |
+| `crawlButtonModes.ts` | `CRAWL_BUTTON_MODES` (`linksOnly`, `allButRisky`, `openOnly`), `CrawlButtonMode`, `DEFAULT_CRAWL_BUTTON_MODE` (`linksOnly`), `isCrawlButtonMode(value)`. Shared by the crawl start validation and the crawler. |
+| `credentialEncryption.ts` | `encryptCredentialPassword(plain)` / `decryptCredentialPassword(stored)`: AES-256-GCM with a fresh random 12-byte IV per encryption, stored as `iv.authTag.ciphertext` (each base64). The key is `CREDENTIAL_ENCRYPTION_KEY` - 32 random bytes, base64 - read on every call (not at boot), so the server starts without it. `readCredentialEncryptionKey()` / `credentialEncryptionIsConfigured()` check it; `CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE` is the 503 text. A wrong key or an altered value fails to decrypt (GCM authenticates) with a message saying to re-enter the password. Generate a key with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"` or `openssl rand -base64 32`. |
 
 `resolveServerPort`, `resolveScreenshotDirectory`, and
 `resolveActionScriptDirectory` all run once at boot in `../server.ts`. `resolveServerPort` fails hard rather than defaulting, mirroring the same throw
@@ -27,9 +29,12 @@ browser instead of a one-line startup error.
 
 | Body | Rules |
 |---|---|
-| Website | `url` required, must be `http:`/`https:`, stored as `new URL(url).href`; `name` required; `description` optional — missing, null, or blank is stored as `null`; `networkIdleTimeoutMs` and `screenshotMinimumWaitMs` optional JSON numbers — whole milliseconds 0–30000, missing or null become 5000 and 1, and the cap may not be lower than the minimum. |
+| Website | `url` required, must be `http:`/`https:`, stored as `new URL(url).href`; `name` required; `description` optional — missing, null, or blank is stored as `null`; `loginUrl` optional — missing, null, or blank is stored as `null` (doesn't require login; an omitted one on PUT clears it), otherwise http/https and normalized like `url`; `networkIdleTimeoutMs` and `screenshotMinimumWaitMs` optional JSON numbers — whole milliseconds 0–30000, missing or null become 5000 and 1, and the cap may not be lower than the minimum. |
 | Use case / action | `title` and `description` both required and non-blank. |
 | Script model choice | `modelId` required and non-blank; `effort` a non-blank string, or null / left out for "Standard". Whether the model exists and offers that level is checked by the controller against the live catalog. |
+| Credential | `name` and `username` required; `loginUrl` optional — missing, null, or blank is stored as `null` (inherit the website's), otherwise http/https, normalized like a website URL; `description` and the three selectors (`usernameSelector`, `passwordSelector`, `submitSelector`) optional — missing, null, or blank is stored as `null`. `password` required on create; on replace, missing / null / `""` keeps the saved one. The password is **not trimmed** (spaces can be part of it), but a password of only spaces is rejected. |
+| Crawl start | The whole body is optional. `credentialId` a non-blank string, or null / left out to crawl logged out. `buttonMode` one of `linksOnly` / `allButRisky` / `openOnly` (`../utils/crawlButtonModes.ts`), or null / left out for `linksOnly`. Whether the credential exists (and has an effective login URL) is checked by the controller. |
 
-All strings are trimmed. A body that is not a JSON object (including the
-`undefined` Express 5 leaves when no JSON was sent) is rejected first.
+All strings are trimmed (except a credential's password). A body that is not
+a JSON object (including the `undefined` Express 5 leaves when no JSON was
+sent) is rejected first - except the crawl start body, which may be left out.

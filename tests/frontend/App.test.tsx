@@ -6,6 +6,7 @@ import {
   buildCrawledPageRecord,
   buildCrawledPageSummaryRecord,
   buildCrawlRunWithPagesRecord,
+  buildCredentialRecord,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
   countRequests,
@@ -38,8 +39,9 @@ describe("App", () => {
 
 /**
  * Stubs every GET the app's pages make for one website ("Example") that has
- * one use case ("Log in"), one action ("Submit credentials"), and one
- * finished crawl ("crawl-run-1") of a single page.
+ * one use case ("Log in"), one action ("Submit credentials"), one
+ * finished crawl ("crawl-run-1") of a single page, and one credential
+ * ("credential-1").
  * @returns The installed fetch stub
  */
 function stubEveryPageRequest(): FetchStub {
@@ -57,6 +59,11 @@ function stubEveryPageRequest(): FetchStub {
     },
     "GET /api/websites/website-1/screenshot-runs": { status: 200, body: [] },
     "GET /api/websites/website-1/crawl-runs": { status: 200, body: [] },
+    "GET /api/websites/website-1/credentials": { status: 200, body: [buildCredentialRecord()] },
+    "GET /api/websites/website-1/credentials/credential-1": {
+      status: 200,
+      body: buildCredentialRecord(),
+    },
     "GET /api/websites/website-1/crawl-runs/crawl-run-1": {
       status: 200,
       body: buildCrawlRunWithPagesRecord({ pages: [buildCrawledPageSummaryRecord()] }),
@@ -94,6 +101,8 @@ describe("App routes", () => {
     { path: "/websites/website-1/actions/action-1", heading: "Submit credentials" },
     { path: "/websites/website-1/actions/action-1/edit", heading: "Edit action" },
     { path: "/websites/website-1/crawl-runs/crawl-run-1", heading: "Site crawl" },
+    { path: "/websites/website-1/credentials/new", heading: "New credential" },
+    { path: "/websites/website-1/credentials/credential-1/edit", heading: "Edit credential" },
   ])("routes $path to the page headed '$heading'", async ({ path, heading }) => {
     stubEveryPageRequest();
     window.history.pushState({}, "", path);

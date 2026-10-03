@@ -6,7 +6,7 @@ import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import { type CrawledPageSummaryRecord } from "../hooks/useCrawlRunProgress";
 import { buildCrawlSiteTree, flattenCrawlSiteTree } from "../utils/buildCrawlSiteTree";
-import { formatCrawledPagePath } from "../utils/describeCrawlRun";
+import { describeCrawledPagePath } from "../utils/describeCrawlRun";
 import { describeScreenshotRunOutcome } from "../utils/describeScreenshotRun";
 
 const HEADING_ID = "crawl-site-map-heading";
@@ -27,8 +27,10 @@ export interface CrawlSiteMapProps {
 /**
  * The "Site map": every page the crawl found, as a tree - each page indented
  * under the page whose link first led to it, the start page at the top. Each
- * row shows the page's path and how it answered ("Succeeded · HTTP 200"),
- * coloured green or red, and picking a row shows that page in full.
+ * row shows the page's path - with its redirect, e.g. "/calendar (from /)"
+ * (see `describeCrawledPagePath`) - and how it answered ("Succeeded · HTTP 200"),
+ * coloured green or red, then its title and, for a page a button click led
+ * to, that button ("via “Open Yoga”"). Picking a row shows that page in full.
  *
  * Drawn as one indented list (not nested lists), so every row is a plain
  * button a keyboard or screen reader can reach in reading order.
@@ -53,6 +55,8 @@ export default function CrawlSiteMap(props: CrawlSiteMapProps): ReactElement {
             {treeRows.map(({ page, treeDepth }) => {
               const pageIsSelected = page.id === selectedPageId;
               const pageTitleText = page.title === null ? "" : ` · ${page.title}`;
+              const foundByButtonSuffix =
+                page.foundByButtonText === null ? "" : ` · via “${page.foundByButtonText}”`;
               return (
                 <ListItemButton
                   key={page.id}
@@ -65,8 +69,8 @@ export default function CrawlSiteMap(props: CrawlSiteMapProps): ReactElement {
                   divider
                 >
                   <ListItemText
-                    primary={formatCrawledPagePath(page.url)}
-                    secondary={`${describeScreenshotRunOutcome(page)}${pageTitleText}`}
+                    primary={describeCrawledPagePath(page)}
+                    secondary={`${describeScreenshotRunOutcome(page)}${pageTitleText}${foundByButtonSuffix}`}
                     slotProps={{
                       primary: { sx: { wordBreak: "break-all" } },
                       secondary: { sx: { color: page.succeeded ? "success.main" : "error.main" } },

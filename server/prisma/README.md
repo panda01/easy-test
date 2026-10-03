@@ -28,21 +28,24 @@ The generator is `prisma-client` (the ESM generator), **not** the legacy
 
 | Model | Table | Purpose |
 |---|---|---|
-| `Website` | `websites` | A website a user wants to test: url, name, optional description, and two screenshot timing settings — `networkIdleTimeoutMs` (default 5000) and `screenshotMinimumWaitMs` (default 1). |
+| `Website` | `websites` | A website a user wants to test: url, name, optional description, and two screenshot timing settings — `networkIdleTimeoutMs` (default 5000) and `screenshotMinimumWaitMs` (default 1) — and `loginUrl` (null = doesn't require login; credentials inherit it; learned from the first successful login with a credential's own URL via `adoptWebsiteLoginUrl`, never overwriting one already set). |
 | `UseCase` | `use_cases` | A scenario to test on one website: title, description (both required). |
 | `Action` | `actions` | A reusable step on one website, e.g. "Log in": title, description (both required). |
 | `ScreenshotRun` | `screenshot_runs` | One visit the Playwright controller made to a website: the URL visited, whether it succeeded, the HTTP status, the failure reason, the screenshot's file name, and how long navigation took. |
 | `ActionScript` | `action_scripts` | One Playwright script Claude generated from an action: snapshots of what was sent (website name, START_URL, action title and description), the summary, `assumptions String[]`, the `.mjs` `code`, the warn-only `ruleViolations String[]`, the `modelId` that answered, and the `effort` level sent (null = "Standard", or a row saved before the column existed). **Immutable** - create-only. |
 | `ActionScriptRun` | `action_script_runs` | One run of a script: `succeeded`, `exitCode` (null when killed by a signal), `exitSignal`, `timedOut`, the capped `output` and `outputWasTruncated`, the failure screenshot's file name, and the duration. Create-only. |
-| `CrawlRun` | `crawl_runs` | One background crawl of a website: `startUrl` (snapshot), `status` (`running`, `finished`, `stoppedAtPageLimit`, `stoppedAtTimeLimit`, `failed`, `interrupted`), `pageLimit`, the live counters `visitedPageCount` / `waitingUrlCount`, `errorMessage`, and `durationMs` / `finishedAt` (null while running). |
-| `CrawledPage` | `crawled_pages` | One page a crawl visited: `parentPageId` (self-relation - the page whose link first led here; null for the start page), `url` (identity: origin + path), `requestedUrl`, `finalUrl`, `visitOrder`, `depth`, `succeeded`, `httpStatus`, `errorMessage`, `title`, the YAML `ariaSnapshot`, `linkedUrls String[]` (same-origin links on the page), and the duration. Create-only. |
+| `CrawlRun` | `crawl_runs` | One background crawl of a website: `startUrl` (snapshot), `status` (`running`, `finished`, `stoppedAtPageLimit`, `stoppedAtTimeLimit`, `failed`, `interrupted`), `pageLimit`, the live counters `visitedPageCount` / `waitingUrlCount`, `errorMessage`, and `durationMs` / `finishedAt` (null while running). `credentialId` is the credential it logs in as (null = logged out); `isLoggedIn` turns true once that login worked, **before** the first page is recorded - so it holds for every page of the run. A failed login ends the run `failed` with no pages, and `loginFailureScreenshotFileName` (relative to `SCREENSHOT_DIR`, like `ScreenshotRun.screenshotFileName`) names the PNG of what the browser showed. `buttonMode` (`linksOnly` default, `allButRisky`, `openOnly`) is which buttons the crawl clicked. |
+| `Credential` | `credentials` | A login for one website: `name`, optional `description`, `username`, `encryptedPassword` (AES-256-GCM with `CREDENTIAL_ENCRYPTION_KEY`, `iv.authTag.ciphertext` - **never** plain text, never sent by the API), `loginUrl` (optional override - null inherits the website's), and optional CSS selectors `usernameSelector` / `passwordSelector` / `submitSelector` that replace the crawler's own guess. |
+| `CrawledPage` | `crawled_pages` | One page a crawl visited: `parentPageId` (self-relation - the page whose link first led here; null for the start page), `url` (identity: origin + path - where the browser LANDED; the requested page instead when the landing page is already recorded in the run), `requestedUrl`, `finalUrl`, `wasRedirected` (landed on a different origin + path than requested), `visitOrder`, `depth`, `succeeded`, `httpStatus`, `errorMessage`, `title`, the YAML `ariaSnapshot`, `linkedUrls String[]` (same-origin links on the page), and the duration. Create-only. `buttonUrls String[]` lists the same-site pages its buttons led to, and `foundByButtonText` names the button whose click first led to this page (null when a link did). |
 
 `UseCase`, `Action`, and `ScreenshotRun` each belong to exactly one `Website`
 (`websiteId`, indexed). `ActionScript` belongs to one `Action` and, denormalized
 for single-statement cascades, its `Website`; `ActionScriptRun` carries all
 three parent ids (`websiteId`, `actionId`, `actionScriptId`, each indexed).
-`CrawlRun` belongs to one `Website`; `CrawledPage` belongs to one `CrawlRun`
-and, denormalized, its `Website`. The foreign keys use Prisma's default
+`CrawlRun` belongs to one `Website` and optionally points at the `Credential`
+it logged in as (`credentialId`, indexed); `CrawledPage` belongs to one
+`CrawlRun` and, denormalized, its `Website`. `Credential` belongs to one
+`Website`. The foreign keys use Prisma's default
 `onDelete: Restrict`, which is fine because rows are never hard deleted.
 
 The pages of one crawl form a **tree** through the `CrawledPageTree`
@@ -73,10 +76,11 @@ select createdAt from websites;     -- fails
 
 ## Soft delete
 
-All eight models have a nullable `deletedAt`. Deleting sets it instead of
+All nine models have a nullable `deletedAt`. Deleting sets it instead of
 removing the row, and every `dbService` query filters `deletedAt: null`.
 Deleting a website also stamps its active use cases, actions, screenshot
-runs, action scripts, action script runs, crawl runs, and crawled pages, in
+runs, action scripts, action script runs, crawl runs, crawled pages, and
+credentials, in
 one transaction, with the **same** timestamp — so that batch can be identified together later. Deleting
 an action likewise stamps its active scripts and their runs with the action's
 timestamp. A soft-deleted run's PNG (and run folder) stays on disk. Scripts

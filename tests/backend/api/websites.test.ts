@@ -46,6 +46,7 @@ const sampleWebsite = {
   description: "a site to test",
   networkIdleTimeoutMs: 5000,
   screenshotMinimumWaitMs: 1,
+  loginUrl: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,
@@ -123,6 +124,7 @@ describe("website routes", () => {
         description: null,
         networkIdleTimeoutMs: 5000,
         screenshotMinimumWaitMs: 1,
+        loginUrl: null,
       });
     });
 
@@ -139,6 +141,7 @@ describe("website routes", () => {
         description: "a site to test",
         networkIdleTimeoutMs: 5000,
         screenshotMinimumWaitMs: 1,
+        loginUrl: null,
       });
     });
 
@@ -158,7 +161,44 @@ describe("website routes", () => {
         description: null,
         networkIdleTimeoutMs: 8000,
         screenshotMinimumWaitMs: 1200,
+        loginUrl: null,
       });
+    });
+
+    it("passes the normalized login page URL through to the service", async () => {
+      const websiteWithLoginUrl = { ...sampleWebsite, loginUrl: "https://example.com/login" };
+      mockDbService.createWebsite.mockResolvedValue(websiteWithLoginUrl);
+
+      const res = await request(createWebsitesApp()).post("/api/websites").send({
+        url: "https://example.com",
+        name: "Example",
+        loginUrl: "  HTTPS://Example.COM/login  ",
+      });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual(websiteWithLoginUrl);
+      expect(mockDbService.createWebsite).toHaveBeenCalledWith({
+        url: "https://example.com/",
+        name: "Example",
+        description: null,
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
+        loginUrl: "https://example.com/login",
+      });
+    });
+
+    it("returns 400 and stores nothing when the login page URL is not http or https", async () => {
+      const res = await request(createWebsitesApp()).post("/api/websites").send({
+        url: "https://example.com",
+        name: "Example",
+        loginUrl: "ftp://example.com/login",
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "The login page URL must be a valid http:// or https:// address",
+      });
+      expect(mockDbService.createWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 400 and stores nothing when the network idle cap is below the minimum wait", async () => {
@@ -279,7 +319,50 @@ describe("website routes", () => {
         description: null,
         networkIdleTimeoutMs: 5000,
         screenshotMinimumWaitMs: 1,
+        loginUrl: null,
       });
+    });
+
+    it("replaces the login page URL with the normalized one sent", async () => {
+      const updatedWebsite = { ...sampleWebsite, loginUrl: "https://example.com/sign-in" };
+      mockDbService.updateWebsite.mockResolvedValue(updatedWebsite);
+
+      const res = await request(createWebsitesApp())
+        .put("/api/websites/cuid-1")
+        .send({ url: "https://example.com", name: "Example", loginUrl: "HTTPS://EXAMPLE.com/sign-in" });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(updatedWebsite);
+      expect(mockDbService.updateWebsite).toHaveBeenCalledWith(
+        "cuid-1",
+        expect.objectContaining({ loginUrl: "https://example.com/sign-in" }),
+      );
+    });
+
+    it("clears the login page URL (the website then doesn't require login) when it is sent blank", async () => {
+      mockDbService.updateWebsite.mockResolvedValue(sampleWebsite);
+
+      const res = await request(createWebsitesApp())
+        .put("/api/websites/cuid-1")
+        .send({ url: "https://example.com", name: "Example", loginUrl: "   " });
+
+      expect(res.status).toBe(200);
+      expect(mockDbService.updateWebsite).toHaveBeenCalledWith(
+        "cuid-1",
+        expect.objectContaining({ loginUrl: null }),
+      );
+    });
+
+    it("returns 400 and updates nothing when the login page URL is not a valid address", async () => {
+      const res = await request(createWebsitesApp())
+        .put("/api/websites/cuid-1")
+        .send({ url: "https://example.com", name: "Example", loginUrl: "not a url" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "The login page URL must be a valid http:// or https:// address",
+      });
+      expect(mockDbService.updateWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 400 and updates nothing when a timing setting is out of range", async () => {

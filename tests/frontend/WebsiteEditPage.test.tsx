@@ -97,6 +97,9 @@ describe("WebsiteEditPage", () => {
     expect(await screen.findByRole("textbox", { name: "URL" })).toHaveValue("https://example.com");
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Example");
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("The example site");
+    expect(screen.getByRole("textbox", { name: "Login page URL" })).toHaveValue(
+      "https://example.com/login",
+    );
     expect(screen.getByRole("spinbutton", { name: "Network idle cap (ms)" })).toHaveValue(5000);
     expect(screen.getByRole("spinbutton", { name: "Minimum wait (ms)" })).toHaveValue(1);
     expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
@@ -115,6 +118,41 @@ describe("WebsiteEditPage", () => {
     renderWebsiteEditPage(OPENED_FROM_DETAIL);
 
     expect(await screen.findByRole("textbox", { name: "Description" })).toHaveValue("");
+  });
+
+  it("pre-fills a blank login page URL when the saved website doesn't require login", async () => {
+    stubFetchRoutes({
+      [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+    });
+
+    renderWebsiteEditPage(OPENED_FROM_DETAIL);
+
+    expect(await screen.findByRole("textbox", { name: "Login page URL" })).toHaveValue("");
+  });
+
+  it("PUTs a cleared login page URL as blank, so the website no longer requires login", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedWebsite({
+      [`PUT ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+    });
+    renderWebsiteEditPage(OPENED_FROM_DETAIL);
+
+    await user.clear(await screen.findByRole("textbox", { name: "Login page URL" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await readProbeAfterLanding(DETAIL_PATH);
+    expect(fetchStub).toHaveBeenCalledWith(WEBSITE_API_URL, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: "https://example.com",
+        name: "Example",
+        description: "The example site",
+        networkIdleTimeoutMs: 5000,
+        screenshotMinimumWaitMs: 1,
+        loginUrl: "",
+      }),
+    });
   });
 
   it("disables Save while the name is cleared to whitespace", async () => {
@@ -152,6 +190,7 @@ describe("WebsiteEditPage", () => {
         description: "The example site",
         networkIdleTimeoutMs: 5000,
         screenshotMinimumWaitMs: 1,
+        loginUrl: "https://example.com/login",
       }),
     });
 
