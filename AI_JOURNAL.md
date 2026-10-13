@@ -4,6 +4,66 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-13 10:50 EDT — Production start with pm2: `npm i`, then `npm start`
+
+**Intent:**
+- Make `npm i` followed by `npm start` build the app and run it as a production server under pm2.
+- Make `npm i` install the right browser.
+- Modeled on `~/Projects/forge-gym`, as the user asked: `ecosystem.config.json`, `start` / `stop` / `restart` / `logs` scripts, a compiled `dist-server/`, and Express serving `dist/` in production.
+
+### Decisions
+- **Made by the user:** set `importFileExtension = "js"` on the Prisma generator. The first `npm start` crashed with `ERR_MODULE_NOT_FOUND`, because the generated client imported `./internal/class` with no extension. tsx resolves that, but plain Node does not.
+  - The rejected alternative was running production through tsx.
+- **Already decided in the README:**
+  - Production port `3011`, which was reserved for it.
+  - Moving `typescript`, `tsx`, `vite`, and `prisma` to `dependencies`, per the old "Tripwire" section.
+- **Following forge-gym:**
+  - pm2 is a project dependency (`^7.0.4`), so no global install is needed.
+  - The app is named `easy-test`, with `autorestart`, `max_restarts: 10`, `restart_delay: 1000`, and `time: true`.
+- **Defaults chosen:**
+  - **Server build:** the server compiles with the existing `tsc --project tsconfig.server.json`, which already had `outDir: dist-server`, instead of forge-gym's esbuild script.
+  - **Prompt file:** `server/prompts/` is copied into the build, because `scriptGenerationService` reads `../prompts/actionPlanGuidelines.md` relative to its own file.
+  - **Browser:** `playwright install chromium` goes in `postinstall`. It installs both the full Chromium (the plan runner launches `headless: false`) and the headless shell (screenshots and crawls).
+
+### Files changed
+| File | Change |
+|---|---|
+| `ecosystem.config.json` | **New:** pm2 app `easy-test` runs `./dist-server/server/server.js`; `env_production` sets `NODE_ENV=production` and `SERVER_PORT=3011`. |
+| `package.json` | **New scripts:** `build:server` (`rm -rf dist-server`, `tsc --project tsconfig.server.json`, copy `server/prompts` into `dist-server/server/prompts`), `build:prod`, `start` (`build:prod` then `pm2 start ecosystem.config.json --env production`), `stop`, `restart`, `logs`. **`postinstall`** now also runs `playwright install chromium`. **Dependencies:** added `pm2` `^7.0.4`; moved `prisma`, `tsx`, `typescript`, and `vite` from devDependencies. |
+| `package-lock.json` | Updated by `npm install pm2@^7.0.4` and the moves. |
+| `server/server.ts` | **New:** `serverIsInProduction`, `CLIENT_BUILD_DIRECTORY` (`<cwd>/dist`), and the exported `serveBuiltClientFiles(expressApp, clientBuildDirectory)` and `serveClientRoutesFromIndexHtml(expressApp, clientBuildDirectory)`, both with JSDoc. **Changed:** under production the first is mounted before the routes and the second after them, replacing the "DEV-ONLY SCAFFOLD" comment. Boot logs where the client is served from in production. The no-cors comment is updated. New imports: `node:path`, `describeError`, and `readSendErrorStatus`. |
+| `server/prisma/schema.prisma` | The generator gains `importFileExtension = "js"`, with a comment. `prisma db push` reported "already in sync", and `prisma generate` was run. |
+| `tests/backend/server.test.ts` | Imports the two new functions. New `createProductionClientApp` and the "production client serving" suite (9 tests), plus a test that the full app serves no client under test. |
+| `tests/backend/fixtures/client-build-files/` | **New:** `index.html` and `assets/app.js`. |
+| `tests/backend/fixtures/client-build-with-unreadable-index/` | **New:** `index.html/README.txt`. `index.html` is a directory, so sending it fails with EISDIR. |
+| `README.md` | New **Production** section, Scripts table rows, and Ports/Stack/Environment updates. The setup step drops the manual `npx playwright install chromium`. "Tripwire" is replaced by **Dependencies**. |
+| `server/README.md`, `server/prisma/README.md`, `server/prompts/README.md`, `tests/README.md`, `.env.example` | Docs for the production build, `importFileExtension`, the prompts copy, the new fixtures, and the dev-vs-prod port. |
+
+### Verification
+- **Install:** `npm i` ran `prisma generate`, `prisma db push`, and `playwright install chromium`. Playwright 1.63 expects Chromium build 1243, and both the headed and headless builds are installed. A throwaway `claude_tmp` script launched both headless and headed and read a page title; it was deleted afterward.
+- **Start:** `npm start` built and launched the pm2 app.
+  - `/api/health` returned 200 on 3011.
+  - `/` served index.html.
+  - `/websites/some-id` returned index.html.
+  - The JS asset returned 200.
+  - Unknown `/api` paths and POSTs to client routes returned 404.
+- **Playwright on :3011:**
+  - The home page shows API health "ok".
+  - Loading `/websites` directly lists the websites.
+  - A website page made 7 `/api` calls, all 200, with no console errors.
+- **pm2 behavior:**
+  - A second `npm start` rebuilt and restarted the app under a new PID.
+  - `npm run stop` freed the port, and `npm run restart` brought it back.
+  - The pm2 app was then deleted, and ports 3010, 3011, and 5180 were free.
+- **Dev unaffected:** after the generator change, `npm run dev` passed the health checks (direct and through Vite) and Playwright loaded `/websites`. The dev servers were then stopped.
+- **Checks:**
+  - Lint, `tsc`, and `tsc:client` are clean.
+  - `test:coverage`: 2181 tests pass, at 99.46% statements, 98.77% branches, 100% functions, and 99.76% lines.
+
+### Notes
+- `npm audit` reports 13 high-severity findings, 8 of them through pm2's dependencies. Not fixed.
+- The global pm2 daemon is v6.0.14, so the local pm2 7.0.4 prints an "out-of-date" warning. Not changed.
+
 ## 2026-10-12 17:42 EDT — Run status icons: passed / failed / not run yet, on the website's actions and on each version
 
 **Intent:**

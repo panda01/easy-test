@@ -1,0 +1,16 @@
+{
+  "apps": [
+    {
+      "name": "easy-test",
+      "script": "./dist-server/server/server.js",
+      "env_production": {
+        "NODE_ENV": "production",
+        "SERVER_PORT": 3011
+      },
+      "autorestart": true,
+      "max_restarts": 10,
+      "restart_delay": 1000,
+      "time": true
+    }
+  ]
+}

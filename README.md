@@ -125,14 +125,14 @@ highlighted. Without `ANTHROPIC_API_KEY` the server still boots, and the
 model list and conversion answer 503.
 See `server/controllers/README.md` and `server/services/README.md`.
 
-**This project is development-only.** There is no production build, no PM2, no
-Docker, and no CI.
+Development runs on `npm run dev`. A production build runs under pm2 with
+`npm start` (see **Production** below). There is no Docker and no CI.
 
 ## Stack
 
 | Layer | Choice |
 |---|---|
-| Server | Express 5, run with `tsx watch` |
+| Server | Express 5, run with `tsx watch` in development; compiled to `dist-server/` and run by pm2 in production |
 | Client | React 19 + Vite 7 + MUI 7 |
 | Database | PostgreSQL 18 via Prisma 7 + `@prisma/adapter-pg` |
 | Tests | Vitest (two projects: backend/node, frontend/jsdom) |
@@ -145,9 +145,13 @@ Requires Node 25.4.0 and a local PostgreSQL server.
 ```sh
 createdb easy_test_dev
 cp .env.example .env.local     # then edit if your postgres user is not your OS user
-npm install                    # postinstall runs: prisma generate && prisma db push
-npx playwright install chromium   # the browser the screenshot feature launches
+npm install                    # postinstall: prisma generate, prisma db push, playwright install chromium
 ```
+
+`postinstall` also installs the Chromium build that this project's
+`playwright` version expects: the full browser, which the plan runner opens
+headed, and the headless shell, which screenshots and crawls use. It does
+nothing when that build is already installed.
 
 ## Running
 
@@ -164,12 +168,65 @@ curl http://localhost:5180/api/health    # through the Vite proxy
 open http://localhost:5180/
 ```
 
+## Production
+
+```sh
+npm i                # installs everything, including pm2 and the Chromium build
+npm start            # builds the client and server, then starts them under pm2
+npm run logs         # tail the pm2 logs (Ctrl-C to stop tailing)
+npm run stop         # stop the app (pm2 keeps it listed; `npm start` brings it back)
+npm run restart      # restart WITHOUT rebuilding
+```
+
+Then verify:
+
+```sh
+curl http://localhost:3011/api/health
+open http://localhost:3011/
+```
+
+`npm start` runs `build:prod` (`vite build` into `dist/`, then `build:server`)
+and then `pm2 start ecosystem.config.json --env production`. `build:server`
+empties `dist-server/`, compiles the server with `tsc --project
+tsconfig.server.json`, and copies `server/prompts/` next to the compiled
+services, because `scriptGenerationService` reads its prompt file relative to
+its own location. Running `npm start` again while the app is up rebuilds and
+restarts it.
+
+`ecosystem.config.json` runs `dist-server/server/server.js` as the pm2 app
+`easy-test` with `NODE_ENV=production` and `SERVER_PORT=3011`. Both override
+`.env` and `.env.local`, because dotenv never overwrites a key that is already
+set; every other key (`DATABASE_URL`, `SCREENSHOT_DIR`, ...) comes from those
+files as in development. pm2 restarts the app 1 second after a crash, and
+gives up after 10 restarts in a row that each crash within a second of
+starting, such as a missing required setting.
+
+In production one process serves everything: Express serves `dist/` as static
+files, and any other GET or HEAD outside `/api` answers `dist/index.html`, so
+reloading a client route works. Nothing listens on a Vite port.
+
+Things to know:
+
+- **Production and development share the database and the directories.**
+  Both read `DATABASE_URL`, `SCREENSHOT_DIR`, and `ACTION_SCRIPT_DIR` from the
+  same `.env` files. Each server marks every `running` crawl as interrupted
+  when it boots, so starting one ends a crawl the other is running.
+- **Plan runs open a visible Chromium window** (`headless: false`) on the
+  machine pm2 runs on, the same as in development.
+- **The pm2 version is pinned in `package.json`** (`pm2` 7, a dependency). If
+  a pm2 daemon from an older global install is already running, pm2 prints an
+  "In-memory PM2 is out-of-date" warning. Everything still works; `npx pm2
+  update` restarts the daemon on the project's version.
+- **`npm run tsc` also writes `dist-server/`**, without the prompts. Run
+  `npm start` (or `npm run build:server`) before relying on that folder.
+
 ## Ports
 
 `SERVER_PORT=3010`, `VITE_PORT=5180`. Chosen to avoid every other project on
 this machine (new_plex 3001/5174, theerp 3004/3005, apply-for-me 4000/4173,
-forge-gym 6100/6101) and Vite's own default 5173. `3011`/`5181` are reserved for
-a future production pair.
+forge-gym 6100/6101) and Vite's own default 5173. Production (`npm start`) uses
+`3011`, set in `ecosystem.config.json`. `5181` stays reserved and unused,
+because production has no Vite server.
 
 Vite runs with `strictPort: true`, so a collision fails loudly rather than
 silently drifting to another port.
@@ -182,7 +239,7 @@ that is already set. `.env.example` documents every key.
 
 | Key | Used for |
 |---|---|
-| `SERVER_PORT` / `VITE_PORT` | The two dev ports (see above). |
+| `SERVER_PORT` / `VITE_PORT` | The two dev ports (see above). Production's `SERVER_PORT=3011` comes from `ecosystem.config.json`. |
 | `DATABASE_URL` | PostgreSQL connection string. |
 | `SCREENSHOT_DIR` | Where screenshot PNGs are written and served from. Required; default `screenshots` (gitignored). A relative path resolves against the project root; `~` is not expanded. |
 | `ACTION_SCRIPT_DIR` | Where each plan run's folder (`failure.png` when it fails) is written, and where `uploadFile` steps pick files from (its `uploads/` folder). Required; default `action-scripts` (gitignored). Must be **inside the project**, or the server refuses to start. |
@@ -217,29 +274,32 @@ and are not individually `@map`'d, so hand-written SQL must quote them:
 | `dev` | Express + Vite together, log lines prefixed `[server]` / `[vite]` |
 | `dev:server` / `dev:client` | Either half on its own |
 | `stop-dev` | Kill only this project's listeners |
+| `build` | `vite build` into `dist/` |
+| `build:server` | Empty `dist-server/`, compile the server into it, copy `server/prompts/` beside it |
+| `build:prod` | `build`, then `build:server` |
+| `start` | `build:prod`, then start (or restart) the pm2 app `easy-test` on :3011 |
+| `stop` / `restart` / `logs` | `pm2 stop` / `pm2 restart` / `pm2 logs` for `easy-test` |
 | `lint` | `eslint server src` — TypeScript rules plus JSDoc rules (TSDoc style: no `{Type}` braces; `@route` is a registered tag) |
 | `tsc` / `tsc:client` | Typecheck the server / client projects |
 | `test` / `test:backend` / `test:frontend` / `test:watch` | Vitest |
 | `test:coverage` | Vitest with v8 coverage and global thresholds |
 | `db:push` / `db:generate` / `db:studio` | Prisma CLI passthroughs |
 
-## Tripwire for a future production deploy
+## Dependencies
 
-`typescript`, `tsx`, `vite`, and `prisma` currently live in `devDependencies`,
-which is the honest classification for a dev-only project. **Move them back to
-`dependencies` the day a production deploy is added** — a prod install runs
-`npm ci --omit=dev`, but the `postinstall` hook (`prisma generate && prisma db
-push`) still runs and would fail without the Prisma CLI.
+`typescript`, `tsx`, `vite`, and `prisma` are in `dependencies`, because the
+production build and the `postinstall` hook use them. `pm2` is there too, so
+`npm start` uses the project's own pm2 and needs no global install.
 
-`playwright`, `@anthropic-ai/sdk`, and `zod` are already in `dependencies`,
-because the server imports them at runtime (zod is the SDK's peer dependency
-for its structured-output helper). `diff` (jsdiff, ships its own types) is a
-client dependency used by the version comparison page. `@dnd-kit/core`,
+The production install is a full `npm i`, not `npm ci --omit=dev`: the build
+also needs devDependencies (`@vitejs/plugin-react` for `vite build`, and the
+`@types/*` packages for `tsc`).
+
+`playwright`, `@anthropic-ai/sdk`, and `zod` are in `dependencies` because the
+server imports them at runtime (zod is the SDK's peer dependency for its
+structured-output helper). `diff` (jsdiff, ships its own types) is a client
+dependency used by the version comparison page. `@dnd-kit/core`,
 `@dnd-kit/sortable`, and `@dnd-kit/utilities` (drag-and-drop in the plan step
 editor) and `@mui/icons-material` (pinned to v7, matching `@mui/material`;
 imported per icon path) ship their own types. Playwright's browser is not part
-of the npm package: a production machine also needs `npx playwright install
-chromium`.
-
-The production `express.static(dist)` mount and SPA fallback are also omitted; a
-comment in `server/server.ts` marks the exact insertion point.
+of the npm package; `postinstall` installs it (`playwright install chromium`).

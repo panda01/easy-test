@@ -5,7 +5,10 @@ import "./bootEnv.js";
 import express, { type Express } from "express";
 import cookieParser from "cookie-parser";
 import type { Server } from "node:http";
+import path from "node:path";
 import { resolveServerPort } from "./utils/resolveServerPort.js";
+import { describeError } from "./utils/describeError.js";
+import { readSendErrorStatus } from "./utils/readSendErrorStatus.js";
 import { resolveScreenshotDirectory } from "./utils/resolveScreenshotDirectory.js";
 import { resolveActionScriptDirectory } from "./utils/resolveActionScriptDirectory.js";
 import { registerHealthRoutes } from "./controllers/health.js";
@@ -27,14 +30,22 @@ const SCREENSHOT_DIRECTORY = resolveScreenshotDirectory();
 // Same for ACTION_SCRIPT_DIR, which must also sit inside the project so the
 // generated scripts can import 'playwright' from its node_modules.
 const ACTION_SCRIPT_DIRECTORY = resolveActionScriptDirectory();
+// `npm start` runs this process under pm2 with NODE_ENV=production
+// (ecosystem.config.json), and then it serves the built client itself. In
+// development the Vite dev server serves the client and proxies /api here.
+const serverIsInProduction = process.env.NODE_ENV === "production";
+// Where `vite build` writes the client (vite.config.ts `build.outDir`),
+// resolved against the project root like SCREENSHOT_DIR.
+const CLIENT_BUILD_DIRECTORY = path.join(process.cwd(), "dist");
 
 // === Express middleware ===
 // Order is deliberate: body parsing, then cookies, then (once this project has
 // one) auth middleware, then static mounts, then routes.
 //
 // There is no `cors` package anywhere in this codebase and there should not be
-// one: the Vite dev server proxies /api to this process, so the browser only
-// ever sees a single origin.
+// one: the Vite dev server proxies /api to this process, and in production this
+// process serves the built client itself, so the browser only ever sees a
+// single origin.
 //
 // There is also no global error middleware. Each route try/catches and returns
 // `res.status(5xx).json({ error: message })` itself, so a failure reports the
@@ -42,9 +53,11 @@ const ACTION_SCRIPT_DIRECTORY = resolveActionScriptDirectory();
 app.use(express.json());
 app.use(cookieParser());
 
-// DEV-ONLY SCAFFOLD: the production `express.static(dist)` mount goes here,
-// and the production SPA fallback goes after route registration below. Both
-// are omitted until this project grows a production deploy.
+// Production only: the built client's files (index.html, /assets/*). A
+// request that matches no file falls through to the routes below.
+if (serverIsInProduction) {
+  serveBuiltClientFiles(app, CLIENT_BUILD_DIRECTORY);
+}
 
 // === Route registration ===
 // No `express.Router()` anywhere. Each controller exports a
@@ -59,6 +72,71 @@ registerActionScriptRoutes(app, ACTION_SCRIPT_DIRECTORY);
 registerScriptModelRoutes(app);
 registerCrawlRunRoutes(app, SCREENSHOT_DIRECTORY);
 registerCredentialRoutes(app);
+
+// Production only, and after every route so the API always wins: any other
+// page load answers index.html, so react-router can render a client route.
+if (serverIsInProduction) {
+  serveClientRoutesFromIndexHtml(app, CLIENT_BUILD_DIRECTORY);
+}
+
+/**
+ * Serves the Vite production build's files (`index.html`, `/assets/*`) as
+ * static files, so the browser loads the client from this same origin.
+ *
+ * Production only; the module body mounts it before the routes when
+ * NODE_ENV=production. Exported so a unit test can mount it on a fresh app
+ * against a fixture directory.
+ * @param expressApp - The app to mount the static files on
+ * @param clientBuildDirectory - Absolute path of the `vite build` output (`dist/`)
+ */
+export function serveBuiltClientFiles(expressApp: Express, clientBuildDirectory: string): void {
+  expressApp.use(express.static(clientBuildDirectory));
+}
+
+/**
+ * Answers every page load (GET or HEAD) outside `/api` with the built
+ * `index.html`, so a reload or a pasted link on a client route such as
+ * `/websites/:websiteId` reaches react-router instead of Express's 404.
+ * Other methods, and `/api` paths no route matched, fall through to Express's
+ * own 404.
+ *
+ * Production only; the module body mounts it after every route when
+ * NODE_ENV=production. Exported so a unit test can mount it on a fresh app
+ * against a fixture directory.
+ * @param expressApp - The app to mount the fallback on
+ * @param clientBuildDirectory - Absolute path of the `vite build` output (`dist/`)
+ */
+export function serveClientRoutesFromIndexHtml(
+  expressApp: Express,
+  clientBuildDirectory: string,
+): void {
+  expressApp.use((req, res, next) => {
+    const requestIsAPageLoad = req.method === "GET" || req.method === "HEAD";
+    const requestIsForTheApi = req.path === "/api" || req.path.startsWith("/api/");
+    if (!requestIsAPageLoad || requestIsForTheApi) {
+      next();
+      return;
+    }
+
+    /**
+     * Answers the request when index.html could not be sent (no build in
+     * `clientBuildDirectory`, or a read error).
+     * @param sendError - Undefined when the file was sent; otherwise why it could not be
+     */
+    const handleIndexHtmlSent = (sendError?: Error): void => {
+      const fileWasSent = sendError === undefined;
+      if (fileWasSent) return;
+      // The client went away mid-stream: the headers are already out, and
+      // writing a JSON error now would throw ERR_HTTP_HEADERS_SENT.
+      const responseAlreadyStarted = res.headersSent;
+      if (responseAlreadyStarted) return;
+      const sendErrorStatus = readSendErrorStatus(sendError) ?? 500;
+      res.status(sendErrorStatus).json({ error: describeError(sendError) });
+    };
+
+    res.sendFile("index.html", { root: clientBuildDirectory }, handleIndexHtmlSent);
+  });
+}
 
 /**
  * Binds the Express app to a TCP port and logs the resolved URL.
@@ -84,6 +162,9 @@ if (!serverIsUnderTest) {
   // a crawl this process starts. It never rejects (failures are logged).
   await markUnfinishedCrawlRunsInterrupted();
   startListening(app, PORT);
+  if (serverIsInProduction) {
+    console.log(`[server] production: serving the built client from ${CLIENT_BUILD_DIRECTORY}`);
+  }
 }
 
 export { app };

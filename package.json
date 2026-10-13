@@ -15,7 +15,13 @@
     "dev:claude": "npm run dev 2>&1 & DEV_PID=$!; sleep 5; kill $DEV_PID 2>/dev/null; wait $DEV_PID 2>/dev/null; echo \"Dev server exited\"",
     "stop-dev": "./stop-dev.sh",
     "build": "vite build",
-    "postinstall": "prisma generate && prisma db push",
+    "build:server": "rm -rf dist-server && tsc --project tsconfig.server.json && cp -R server/prompts dist-server/server/prompts",
+    "build:prod": "npm run build && npm run build:server",
+    "start": "npm run build:prod && pm2 start ecosystem.config.json --env production",
+    "stop": "pm2 stop easy-test",
+    "restart": "pm2 restart easy-test",
+    "logs": "pm2 logs easy-test",
+    "postinstall": "prisma generate && prisma db push && playwright install chromium",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
@@ -47,9 +53,14 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "playwright": "^1.58.2",
+    "pm2": "^7.0.4",
+    "prisma": "^7.3.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-router-dom": "^7.12.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -69,12 +80,8 @@
     "eslint-plugin-jsdoc": "^65.0.2",
     "globals": "^17.3.0",
     "jsdom": "^27.4.0",
-    "prisma": "^7.3.0",
     "supertest": "^7.2.2",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1",
-    "vite": "^7.3.1",
     "vitest": "^4.0.18"
   }
 }

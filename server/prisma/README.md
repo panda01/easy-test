@@ -24,6 +24,13 @@ The generator is `prisma-client` (the ESM generator), **not** the legacy
 `prisma-client-js`. It emits TypeScript sources rather than writing into
 `node_modules`.
 
+`importFileExtension = "js"` makes those sources import each other with a
+`.js` extension (`./internal/class.js`). Left unset, Prisma infers the
+extension from the root `tsconfig.json` (`moduleResolution: bundler`) and
+writes extensionless imports. tsx resolves those in development, but plain
+Node cannot, so the compiled production server (`dist-server/`) would fail to
+boot with `ERR_MODULE_NOT_FOUND`.
+
 ## Models
 
 | Model | Table | Purpose |

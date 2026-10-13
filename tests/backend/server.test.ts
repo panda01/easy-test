@@ -95,7 +95,12 @@ vi.mock("../../server/services/scriptGenerationService.js", () => mockScriptGene
 vi.mock("../../server/services/actionPlanRunnerService.js", () => mockActionPlanRunnerService);
 vi.mock("../../server/services/scriptModelService.js", () => mockScriptModelService);
 
-import { app, startListening } from "../../server/server.js";
+import {
+  app,
+  startListening,
+  serveBuiltClientFiles,
+  serveClientRoutesFromIndexHtml,
+} from "../../server/server.js";
 import { resolveActionScriptDirectory } from "../../server/utils/resolveActionScriptDirectory.js";
 import { resolveScreenshotDirectory } from "../../server/utils/resolveScreenshotDirectory.js";
 
@@ -405,6 +410,11 @@ describe("server.ts", () => {
     expect(res.status).toBe(404);
   });
 
+  it("does not serve the built client under test (only NODE_ENV=production mounts it)", async () => {
+    const res = await request(app).get("/websites/website-1");
+    expect(res.status).toBe(404);
+  });
+
   it("startListening binds a real socket and hands back a closeable server", async () => {
     const probeApp = express();
     const server = startListening(probeApp, 0);
@@ -423,5 +433,131 @@ describe("server.ts", () => {
         resolve();
       });
     });
+  });
+});
+
+/**
+ * A committed directory standing in for the `vite build` output (`dist/`): an
+ * `index.html` and one file under `assets/`.
+ */
+const FIXTURE_CLIENT_BUILD_DIRECTORY = path.join(
+  process.cwd(),
+  "tests",
+  "backend",
+  "fixtures",
+  "client-build-files",
+);
+
+/** A build directory whose `index.html` is a DIRECTORY, so sending it fails with EISDIR. */
+const FIXTURE_CLIENT_BUILD_WITH_UNREADABLE_INDEX = path.join(
+  process.cwd(),
+  "tests",
+  "backend",
+  "fixtures",
+  "client-build-with-unreadable-index",
+);
+
+/**
+ * Builds an app mounted the way server.ts mounts it under NODE_ENV=production:
+ * the built client's files before the routes, one API route standing in for
+ * the real ones, and the client-route fallback last.
+ * @param clientBuildDirectory - The build directory to serve
+ * @returns The app, ready for supertest
+ */
+function createProductionClientApp(clientBuildDirectory: string): express.Express {
+  const productionApp = express();
+  serveBuiltClientFiles(productionApp, clientBuildDirectory);
+  productionApp.get("/api/health", (_req, res) => {
+    res.json({ status: "ok" });
+  });
+  serveClientRoutesFromIndexHtml(productionApp, clientBuildDirectory);
+  return productionApp;
+}
+
+describe("production client serving", () => {
+  it("serves the built index.html at /", async () => {
+    const res = await request(createProductionClientApp(FIXTURE_CLIENT_BUILD_DIRECTORY)).get("/");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/^text\/html/);
+    expect(res.text).toContain("<title>fixture client build</title>");
+  });
+
+  it("serves a built asset file", async () => {
+    const res = await request(createProductionClientApp(FIXTURE_CLIENT_BUILD_DIRECTORY)).get(
+      "/assets/app.js",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/javascript/);
+    expect(res.text).toContain("fixture client build asset");
+  });
+
+  it("answers a client route with index.html so react-router can render it", async () => {
+    const res = await request(createProductionClientApp(FIXTURE_CLIENT_BUILD_DIRECTORY)).get(
+      "/websites/website-1/actions/action-1",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/^text\/html/);
+    expect(res.text).toContain("<title>fixture client build</title>");
+  });
+
+  it("answers a HEAD request on a client route too", async () => {
+    const res = await request(createProductionClientApp(FIXTURE_CLIENT_BUILD_DIRECTORY)).head(
+      "/websites",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/^text\/html/);
+  });
+
+  it("lets a registered API route answer instead of the fallback", async () => {
+    const res = await request(createProductionClientApp(FIXTURE_CLIENT_BUILD_DIRECTORY)).get(
+      "/api/health",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "ok" });
+  });
+
+  it("leaves an unmatched /api path, and /api itself, to Express's 404", async () => {
+    const productionApp = createProductionClientApp(FIXTURE_CLIENT_BUILD_DIRECTORY);
+
+    const unknownApiResponse = await request(productionApp).get("/api/definitely-not-a-route");
+    const bareApiResponse = await request(productionApp).get("/api");
+
+    expect(unknownApiResponse.status).toBe(404);
+    expect(unknownApiResponse.text).not.toContain("fixture client build");
+    expect(bareApiResponse.status).toBe(404);
+    expect(bareApiResponse.text).not.toContain("fixture client build");
+  });
+
+  it("leaves a non-GET request on a client route to Express's 404", async () => {
+    const res = await request(createProductionClientApp(FIXTURE_CLIENT_BUILD_DIRECTORY)).post(
+      "/websites/website-1",
+    );
+
+    expect(res.status).toBe(404);
+    expect(res.text).not.toContain("fixture client build");
+  });
+
+  it("answers 404 with the send error when there is no build to serve", async () => {
+    const missingBuildDirectory = path.join(FIXTURE_CLIENT_BUILD_DIRECTORY, "no-build-here");
+
+    const res = await request(createProductionClientApp(missingBuildDirectory)).get("/websites");
+
+    expect(res.status).toBe(404);
+    expect(res.headers["content-type"]).toMatch(/^application\/json/);
+    expect(res.body.error).toMatch(/ENOENT/);
+  });
+
+  it("answers 500 with the send error when index.html cannot be read", async () => {
+    const res = await request(
+      createProductionClientApp(FIXTURE_CLIENT_BUILD_WITH_UNREADABLE_INDEX),
+    ).get("/websites");
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: "EISDIR, read" });
   });
 });

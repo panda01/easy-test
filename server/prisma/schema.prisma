@@ -15,10 +15,17 @@ datasource db {
 // `partialIndexes` is a PREVIEW feature. It is what lets `Website.url` be
 // unique among ACTIVE (not soft-deleted) websites only - see the
 // `@@unique(..., where: ...)` on `Website` below.
+//
+// `importFileExtension = "js"` makes the generated files import each other as
+// `./internal/class.js`. Left unset, Prisma infers it from the root
+// tsconfig.json (`moduleResolution: bundler`) and writes extensionless
+// imports: tsx resolves those in dev, but plain Node cannot, so the compiled
+// production server (`npm start`, `dist-server/`) would fail to boot.
 generator client {
-  provider        = "prisma-client"
-  output          = "../generated/prisma"
-  previewFeatures = ["partialIndexes"]
+  provider            = "prisma-client"
+  output              = "../generated/prisma"
+  previewFeatures     = ["partialIndexes"]
+  importFileExtension = "js"
 }
 
 /// A website a user wants to test.

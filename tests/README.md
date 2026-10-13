@@ -37,6 +37,10 @@ mocks the `playwright` module (`chromium.launch` returns a fake browser whose
 controller mocks `../services/playwrightService.js` outright.
 `backend/fixtures/screenshot-files/` holds a tiny committed PNG that the
 Playwright controller spec serves through the real `res.sendFile`.
+`backend/fixtures/client-build-files/` stands in for the `vite build` output
+(`index.html` and `assets/app.js`) in `server.test.ts`'s production client
+serving specs. In `backend/fixtures/client-build-with-unreadable-index/`,
+`index.html` is a directory, so sending it fails with EISDIR.
 `crawlerService.test.ts` mocks `playwright` the same way, but its fake page
 serves a **fake site** (a table of URL → status, final URL, title, snapshot,
 and raw hrefs), and it runs the in-page link scan (`readRawPageLinks`) against

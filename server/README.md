@@ -3,6 +3,14 @@
 Express 5 API, written in TypeScript and run directly with `tsx watch` — there
 is no build step in development.
 
+In production (`npm start`), `build:server` compiles it to `dist-server/` with
+`tsc --project tsconfig.server.json` and copies `prompts/` beside it, and pm2
+runs `dist-server/server/server.js` with `NODE_ENV=production`. In that mode
+`server.ts` also serves the built client: `serveBuiltClientFiles` (the
+`dist/` files, mounted before the routes) and `serveClientRoutesFromIndexHtml`
+(`index.html` for any other GET or HEAD outside `/api`, mounted after the
+routes). See the root README's **Production** section.
+
 ## Layout
 
 | Path | Holds |
@@ -24,8 +32,9 @@ is no build step in development.
 - **Explicit `.js` extensions on relative imports**, even in `.ts` source. The
   server project is `moduleResolution: "nodenext"`.
 - **No `express.Router()`.** See `controllers/README.md`.
-- **No `cors`.** The Vite dev server proxies `/api` to this process, so the
-  browser only ever sees one origin.
+- **No `cors`.** The Vite dev server proxies `/api` to this process, and in
+  production this process serves the built client itself, so the browser only
+  ever sees one origin.
 - **No global error middleware.** Each route try/catches and returns
   `res.status(5xx).json({ error: message })`, so a failure reports the thing
   that actually failed instead of a generic handler's guess.
