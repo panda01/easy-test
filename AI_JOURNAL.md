@@ -4,6 +4,36 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-13 15:25 EDT — pm2 restart limit: `min_uptime: "30s"` so a crash loop actually stops
+
+**Intent:**
+- Make pm2 stop restarting the app when it is stuck in a crash loop, as the user asked.
+- Found on the production server: with `SERVER_PORT: 80`, the app could not bind the port (`EACCES`, it runs as a normal user). Each run lived about 13 seconds, and pm2 restarted it more than 30 times. `max_restarts: 10` never applied.
+
+### Decisions
+- **Made by the user:** apply `min_uptime: "30s"` with the existing `max_restarts: 10` and `restart_delay: 1000`.
+- **Why `max_restarts` alone did nothing** (from `node_modules/pm2/lib/God.js`, `handleExit`): a crash only counts when that run lasted less than `min_uptime` (default 1 second), and only within `min_uptime` x `max_restarts` after the last manual start or restart. The default window was 10 seconds, and the runs lasted 13 seconds, so nothing counted.
+- **Not changed:** the server's own `ecosystem.config.json` (still the user's uncommitted `SERVER_PORT: 80`), the port bind problem itself, and `startListening` ignoring the bind error Express 5 passes to the `listen` callback. The user has not chosen fixes for those yet.
+
+### Files changed
+| File | Change |
+|---|---|
+| `ecosystem.config.json` | Added `"min_uptime": "30s"` to the `easy-test` app. |
+| `README.md` | The production paragraph on restarts now describes the 30-second rule, the 300-second counting window, and that `pm2 list` shows `waiting restart` (not `errored`) once pm2 gives up. |
+| `AI_JOURNAL.md` | This entry. |
+
+No application code or tests were changed.
+
+### Verification
+- **Method:** a throwaway pm2 7.0.4 daemon with its own `PM2_HOME` in `claude_tmp/`, so the user's `~/.pm2` daemon was not touched. It ran a stand-in `.mts` app that exits with code 1 after 2 seconds. The test configs were built from the real `ecosystem.config.json` with `jq`, swapping only the name, script, and interpreter.
+- **Old settings (no `min_uptime`):** 12 restarts in 40 seconds, `unstable_restarts` 0, still restarting. This reproduces the endless loop.
+- **`pm2 start` of the new config on the already-running app:** `min_uptime` became 30000. A plain `npm start` picks up the change, with no `pm2 delete` needed.
+- **New settings, fresh start:** pm2 logged "too many unstable restarts (10). Stopped." after the first run plus 9 restarts (10 starts in the app log). The pid stayed 0, and `restart_time` stayed 9 for more than 30 seconds afterward. Status showed `waiting restart`, because `restart_delay` overwrites `errored` (God.js), while `!overlimit` prevents the restart.
+- **Not verified:** on the production server itself. Nothing there was changed or restarted.
+- **Cleanup:** the test daemon was killed (`pm2 kill`, no process left), and `claude_tmp/pm2-restart-check/` was deleted. No dev servers were started.
+
+---
+
 ## 2026-10-13 11:11 EDT — GitHub Actions CI: all tests + coverage on every push to `master`
 
 **Intent:**

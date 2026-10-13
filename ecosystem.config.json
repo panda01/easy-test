@@ -9,6 +9,7 @@
       },
       "autorestart": true,
       "max_restarts": 10,
+      "min_uptime": "30s",
       "restart_delay": 1000,
       "time": true
     }

@@ -198,8 +198,14 @@ restarts it.
 `.env` and `.env.local`, because dotenv never overwrites a key that is already
 set; every other key (`DATABASE_URL`, `SCREENSHOT_DIR`, ...) comes from those
 files as in development. pm2 restarts the app 1 second after a crash, and
-gives up after 10 restarts in a row that each crash within a second of
-starting, such as a missing required setting.
+gives up after 10 crashes in a row (the first run plus 9 restarts) that each
+come within 30 seconds of starting (`min_uptime`), such as a missing required
+setting or a port it cannot bind. pm2 only counts those crashes during the
+first `min_uptime` x `max_restarts` (300 seconds) after the app was last
+started or restarted by hand, so a crash after that just restarts it, without
+limit. Once it gives up, `npm run logs` shows "too many unstable restarts" and
+the pid is 0, but `pm2 list` still says `waiting restart`, not `errored`,
+because `restart_delay` is set.
 
 In production one process serves everything: Express serves `dist/` as static
 files, and any other GET or HEAD outside `/api` answers `dist/index.html`, so
