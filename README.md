@@ -285,6 +285,19 @@ and are not individually `@map`'d, so hand-written SQL must quote them:
 | `test:coverage` | Vitest with v8 coverage and global thresholds |
 | `db:push` / `db:generate` / `db:studio` | Prisma CLI passthroughs |
 
+## Continuous integration
+
+`.github/workflows/tests.yml` runs on every push to `master`. It sets up Node
+from `engines.node` in `package.json`, runs `npm ci`, then runs
+`npm run test:coverage`. That runs every backend and frontend test and enforces
+the coverage thresholds, so a failing test or a threshold miss fails the run.
+
+The job starts its own throwaway PostgreSQL 18 service and points
+`DATABASE_URL` at it. `npm ci` triggers `postinstall`, and the `prisma db push`
+in it needs a live database. The tests themselves never touch it, because every
+spec mocks the database layer. SQLite was tried in CI and rejected: the schema's
+`String[]` fields are Postgres-only.
+
 ## Dependencies
 
 `typescript`, `tsx`, `vite`, and `prisma` are in `dependencies`, because the

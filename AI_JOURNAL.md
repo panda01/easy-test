@@ -4,6 +4,59 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-13 11:11 EDT — GitHub Actions CI: all tests + coverage on every push to `master`
+
+**Intent:**
+- Run every unit test, backend and frontend, with coverage on each push to `master`, as the user asked.
+- Fail the run when a test fails or a coverage threshold is missed.
+
+### Decisions
+- **Made by the user:**
+  - **Install path:** run a plain `npm ci`, so `postinstall` (`prisma generate`, `prisma db push`, `playwright install chromium`) runs exactly as it does locally.
+  - **CI database:** the user first chose SQLite in CI only, and the project stays on Postgres. That failed (see Verification), and the user then chose a throwaway **Postgres service container**.
+  - **Rejected:**
+    - moving the whole project to SQLite;
+    - SQLite with the `String[]` fields rewritten in CI;
+    - skipping `postinstall` with `npm ci --ignore-scripts`.
+- **Defaults chosen:**
+  - **Trigger:** `push` to `master` only, with no `pull_request` trigger.
+  - **Command:** a single `npm run test:coverage`, because it already runs the whole suite and enforces the thresholds.
+  - **Node version:** `node-version-file: package.json`, which `actions/setup-node` reads from `engines.node` (`=25.4.0`), so the version lives in one place.
+  - **Postgres:** `postgres:18`, to match the local Homebrew version noted in `.env`. A `pg_isready` health check makes the runner wait until it is up.
+  - **Actions:** `actions/checkout@v7` and `actions/setup-node@v7`, the latest releases (v7.0.1 / v7.1.0), with `cache: npm`.
+  - **Not added:** no lint, `tsc`, or coverage-artifact steps, since none was asked for.
+
+### Files changed
+| File | Change |
+|---|---|
+| `.github/workflows/tests.yml` | **New:** workflow `Tests` with one job, `test-with-coverage` on `ubuntu-latest`. It declares a `postgres` service (user/password `postgres`, database `easy_test_ci`, port 5432, health check) and a job-level `DATABASE_URL` pointing at it, which wins over the committed `.env` because dotenv never overwrites a set key. **Steps:** checkout, setup-node, `npm ci`, `npm run test:coverage`. |
+| `README.md` | New **Continuous integration** section after Scripts: what the workflow runs, why it has a Postgres service, and why SQLite was rejected. |
+| `AI_JOURNAL.md` | This entry. |
+
+No application code, tests, or config files were changed.
+
+### Verification
+- **Lint:** `actionlint` 1.7.12 (Docker image `rhysd/actionlint:1.7.12`) reports no problems in the workflow.
+- **Replay method:**
+  - A clean `git archive HEAD` copy plus the new workflow went into `claude_tmp/ci-replay/`.
+  - A throwaway `extractWorkflowSteps.mts` read the YAML with js-yaml. It turned the job's `env` and `run` steps into one bash script, and its `services.postgres` into a `docker run` that waits for the health check.
+  - The steps ran in `node:25.4.0` (Linux arm64), sharing the Postgres container's network so that `localhost:5432` reaches it, as on the runner. checkout and setup-node were stood in for by the copy and the image.
+- **SQLite attempt (failed, now reverted):** `prisma generate` rejected the schema with "can't be a list. The current connector does not support lists of primitive types." The fields were `ActionScript.assumptions`, `ActionScript.contextPageUrls`, `CrawledPage.linkedUrls`, and `CrawledPage.buttonUrls`.
+- **Postgres replay, 12 CPUs / 8 GB (the whole Docker VM):**
+  - `npm ci` passed, and `db push` reported "in sync".
+  - **25 frontend tests failed, almost all timeouts:** 21 hit the 5000ms default and 1 hit 30000ms. All were `user.type`-heavy form specs in `ActionDetailPage`, `ActionPlanEditor`, `CredentialCreatePage`, `CredentialForm`, `WebsiteCreatePage`, and `WebsiteForm`. In isolation on the Mac, the slowest of them take about 1.6s (and `ActionPlanEditor`'s max-steps spec takes 5.7s against its own 30s timeout), so the cause was contention: 11 jsdom workers in 8 GB.
+- **Postgres replay pinned to 4 CPUs (`--cpuset-cpus=0-3`):** the repo is public, so `ubuntu-latest` is a 4-vCPU / 16 GB runner, and `nproc` in the container was 4.
+  - **Result:** exit code 0, 102/102 files and 2181/2181 tests, in 69.5s.
+  - **Coverage:** statements 99.46, branches 98.77, functions 100, lines 99.76, all above 80/70/80/80.
+- **Local `npm run test:coverage`:**
+  - One run, made while the Docker replay was loading the CPU, had **2 failing tests**. Their names were not captured.
+  - Two later runs passed fully, 2181/2181 tests with the same coverage numbers.
+  - **Flake risk:** these form specs are timing-sensitive under heavy CPU load.
+- **Not verified:** a real GitHub Actions run. Nothing was pushed, and the first push to `master` is the real test.
+- **Cleanup:** the replay copy, scripts, logs, and the timing JSON in `claude_tmp/` were deleted. No containers were left running, and no dev servers were started.
+
+---
+
 ## 2026-10-13 10:50 EDT — Production start with pm2: `npm i`, then `npm start`
 
 **Intent:**
