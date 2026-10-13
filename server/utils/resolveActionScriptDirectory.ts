@@ -2,17 +2,16 @@ import path from "node:path";
 import { resolveConfiguredDirectory } from "./resolveConfiguredDirectory.js";
 
 /**
- * Resolves the directory script runs are written to, from `ACTION_SCRIPT_DIR`.
- * Each run gets its own folder in it holding `script.mjs` and, when the script
- * fails, `failure.png`.
+ * Resolves the directory plan runs are written to, from `ACTION_SCRIPT_DIR`.
+ * Each run gets its own folder in it holding, when the run fails,
+ * `failure.png`; "Upload file" steps pick their files from its `uploads/`
+ * folder.
  *
  * Same rules as `resolveConfiguredDirectory` (required; relative values
  * resolve against the project root), plus one more: the directory must sit
- * INSIDE the project root. Generated scripts `import { chromium } from
- * 'playwright'`, and Node resolves that bare import by walking up from the
- * script file's own folder looking for `node_modules/playwright` - so a
- * script written outside the project could not find Playwright at all.
- * `NODE_PATH` does not help: ES modules ignore it.
+ * INSIDE the project root. That rule dates from generated `.mjs` scripts,
+ * which imported `playwright` from this project's `node_modules`; it is kept
+ * so run files and the uploads folder stay inside the project.
  *
  * Pure: it only reads the environment and does path math.
  * @returns The absolute path of the action script directory

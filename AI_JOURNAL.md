@@ -4,6 +4,379 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-12 17:42 EDT — Run status icons: passed / failed / not run yet, on the website's actions and on each version
+
+**Intent:**
+- Show at a glance whether an action's script works, without opening its runs.
+- **Icons:** a green check when the latest run passed, a red X when it failed, and a yellow exclamation when there are no runs yet.
+
+### Decisions (made by the user)
+- **Placement:** both lists.
+  - **The website page's "Actions" list:** one icon per action, judged by the action's **newest version**.
+  - **The action page's "Versions" list:** one icon per version.
+- **Mixed runs:** the **most recent run** decides. A pass after a failure is green.
+- **No versions:** an action with no versions at all shows the **yellow exclamation**.
+
+### Defaults chosen in the approved plan
+- **Icons:**
+  - `CheckCircle` in the theme's success color.
+  - `Cancel` (circled X) in the error color.
+  - `Error` (circled !) in MUI `amber[400]`. The theme's `warning` color is orange in dark mode, and the user asked for yellow.
+- **Accessible names (also the hover titles):** "Latest run passed", "Latest run failed", and "Not run yet", via `titleAccess`. The icon sits before the row's text, so a row's accessible name now starts with its status, e.g. "Not run yet Version 2 …".
+- **How the data arrives:** the server sends a small latest-run summary. No extra requests are made and the schema is unchanged, so no `db push` or `generate` was needed.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/services/dbService.ts` | **New:** private `LATEST_ACTION_SCRIPT_RUN_QUERY` (the newest active run, `take: 1`, `select { id, succeeded, createdAt }`); private `ACTION_SCRIPT_INCLUDE` (the refinement include plus `runs`); exported `LatestActionScriptRun`, `NewestActionScriptSummary`, `ActionWithNewestScript`; private `ACTION_LIST_INCLUDE` (the credential plus the newest active version, `take: 1`, with its newest run), `ActionListRow`, and `toActionWithNewestScript`. **Changed:** the private type `ActionScriptWithRefinement` was renamed to `ActionScriptRow`, the payload of the combined include. `ActionScriptWithPlan` drops `runs` and gains `latestRun`. `toActionScriptWithPlan` turns the zero-or-one `runs` list into `latestRun`. `listActionScriptsForAction`, `findActionScriptForAction`, `createActionScriptForAction`, and `createRefinedActionScriptForAction` use `ACTION_SCRIPT_INCLUDE`. `listActionsForWebsite` returns `ActionWithNewestScript[]`, each action with `newestScript` (null without versions). JSDoc updated. |
+| `server/controllers/actions.ts` | JSDoc only: the list route documents `newestScript`. |
+| `server/controllers/actionScripts.ts` | JSDoc only: the registrar and the scripts list route document `latestRun`. |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/utils/describeScriptRunStatus.ts` | **New:** `ScriptRunStatus` (`passed`, `failed`, or `notRun`), `LatestRunOutcome`, `findScriptRunStatus(latestRun)`, and `describeScriptRunStatus(status)`. |
+| `src/components/ScriptRunStatusIcon.tsx` | **New** component (with `ScriptRunStatusIconProps` and `NOT_RUN_YET_COLOR`): the icon for a version's latest run. |
+| `src/components/ActionScriptsSection.tsx` | Each version row starts with a `ListItemIcon` holding `ScriptRunStatusIcon` (from `script.latestRun`). JSDoc updated. |
+| `src/components/WebsiteItemListSection.tsx` | New `itemsAreActions`. Actions get a `ListItemIcon` with `ScriptRunStatusIcon` (from `item.newestScript?.latestRun ?? null`); use cases get none. JSDoc updated. |
+| `src/hooks/useActionScripts.ts` | **New:** `LatestActionScriptRunRecord`, `FinishedActionScriptRun`, `ActionScriptRecord.latestRun`, and `recordFinishedRun` (a per-visit map from script id to the run just recorded, laid over `scripts` by `withLatestRunRecordedThisVisit`). `ActionScriptsState` and JSDoc updated. |
+| `src/hooks/useWebsiteItems.ts` | **New** `NewestActionScriptRecord` and `WebsiteItemRecord.newestScript?` (action list only). |
+| `src/pages/ActionDetailPage.tsx` | `runSelectedScript` also calls `recordFinishedRun(finishedRun)`, so the version's icon updates at once. JSDoc updated. |
+
+### Files changed — docs
+`server/services/README.md`, `server/controllers/README.md`, `src/README.md`, `src/components/README.md`, `src/hooks/README.md`, and `src/pages/README.md`.
+
+### Tests (written after manual verification; no test removed or skipped)
+**Backend:**
+- `services/dbService.test.ts` (107, 3 new):
+  - **Fixture changes:** the result fixture carries `latestRun: null`, and the new `toPrismaActionScriptRow` builds the Prisma row (`runs` list) from it. Include asserts now expect `ACTION_SCRIPT_INCLUDE` / `ACTION_LIST_INCLUDE`.
+  - **New:** latest run passed, failed, or none, for list and find (never `runs`); `newestScript` for passed, failed, and not run, and null without versions (never `scripts`).
+- `api/actionScripts.test.ts` (1 new: `latestRun` passes through, no `runs`; `foundScript` gains `latestRun: null`).
+- `api/actions.test.ts` (1 new: `newestScript` passes through).
+
+**Frontend:**
+- **New files:** `describeScriptRunStatus.test.tsx` (4) and `ScriptRunStatusIcon.test.tsx` (3: icon, color class, the amber style, and the accessible name).
+- **New tests:**
+  - `ActionScriptsSection`: an icon per version from its own run.
+  - `WebsiteItemListSection`: icons only on actions (both kinds), and passed, failed, not run, and no versions.
+  - `useActionScripts`: `recordFinishedRun` overlays the run without refetching.
+  - `ActionDetailPage`: after "Run script", the version's icon turns red while the other version keeps its green.
+- **Updated, because rows now start with the icon's name:**
+  - `ActionScriptsSection` and `ActionDetailPage`: textContent anchors changed `^Version N` → `^Not run yetVersion N`, and button names `^Version 1` → `^Not run yet Version 1`.
+  - `WebsiteDetailPage`: three `getByRole("img")` became `getByRole("img", { name: /^Screenshot of / })`, since the action icons are images too.
+- `support/frontendTestHelpers.tsx`: `buildActionScriptRecord` defaults `latestRun: null`.
+
+### Verification performed
+- **Type checks and lint:** `npm run tsc`, `npm run tsc:client`, and `npm run lint` are clean.
+- **Manual end-to-end check** (the manual-verifier agent, Playwright, dev servers started for the check and stopped after; the user had stopped their own first): **VERIFIED**.
+  - The health check and the homepage were OK.
+  - **API:** `newestScript` and `latestRun` match the database, and no `runs` key is answered.
+  - **Website page:** every action's icon matches its newest version, including a never-run newest version (yellow), and the throwaway action with no versions (yellow, rgb(255,202,40)). The use cases list has no icons.
+  - **Action page:** every version's icon matches its own latest run.
+  - **Run updates:** running a version whose icon was red turned it green in place without a reload, and the other versions were unchanged.
+  - **Cleanup:** the throwaway action was deleted; the only lasting data change is two additive runs on an existing action.
+  - **Not exercised live:** a brand-new version created through the editor. Convert was off limits, and a new action has nothing to edit; the unit tests and the API cover `latestRun: null` on create.
+- **`npm run test:coverage`:** 102 files, **2171 tests pass**. Coverage is 99.59% statements, 98.99% branches, 100% functions, and 99.86% lines (thresholds 80/70/80/80). Every changed or new file has full line coverage, and all new files have full branch coverage.
+  - **Flakiness seen (not caused by this change):**
+    - One run had a 401-for-404 in a refinements route test. That file then passed 3 out of 3 times alone.
+    - Another run had four 5 s timeouts in `ActionPlanEditor`, `CredentialCreatePage`, and `CredentialForm`, which passed alone.
+    - The next full run was clean.
+
+---
+
+## 2026-10-12 16:24 EDT — Refine a failed run: the same model fixes the plan from the run's evidence, saved as a new version with a refinement record (built by three agents in parallel)
+
+**Intent:**
+- **A Refine feedback loop for failed runs.** A failed run (one with an error) of a version Claude wrote now shows a **Refine** button and an optional **Note for Claude**.
+- **What Refine sends.** It sends **the same model and effort that wrote the version**:
+  - the run's error, failed step, step log, **failure screenshot** (as an image), and a **snapshot of the failing page**;
+  - the version's plan, summary, and assumptions;
+  - the same crawled pages, and the note.
+- **The result.** Claude's reply is saved as a **new, immutable version** ("Refined from Version K").
+- **Recording that a version was derived from an earlier attempt.** A new `ActionScriptRefinement` row links the source version, the failed run, and the new version.
+- **The runner now records the failing page.** A failed run stores the URL and the aria snapshot of the page it failed on, so Claude sees the exact roles and names there.
+
+### Decisions (made by the user)
+- **Edited versions:** Refine is **hidden** on runs of versions saved from the step editor (`modelId` null), and the server refuses them with 409.
+- **Lineage:** a separate **refinement table** that links source version → failed run → new version. `editedFromActionScriptId` is unchanged.
+- **One source of truth** (from the user's plan review): the refinement row stores only facts that exist nowhere else:
+  - the note;
+  - the refine call's token usage;
+  - `screenshotWasSent`.
+
+  The other facts are read from where they already live:
+  - the error and failed step: the run row;
+  - the model and effort: the refined version's row;
+  - "a failing-page snapshot was sent": `run.failingPageAriaSnapshot !== null`.
+- **Extra context:** the **failing page snapshot** (a runner change) and the **optional user note**.
+- **Parallel build with at most three agents:** shared working tree, strictly separate file ownership, no git worktrees.
+
+### Defaults chosen in the approved plan
+- **Snapshots:** the refined version copies, and shows Claude, the SOURCE version's website and action snapshots and its credential name. It shows "Out of date" if the action changed since.
+- **Allowed origins:** taken from the current website and credential.
+- **Pages:** the source version's `contextPageUrls` from the latest crawl, falling back to `selectRelevantCrawledPages`.
+- **Effort:** the source version's effort if the model still offers it, else `chooseEffortForModel`.
+- **Retired model:** 409.
+- **Missing screenshot file:** the refine goes ahead without the image, recorded as `screenshotWasSent: false`.
+- **Note:** trimmed, blank becomes null, at most 2000 characters.
+- **When rows are written:** a refinement row only on success, in the same nested write as the new version.
+- **Double refines:** a per-run in-flight guard answers 409.
+- **Shared prompt:** convert and refine share ONE system prompt (`actionPlanGuidelines.md`) and the same structured-output schema, so they share the prompt cache. Refine instructions are a new section of that prompt, and the run evidence goes in the user message.
+
+### How it was built
+1. **Step 0 (me):** the schema, then `db push` / `generate`, the `selectRelevantCrawledPages` exports, and contract stubs.
+2. **Wave 1, source only, in parallel:**
+   - **A:** runner, Claude call, and prompt.
+   - **B:** data, validation, and route.
+   - **C:** frontend.
+3. **Real-API caching check, then manual end-to-end verification** (manual-verifier agent).
+4. **Wave 2:** the same three agents wrote the tests and fixed lint.
+5. **Final checks, READMEs, and this journal entry (me).**
+
+### Files changed — schema and data
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **New model `ActionScriptRefinement`** (`action_script_refinements`): `websiteId`, `actionId`, `sourceActionScriptId`, `actionScriptRunId`, `refinedActionScriptId @unique`, `note`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `screenshotWasSent`, timestamps, `deletedAt`. Relations `RefinementSourceScript` / `RefinementResultScript`, the run, the website, and the action. Indexes on websiteId, actionId, sourceActionScriptId, and actionScriptRunId. **`ActionScriptRun`:** `failingPageUrl String?`, `failingPageAriaSnapshot String?`, and `refinements`. **`ActionScript`:** `refinement` and `refinementsOfThisVersion`. **`Website`:** `actionScriptRefinements`. **`Action`:** `scriptRefinements`. Doc comments updated on all four. Formatted with `prisma format`. **`npx prisma db push` and `npx prisma generate` were run.** The change is additive (a new table and nullable columns), so no data was lost. |
+| `server/services/dbService.ts` | **New:** `ActionScriptRefinementInput`; the re-exported `ActionScriptRefinement` type; the private `ACTION_SCRIPT_REFINEMENT_INCLUDE` (the refinement with `deletedAt: null`, plus `actionScriptRun: { select: id, errorMessage, failedStepNumber, timedOut, failingPageAriaSnapshot }`); the private `ActionScriptWithRefinement`; and `createRefinedActionScriptForAction`, one atomic nested `actionScript.create` that makes the version AND its refinement. **Changed:** `ActionScriptWithPlan` now carries `refinement`. `toActionScriptWithPlan`, `listActionScriptsForAction`, `findActionScriptForAction`, and `createActionScriptForAction` use the include. `ActionScriptRunInput` gains the two failing-page fields. `softDeleteWebsite` and `softDeleteActionForWebsite` also stamp refinements. Docs updated. |
+| `server/utils/validateRequestBodies.ts` | **New:** `MAX_REFINE_NOTE_LENGTH = 2000`, `ActionPlanRefineInput`, and `validateActionPlanRefineInput`. An `undefined` body means no note, and a `null` or other non-object body gives 400. It returns "The note must be text" and "The note must be at most 2000 characters". |
+| `server/utils/selectRelevantCrawledPages.ts` | **Exported** `capSnapshot`. **New:** `selectContextPagesByUrl(pages, pageUrls)`, which keeps the given order, skips missing URLs, and applies the same caps. **New private** `fitPagesIntoContextBudget`, shared by both selectors. `selectRelevantCrawledPages` behaves the same. |
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/services/actionPlanRunnerService.ts` | **`ActionPlanRunResult`:** gains `failingPageUrl` and `failingPageAriaSnapshot`. **New private pieces:** `FailureEvidence`, `NO_FAILURE_EVIDENCE`, `BLANK_PAGE_URL`, `readFailingPageUrl` (scrubbed; `about:blank`, empty, or a throw gives null), `takeFailingPageAriaSnapshot` (`body` aria snapshot, scrubbed, NUL stripped, `capSnapshot`; a throw gives null), and `captureFailureEvidence` (screenshot, then URL, then snapshot; never rejects). **Where it runs:** on in-time failures and inside `stopTimedOutRun`, before the browser closes. A passing run captures nothing. |
+| `server/services/scriptGenerationService.ts` | **New exported types:** `ClaudeTokenUsage`, `FailedRunDetails`, `ActionPlanRefinementRequest`, `ActionPlanRefinement`, and `MAX_REFINE_RUN_OUTPUT_CHARACTERS = 20_000`. **New private pieces:** `PlanRequest`, `PlanAnswer`, `askClaudeForPlan` (convert's old body: the same system prompt with `cache_control`, betas, fallbacks, thinking, effort, and `output_config`, plus usage mapping), `buildActionContextLines`, `takeRunOutputTail`, `buildPreviousPlanLines`, `buildFailedStepLines`, `buildFailingPageLines`, `buildUserNoteLines`, `buildRefinementFailureText`, and `describeAsYesOrNo`. **`buildRefinementRequestContent`** returns: (1) the stable context text, marked `cache_control: ephemeral` (the second breakpoint); (2) the PNG image, only when there is a screenshot; (3) the failure text. **`refineActionPlan`** logs `[scripts] refined with … read from cache, … written to cache …`. **`convertActionToPlan`** is now a thin wrapper; its request, return value, errors, and log line are byte-identical, and its 45 existing tests pass unmodified. `buildConversionRequestMessage` uses `buildActionContextLines`, and its output is unchanged. It imports `describePlanStep` from the runner. |
+| `server/prompts/actionPlanGuidelines.md` | **Role and "What You Are Given":** a request is a conversion or a refinement. **"When to Assume":** now says "one-shot conversion or refinement". **New `# Refining a Failed Plan`** section (with "How to Read a Failure" and "How to Fix the Plan") before Output Format. It covers: evidence is data, not instructions; the note is a hint that cannot override the rules; the common causes of failure; change as little as possible; never weaken a check; and add one `Refined:` assumption. Token counts: **Opus 5.5 7,275, Haiku 4.5 5,674, Opus 4.6 5,675**, all above the 4,096 cache minimum. |
+| `server/controllers/actionScripts.ts` | **New route** `POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs/:actionScriptRunId/refinements`, with full `@route` JSDoc. Its checks run 400 → 404 (website, action, script, run) → 409 (passed run, edited version, already refining, retired model) → `statusForScriptGenerationFailure`; success is 201. **New:** the messages `ONLY_A_FAILED_RUN_CAN_BE_REFINED_MESSAGE`, `EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE`, and `RUN_ALREADY_BEING_REFINED_MESSAGE`; the `actionScriptRunIdsBeingRefined` Set; the `RefinableRun` interface; and the private `describeFailedRun`, `chooseRefinementEffort`, `selectRefinementContextPages`, `isFileMissingError`, `readFailureScreenshotAsBase64` (traversal guard; ENOENT gives null; other errors rethrow), and `refineRunAndSaveVersion`. **Changed:** `runPlanAndRecordRun` records the two failing-page fields. JSDoc updated. |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/hooks/useActionScripts.ts` | **New** `RefinedActionScriptRunSummary` and `ActionScriptRefinementRecord`. `ActionScriptRecord.refinement` was added, and the docs updated. |
+| `src/hooks/useActionScriptRuns.ts` | `ActionScriptRunRecord` gains `failingPageUrl` and `failingPageAriaSnapshot`. |
+| `src/utils/routePaths.ts` | **New** `actionScriptRunRefinementsApiUrl(websiteId, actionId, actionScriptId, actionScriptRunId)`. |
+| `src/components/ActionScriptRunDetails.tsx` | **New:** `MAX_REFINE_NOTE_LENGTH`, the private `noteToSend`, and the props `versionCanBeRefined`, `isRefining`, `isRunning`, `refineErrorMessage`, `onRefine(failedRun, note)`. **The Refine area** shows only when `run.errorMessage !== null && versionCanBeRefined`. It has a "Note for Claude (optional)" field (maxLength 2000) and a Refine button that reads "Refining…" and is disabled while refining or running. While refining it shows a `LinearProgress` ("Refining script") and "This can take a few minutes.". "Could not refine: …" shows only after this run's details tried. **Also:** a "Failing page: <url>" caption. |
+| `src/components/ActionScriptRunsSection.tsx` | Passes the refine props through. `ActionScriptRunDetails` is keyed by run id, so the note and error reset per run. |
+| `src/pages/ActionDetailPage.tsx` | A fourth `useJsonMutation`. **New** `refineFailedRun(failedRun, note)` (POSTs `{ note }`, then `addCreatedScript` and `setPickedScriptId`), `handleRefine`, and `versionCanBeRefined = selectedScript.modelId !== null`. |
+| `src/components/ActionScriptDetails.tsx` | **New prop** `refinedFromVersionNumber`. **New private** `describeSourceVersion`, `describeWhatClaudeWasSent`, `describeRefinementTokenUsage`, and a `RefinedFromDetails` component, which shows the source version, the failed outcome, the error, "Your note", "Sent to Claude", and "Tokens used". `describeVersionOrigin` checks edited → refined ("Refined <date> from Version K · <model>") → generated. |
+| `src/components/ActionScriptsSection.tsx` | **Removed** `editedFromVersionNumberOf`; **added** `versionNumberOfScriptId` and `describeSourceVersionOf`. `describeVersionSource` shows "Refined from Version K · <model>". `refinedFromVersionNumber` is passed down. |
+| `src/pages/ActionScriptComparePage.tsx` | `describeVersion` shows "refined · <model>". The empty state now reads "Convert, refine, or edit …". |
+
+### Files changed — docs
+`README.md`, `server/prisma/README.md`, `server/services/README.md`, `server/controllers/README.md`, `server/utils/README.md`, `server/prompts/README.md`, `src/components/README.md`, `src/hooks/README.md`, `src/pages/README.md`, and `tests/README.md`.
+
+### Tests (written in wave 2, after manual verification; no test removed or skipped)
+**Backend:**
+- `actionPlanRunnerService.test.ts` (110, 13 new): the evidence order on timeout and on in-time failure; nulls on a passing run; scrubbing, NUL stripping, and the cap; `about:blank` and empty URLs; snapshot and URL reads that throw. The one whole-result `toEqual` was updated for the new fields.
+- `scriptGenerationService.test.ts` (80, 35 new): `buildRefinementRequestContent` (block order and cache marker, the image only with a screenshot, a byte-identical context block across runs, the step, tail, failing-page, and note lines) and `refineActionPlan` (settings identical to convert's, usage, the log line, every error). The convert tests are unmodified.
+- `api/actionScripts.test.ts` (119, 44 new): every refine status in order; exact `refineActionPlan` and save arguments; the page and effort fallbacks; the screenshot read (real fixture PNG as base64, missing file, traversal, absolute path, `EISDIR` 500); the in-flight guard with a deferred and its release; the run route recording the new fields.
+- `dbService.test.ts` (104, 6 new, plus updated include and cascade asserts).
+- `server.test.ts` (17, 1 new).
+- `validateRequestBodies.test.ts` (200, 19 new).
+- `selectRelevantCrawledPages.test.ts` (38, 10 new).
+
+**Frontend:**
+- `ActionScriptRunDetails` (14, 8 new).
+- `ActionScriptRunsSection` (10, 4 new).
+- `ActionScriptDetails` (26, 10 new).
+- `ActionScriptsSection` (14, 1 new).
+- `ActionScriptComparePage`: 1 new, and the empty-state wording test updated to the new text.
+- `routePaths`: 1 new.
+- `ActionDetailPage` (37, 3 new): refine success with a deferred POST, refine failure, and hidden on an edited version.
+- `support/frontendTestHelpers.tsx`: `buildActionScriptRefinementRecord`, plus defaults for the new fields.
+
+### Verification performed
+- **Type checks and lint:** `npm run tsc`, `npm run tsc:client`, and `npm run lint` are clean.
+- **`npm run test:coverage`:** 100 files, **2153 tests pass**. Coverage is 99.58% statements, 98.98% branches, 100% functions, and 99.86% lines (thresholds 80/70/80/80).
+  - **Flakiness seen (not fixed; reported to the user):** across 7 runs, one run had 12 failures in tests heavy on typing or interaction — `ActionDetailPage` edit and refine, `CredentialForm`, `CredentialCreatePage`, `WebsiteForm` — and another had 1 failure in `api/credentials.test.ts` (a 404 with an empty body). The other 5 runs passed. Those form and credentials files are untouched by this feature. Run alone, the refine page test takes about 0.7 s.
+- **Real-API caching** (`claude_tmp/checkRefineCaching.mts`, Opus 5.5, low effort):
+  - convert wrote 9,519 tokens to the cache;
+  - refine #1 **read 9,519** (the system prompt, shared with convert) and wrote 376 (the context block);
+  - refine #2 **read 9,895** and wrote 0.
+- **Manual end-to-end check** (manual-verifier agent, throwaway `npx playwright` scripts in `claude_tmp/verify/refine*.mts`, plus `POST /__rename-account` and `/__restore-account` added to the fixture site) — **VERIFIED**:
+  - **Startup:** the health check and homepage were OK.
+  - **Version 1 fails:** after the rename, Version 1 failed at step 3. The run stored `failingPageUrl` `http://localhost:3099/account` and a snapshot showing `heading "Profile"` and `Signed in as ••••••`, with no username or password.
+  - **Refine produced Version 2:** "Refined … from Version 1 · Claude Opus 5.5 (claude-opus-5-5) · high effort", with the "Refined from" block. Its `refinement` had `screenshotWasSent: true`, the note, tokens 2408 / 9519 / 1292 / 989, and the joined run error and step 3. Its model and effort matched Version 1's.
+  - **Database:** the `action_script_refinements` columns are exactly the planned ones.
+  - **Version 2 passed,** and no Refine button showed.
+  - **An edited Version 3 failed,** and no Refine button showed.
+  - **Direct API checks:** passing run 409, edited version 409, a 2001-character note 400, a numeric note 400, a missing run 404.
+  - **The compare page** shows "refined".
+  - **Server log:** one `[scripts] refined …` line, matching the database row.
+  - **No console errors.** Screenshots are in `claude_tmp/verify/refine-*.png`.
+  - **Clean-up:** dev servers and the fixture stopped; ports 5180, 3010, and 3099 are free. Orphaned `tsx watch` parents from earlier sessions were found and killed.
+- **Data left in the dev database:** the verifier's "Open account settings" action on "Login fixture" (3 versions, 1 refinement, its runs).
+- **After verification, one source change:** Agent C changed `ActionScriptRunDetails`' `onRefine` to `(failedRun, note)` and removed an unreachable guard in `ActionScriptRunsSection`. `ActionDetailPage`'s refine tests cover that path through the real components.
+
+---
+
+## 2026-10-09 11:02 EDT — Removed the `pause` step action from plans, the LLM prompt, the runner, and the step editor
+
+**Intent:**
+- Plans can no longer contain a `pause` step. That step called Playwright's `page.pause()` and blocked a run until a person pressed Resume.
+- `pause` was removed from the allowed actions, from the JSON schema Claude's structured output is held to, from the system prompt, from the runner's `switch`, and from the step editor's Action dropdown.
+- Saved plans that used it were deleted.
+
+### Decisions (made by the user)
+- **Existing pause plans:** hard-delete every plan version that has a pause step, plus its runs and their failure-screenshot folders.
+- **Human-only steps:** when a use case needs a step only a person can do (a two-factor code, an emailed link), Claude writes the steps a user would take anyway. It records in `assumptions` which step will likely fail and why.
+- **Bot checks:** assume runs always get past Cloudflare and never meet a CAPTCHA. The user's words: "there will be few scenarios where we can't control the inputs".
+
+### Data cleanup (run once, before the code changes)
+- `npx prisma db execute --stdin`, in one transaction:
+  - `DELETE FROM action_script_runs WHERE "actionScriptId" IN (SELECT id FROM action_scripts WHERE plan->'steps' @> '[{"action":"pause"}]');`
+  - `DELETE FROM action_scripts WHERE plan->'steps' @> '[{"action":"pause"}]';`
+- **Deleted:** 2 plan versions (`cmux7kr480004n8s7v10gq48g`, `cmux7p7zn0006n8s7y8r94dd3`). Both belonged to the action "Create Class" (`cmust3kbk000e8muhdm14fxne`), which now has no versions.
+- **Also deleted:** their 3 runs (`cmux7mzqg0005n8s7c36s6h5c`, `cmux7vvg70007n8s7doopcg80`, `cmux8scas0008n8s7vjseu03h`).
+- **Run folders removed:** `action-scripts/cmureoluv0000unuh986liihx/{3be229ee-1ff6-49cc-808d-cf617e1ae4e1, 026177e6-66ae-403b-8b1a-1aede5b062f0, 4640c24c-5e42-4944-a4f2-d95595835dde}`. Each held only `failure.png`.
+- **Result:** 6 plan versions and 5 runs remain, and none has a pause step.
+- The Prisma schema did not change, so there was no `db push` / `generate`.
+
+### Files changed
+| File | Change |
+|---|---|
+| `server/utils/actionPlanSchema.ts` | Removed `"pause"` from `PLAN_STEP_ACTIONS` and its entry from `PLAN_STEP_RULES`. `PlanStepAction`, `PlanStepSchema`, and the structured-output JSON schema built from them in `scriptGenerationService.ts` follow automatically. The `"message"` value kind stays for `log`. |
+| `server/services/actionPlanRunnerService.ts` | Removed `case "pause"` from `describePlanStep` and from `runPlanStep` (the `page.pause()` call). `runActionPlan`'s JSDoc no longer mentions a waiting pause. |
+| `server/prompts/actionPlanGuidelines.md` | **Core Rule:** write the step a user would take and note the likely failure in `assumptions`. **Logging In:** a missing username/password gets obviously fake values plus an assumption. **Step catalog:** `pause` row removed. **"When to Pause or Assume" → "When to Assume":** never plan for Cloudflare or CAPTCHAs; for rare human-only steps, write them anyway and record which step will likely fail. Still ~4.39k tokens on Haiku 4.5 / Opus 4.6, so above the 4,096-token cache minimum. |
+| `server/services/README.md` | The time-limit note no longer mentions `page.pause()`. |
+| `src/utils/actionPlanSteps.ts` | Removed `"pause"` from `PLAN_STEP_ACTIONS`, its `PLAN_STEP_RULES` entry ("Pause for a person"), and its `describePlanStep` case. The editor's Action dropdown (`ActionPlanStepFields.tsx`) maps this list, so the option is gone without a component change. |
+| `tests/backend/utils/actionPlanSchema.test.ts` | The missing-fields structure test uses `log`. Pause rows were removed from the "rejects a target", "requires a value", "rejects a blank value", and "plain text" tables. **New:** "rejects the removed pause action as an unknown action" (`parseActionPlan`) and "rejects an otherwise valid plan that still has a removed pause step" (`validateActionPlan`). |
+| `tests/backend/services/actionPlanRunnerService.test.ts` | Removed `pause` from `mockPage` and `beforeEach`, removed the "pause opens the Playwright Inspector" test, and removed both pause `describePlanStep` cases. **The 5-minute time-limit tests were kept**, with `PAUSE_PLAN` → `WAIT_FOR_URL_PLAN` and `holdPauseUntilBrowserCloses` / `PendingPause` → `holdWaitForUrlUntilBrowserCloses` / `PendingWaitForUrl`. They now hold a pending `page.waitForURL()` until the browser closes. |
+| `tests/frontend/actionPlanSteps.test.tsx` | Removed the pause `describePlanStep` row. The "message" acceptance check uses `log`. The "keeps the value" `changePlanStepAction` case re-picks `log` (every value kind except "none" now belongs to one action). |
+
+### Verification
+- `npm run tsc`, `npm run tsc:client`, and `npm run lint` are clean.
+- `npm run test:coverage`: 100 files, 1997 tests pass. Coverage is 99.55% statements, 98.92% branches, 100% functions, and 99.85% lines.
+- `claude_tmp/countPromptTokens.mts`: Opus 5.5 5599, Haiku 4.5 4389, Opus 4.6 4390.
+- `claude_tmp/checkPlanCaching.mts`: two live conversions returned valid plans. The second read 7843 tokens from the cache.
+- Manual check with a Playwright script (manual-verifier agent):
+  - `/api/health` returned 200 and the homepage loaded.
+  - "Create Class" shows "No scripts yet" with no console errors.
+  - The step editor's Action dropdown on "Teacher login" lists 17 actions, without "Pause for a person".
+  - POSTing an edit that contains a pause step returns 400 ("Invalid option: expected one of ...").
+  - The dev servers were stopped.
+
+---
+
+## 2026-10-03 19:10 EDT — Actions: credentials, JSON step plans, step editor, switch-based runner (tests by multiple agents)
+
+**Intent:**
+- **Actions can run as a credential.** An action can be linked to one of its website's credentials. Each run logs in first with the crawler's login routine, then runs the plan.
+- **"Convert to script" now asks Claude for a JSON step plan** instead of a Playwright `.mjs` file: `{ name, startUrl, steps: [{ action, target, value }] }`, using only the pre-approved actions from the old guidelines.
+- **Claude is shown the aria snapshots of the crawled pages most relevant to the action.** They are picked with the user's suggested word search: the most repeated words and phrases of the title and description, stop words removed.
+- **Plans are editable in a step editor.** Steps can be reordered (drag or up/down), added, changed, or removed, and the result is saved as a new version.
+- **"Run script" turns the JSON into Playwright calls through an exhaustive `switch`.** Nothing from a plan is ever turned into code, so a step outside the allowed list cannot run.
+
+### Decisions (made by the user)
+- **Credential use:** auto-login first with the crawler's routine, and the `{{credential.username}}` / `{{credential.password}}` placeholders stay available in `fill` steps.
+- **Edits** save a NEW immutable version ("Edited from Version K").
+- **Old scripts are hard-deleted:** the `code` / `ruleViolations` / `exitCode` / `exitSignal` columns, `findScriptRuleViolations`, and `scriptRunnerService` (and their tests) are removed.
+- **Reordering:** dnd-kit drag handles plus up/down buttons. `@mui/icons-material` was installed for the icons.
+- **Run engine:** the in-process switch runner, not generated `.mjs`.
+- **Relevant pages:** the user's word-search approach, with no second LLM call.
+- **End-to-end driver:** the Playwright MCP hung (it runs in `--extension` mode), so the user chose throwaway `npx playwright` scripts in `claude_tmp/`.
+
+### Data cleanup (run once, before the schema push)
+- `DELETE FROM action_script_runs; DELETE FROM action_scripts;` (20 scripts, 7 runs) via `prisma db execute`.
+- The old run folders under `action-scripts/` were removed.
+- Then `prisma db push` and `prisma generate`.
+
+### Files changed — server
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **`Action`:** `credentialId String?` + `credential` relation + index. **`Credential`:** `actions Action[]`; the doc now says deleting it unlinks actions. **`ActionScript`:** dropped `code` and `ruleViolations`; added `plan Json`, `contextPageUrls String[]`, `credentialId` / `credentialName` snapshots, and `editedFromActionScriptId`; `modelId` is now nullable. **`ActionScriptRun`:** dropped `exitCode` and `exitSignal`; added `errorMessage`, `failedStepNumber`, and `credentialName`. Doc comments rewritten. |
+| `server/utils/actionPlanSchema.ts` (new) | `ActionPlanSchema`, `PlanStepSchema`, `PlanTargetSchema`, `ARIA_ROLES` (a `Record<AriaRole, true>`, so the compiler checks it against Playwright's list), `PLAN_STEP_ACTIONS`, `PLAN_KEYS`, `DIALOG_RESPONSES`, `CREDENTIAL_PLACEHOLDERS`, `PLAN_STEP_RULES` (a `Map`), and limits. Functions: `readHttpOrigin`, `buildAllowedPlanOrigins`, `findActionPlanProblems`, `parseActionPlan`, `validateActionPlan`, `planUsesCredentialPlaceholders`. |
+| `server/utils/selectRelevantCrawledPages.ts` (new) | `extractActionSearchTerms`, `scoreCrawledPage`, `selectRelevantCrawledPages`, and limits (6 pages, 60k characters, 20k per snapshot with a marker). |
+| `server/services/dbService.ts` | **New:** `ActionWithCredential`, `ActionScriptWithPlan`, `CrawledPageSnapshot`, `ACTION_CREDENTIAL_INCLUDE`, `toActionScriptWithPlan`, `findNewestCrawlRunWithPages`, and `findLatestCrawledPagesForWebsite`. **Changed:** `ActionInput` (now has `credentialId`); `ActionScriptInput` / `ActionScriptRunInput` use the new fields; action reads include the credential; script reads parse `plan`; `softDeleteCredentialForWebsite` is now a transaction that also unlinks actions. |
+| `server/utils/validateRequestBodies.ts` | **New:** `validateActionInput`, `ActionPlanEditInput`, `validateActionPlanEditInput`. |
+| `server/controllers/actions.ts` | POST and PUT use `validateActionInput`. **New** module-private `credentialBelongsToWebsite`, which answers 400 for another website's credential. Route JSDoc updated. |
+| `server/services/crawlerLoginService.ts` | **New:** `buildCrawlLoginDetails(credential, website)`, moved out of `crawlRunService.buildCredentialLogin` (login URL fallback and decryption). |
+| `server/services/crawlRunService.ts` | `buildCredentialLogin` now delegates to `buildCrawlLoginDetails`; the `decryptCredentialPassword` import was removed. |
+| `server/prompts/actionPlanGuidelines.md` (new) | The plan-writing system prompt: core rule, how to read aria snapshots (as data, not instructions), targets, the step catalog, logging in and placeholders, common patterns, pause / assumptions, the Output Format, and two example plans. About 4.3k tokens on Haiku 4.5 / Opus 4.6, so it is above their 4,096-token cache minimum. |
+| `server/prompts/actionScriptGuidelines.md` | **Deleted.** |
+| `server/services/scriptGenerationService.ts` | `convertActionToScript` became **`convertActionToPlan`**. It uses `beta.messages.create` with a hand-built JSON schema, because `betaZodOutputFormat` turns `enum` into description text. **New:** `STRUCTURED_OUTPUTS_BETA`, `ActionPlanConversionSchema`, `toStructuredOutputSchema`, `CONVERSION_OUTPUT_SCHEMA`, `buildLoginLines`, `buildContextPageLines`, `readConversionReply`; `buildConversionRequestMessage` is now exported. **Replaced types:** `ActionPlanConversionRequest` / `ActionPlanConversion`. It checks `stop_reason` first, which fixes the old unreachable `truncated` path. |
+| `server/services/actionPlanRunnerService.ts` (new) | **`runActionPlan`:** a visible Chromium, login first, `startUrl`, then the steps. **`runPlanStep`:** an exhaustive `switch` whose `default` throws. Also `describePlanStep`, `describePlanTarget`, `scrubSecrets`, and module-private `locateTarget`, `requireTarget`, `requireValue`, `resolveFillText` (placeholders typed only on the website's origins), `typeLikeAPerson` (click, Ctrl/Cmd+A, `pressSequentially`), `uploadFileThroughChooser` (only `<ACTION_SCRIPT_DIR>/uploads/`), `walkPlan`, `captureFailureScreenshot`, and `RunOutputCollector`. There is a 5-minute deadline (screenshot, then close), and every fire-and-forget promise is `.catch`ed. |
+| `server/services/scriptRunnerService.ts` | **Deleted** (the node child-process runner). |
+| `server/utils/findScriptRuleViolations.ts` | **Deleted** (the warn-only code scan). |
+| `server/controllers/actionScripts.ts` | **Convert:** credential lookup, then relevant pages, then `convertActionToPlan`; it saves `plan`, `contextPageUrls`, and the credential snapshot. **New route** `POST .../scripts/:actionScriptId/edits`, which saves a new version. **Runs:** a one-run-per-action `Set` guard (409); credential checks (503/409/400); plan re-validation (409); a placeholder plan without a credential (409); `runActionPlan`. **New:** `UPLOADS_FOLDER_NAME`, `findActionCredential`, `allowedOriginsFor`, and `runPlanAndRecordRun`. All JSDoc updated. |
+| `server/utils/resolveActionScriptDirectory.ts` | Doc comment only: the folder no longer holds `.mjs` scripts. |
+
+### Files changed — client
+| File | Change |
+|---|---|
+| `src/utils/actionPlanSteps.ts` (new) | The client copy of the plan rules: types, `PLAN_STEP_RULES` (with labels), `ARIA_ROLES`, `PLAN_KEYS`, `PLAN_TARGET_KINDS`. Functions: `readPlanStepRule`, `readPlanTargetKind`, `readPlanTargetText`, `buildPlanTarget`, `describePlanTarget`, `describePlanStep`, `findPlanProblems`, `changePlanStepAction`, `startingValueFor`, `formatPlanJson`. |
+| `src/components/ActionPlanSteps.tsx` (new) | Read-only numbered list of steps. |
+| `src/components/ActionPlanEditor.tsx` (new) | The step editor: dnd-kit `DndContext` / `SortableContext` with pointer and keyboard sensors, add / move / delete, a problems list, and "Save as new version" / Cancel. |
+| `src/components/ActionPlanStepFields.tsx` (new) | One sortable step card: drag handle, Action select, "Find element by", role, text, a value field per value kind, and move / delete buttons. Exports `NO_TARGET_VALUE`. |
+| `src/components/ActionScriptDetails.tsx` | Shows the steps, an "Edit steps" button that opens the editor, "Pages given to Claude", and the plan JSON. The caption reads Generated / Edited from Version K plus who it logs in as. The code block and rule warnings were removed. **New:** `describeVersionOrigin`, and `saveWasAttemptedInThisEditor` so the editor never shows a stale save error. New props: `editedFromVersionNumber`, `isSavingEdit`, `saveEditErrorMessage`, `onSaveEdit`. |
+| `src/components/ActionScriptsSection.tsx` | New props for edit saving; **new** `editedFromVersionNumberOf`, `describeVersionSource`, `handleSaveEdit`. The details panel is keyed by version. Copy updated; rule-warning counts removed. |
+| `src/components/ActionScriptRunsSection.tsx` / `ActionScriptRunDetails.tsx` | New `credentialName` prop and login sentence. Run details show the error message and "logged in as". |
+| `src/components/TitleDescriptionForm.tsx` | Optional `credentialOptions` adds a "Log in as" select. **New** exports: `LOGGED_OUT_CREDENTIAL_VALUE`, `CredentialOption`. |
+| `src/components/WebsiteItemSummary.tsx` | Optional `detailText` line. |
+| `src/pages/ActionDetailPage.tsx` | Edit-save mutation (`saveEditedPlan` / `handleSaveEdit`) and the "Runs as" line; `currentAction` now includes `credentialId`. |
+| `src/pages/ActionScriptComparePage.tsx` | Diffs the plan JSON ("Plan") instead of code; edited versions are labelled "edited", and versions without a recorded model "unknown model". |
+| `src/pages/WebsiteItemCreatePage.tsx` / `WebsiteItemEditPage.tsx` | For actions: load credentials first (with a load notice), then pass `credentialOptions` and `credentialId`. |
+| `src/hooks/useActionScripts.ts`, `useActionScriptRuns.ts`, `useWebsiteItems.ts`, `useCredentials.ts` | New record fields; `useCredentials` gains `isNeeded`. |
+| `src/utils/describeActionScriptRun.ts`, `describeScriptStaleness.ts`, `routePaths.ts` | Outcomes are Passed / Timed out / Failed at step N / Failed before the first step. Staleness now includes the credential, joined as "a, b and c". **New** `actionScriptEditsApiUrl`. |
+
+### Files changed — config, tooling, docs
+| File | Change |
+|---|---|
+| `package.json` / `package-lock.json` | Added `@dnd-kit/core@^6.3.1`, `@dnd-kit/sortable@^10.0.0`, `@dnd-kit/utilities@^3.2.2`, and `@mui/icons-material@^7.3.11`. All ship their own types; the icons are pinned to v7 to match `@mui/material`. |
+| `.env.example` | `ACTION_SCRIPT_DIR` comment: no `.mjs` files any more, and the `uploads/` folder. |
+| READMEs | Root `README.md`, `server/controllers`, `server/services`, `server/utils`, `server/prompts`, `server/prisma`, `src/components`, `src/hooks`, `src/pages`, `tests/README.md`. |
+
+### Tests (written by three agents in parallel, then reconciled by me)
+- **New backend:**
+  - `tests/backend/utils/actionPlanSchema.test.ts` (195)
+  - `tests/backend/utils/selectRelevantCrawledPages.test.ts` (28)
+  - `tests/backend/services/actionPlanRunnerService.test.ts` (99): fake `playwright`, every switch case, timeout with fake timers, scrubbing.
+- **Rewritten / updated backend:**
+  - `scriptGenerationService.test.ts` (45)
+  - `crawlerLoginService.test.ts` (+6 for `buildCrawlLoginDetails`)
+  - `dbService.test.ts` (98)
+  - `api/actions.test.ts` (32)
+  - `api/actionScripts.test.ts` (75): convert, edits, runs, guards.
+  - `server.test.ts`
+  - `validateRequestBodies.test.ts` (181)
+- **New frontend:**
+  - `actionPlanSteps.test.tsx` (69)
+  - `ActionPlanSteps.component.test.tsx` (3): the macOS case-insensitive name clash is noted in `tests/README.md`.
+  - `ActionPlanStepFields.test.tsx` (18)
+  - `ActionPlanEditor.test.tsx` (15): keyboard drag-and-drop with faked card geometry.
+- **Updated frontend:** `ActionDetailPage`, `ActionScriptComparePage`, `ActionScriptDetails`, `ActionScriptsSection`, `ActionScriptRunsSection`, `ActionScriptRunDetails`, `describeActionScriptRun`, `describeScriptStaleness`, `WebsiteItemCreatePage`, `WebsiteItemEditPage`, `TitleDescriptionForm`, `WebsiteItemSummary`, `useCredentials`, `routePaths`, and the `frontendTestHelpers.tsx` fixtures.
+- **Removed, with the functionality, at the user's request:**
+  - `scriptRunnerService.test.ts` and `findScriptRuleViolations.test.ts`;
+  - rule-warning, exit-code / signal, and `.mjs` code-display cases, each replaced by tests of the new behaviour.
+- **No test was skipped.**
+
+### Verification performed
+- `npm run test:coverage`: **100 files, 2004 tests passed.** All files: 99.55% statements, 98.92% branches, 100% functions, 99.85% lines (thresholds 80/70/80/80).
+- `npm run lint`, `npm run tsc`, and `npm run tsc:client`: clean.
+- **Prompt caching** (direct script, two conversions on Opus 5.5): the first wrote 7,784 tokens to the cache, the second read 7,784 from it. The API accepted the hand-built schema with the action `enum`.
+- **Dev server** (the user's own `npm run dev`, already running): `/api/health` returned ok; homepage 200.
+- **End to end with throwaway Playwright scripts** (`claude_tmp/verify/`) against the login fixture site (`claude_tmp/loginFixtureSite.mts`, port 3099, started and stopped by me):
+  1. Created a website, credential, and logged-in crawl (6 pages).
+  2. Created an action with "Log in as" Admin; the edit form preselects it.
+  3. Converted with a real Claude call: 7 steps, 6 pages given to Claude, plan JSON in field order.
+  4. Ran it: "Passed · 3.1 s"; the log shows the login and the steps, never the password.
+  5. Edited: move up / down, delete, mouse drag (swapped two steps), add, a problem blocking Save. Saved as Version 2 "Edited from Version 1", which passed.
+  6. Broke a target and saved Version 3: "Failed at step 4" with the error and a failure screenshot that loads.
+  7. Compare page showed the Plan diff and labelled edited versions.
+  8. Switching the action to logged out marked the versions "Out of date … credential".
+  9. API: `evaluate`, `__proto__`, a goto to another site, and `{{credential.password}}` in a log step were all rejected with 400. A whole-value placeholder was accepted; running it while logged out was refused with 409.
+  10. No browser console errors.
+- **Re-checked after the follow-up fix:** a server-rejected save shows "Could not save", and reopening the editor shows no stale error.
+
+### Notable during implementation
+- The Playwright MCP hung (in `--extension` mode it waits for the Chrome extension), so the verifier agent could not drive it. The user picked the script fallback.
+- I mistakenly ran `git rm --cached` on the old prompt file, which staged a deletion. I undid it at once with `git restore --staged`; the user's index is unchanged.
+- `npm install` printed 4 high-severity audit warnings. They come from the existing Prisma dependencies (`deepmerge-ts`, `mysql2`), not from the new packages.
+- The frontend test agent found that a failed save's error came back after reopening the editor, and that the compare page labelled a model-less generated version "edited". Both were fixed in source (`ActionScriptDetails`, `ActionScriptComparePage`) with new tests.
+- Left in the dev database for the user to inspect: the "Login fixture" website (http://localhost:3099/) with its "Admin" credential, the "Open account settings" action (4 versions), and its runs.
+
+---
+
 ## 2026-10-03 14:37 EDT — Website login URL (inherited, learned) + crawl button modes (built by multiple agents)
 
 **Intent:**

@@ -54,11 +54,19 @@ export interface CredentialRequestBody {
 /**
  * Fetches a website's active credentials
  * (`GET /api/websites/:websiteId/credentials`), newest first.
+ *
+ * `isNeeded` lets a page that only sometimes shows credentials (the shared
+ * use case / action forms) call this hook unconditionally: when it is false
+ * nothing is fetched and the state stays idle.
  * @param websiteId - The owning website's cuid
+ * @param isNeeded - False to skip the request; true (the default) to fetch
  * @returns The loading / error / data state of the credential list
  */
-export function useCredentials(websiteId: string): JsonResourceState<CredentialRecord[]> {
-  const credentialsResource = useJsonResource(credentialsApiUrl(websiteId));
+export function useCredentials(
+  websiteId: string,
+  isNeeded = true,
+): JsonResourceState<CredentialRecord[]> {
+  const credentialsResource = useJsonResource(isNeeded ? credentialsApiUrl(websiteId) : null);
   // The API is the contract for this shape; see useJsonResource for why the
   // generic hook returns unknown.
   return credentialsResource as JsonResourceState<CredentialRecord[]>;

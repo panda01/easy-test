@@ -13,6 +13,7 @@ import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { type ScriptModelOption, useScriptModels } from "../hooks/useScriptModels";
 import { useWebsiteItem } from "../hooks/useWebsiteItems";
 import { useWebsite } from "../hooks/useWebsites";
+import { formatPlanJson } from "../utils/actionPlanSteps";
 import { describeScriptModel } from "../utils/describeScriptModel";
 import { WEBSITE_LIST_PATH, websiteDetailPath, websiteItemDetailPath } from "../utils/routePaths";
 import { ACTION_KIND } from "../utils/websiteItemKinds";
@@ -42,7 +43,10 @@ function findScriptIndex(
 }
 
 /**
- * Labels a version for the pickers: "Version 2 · <date> · <model> · <effort>".
+ * Labels a version for the pickers, checked in this order: "Version 3 ·
+ * <date> · edited" for a version saved from the step editor, "Version 4 ·
+ * <date> · refined · <model> · <effort>" for one Claude refined from a failed
+ * run, or "Version 2 · <date> · <model> · <effort>" for one it generated.
  * @param script - The version
  * @param versionNumber - Its number, counting the oldest as 1
  * @param catalogModels - The live model list, for the display name (may be empty)
@@ -53,17 +57,29 @@ function describeVersion(
   versionNumber: number,
   catalogModels: ScriptModelOption[],
 ): string {
-  const generatedAtText = new Date(script.createdAt).toLocaleString();
-  const modelText = describeScriptModel(script.modelId, script.effort, catalogModels);
-  return `Version ${String(versionNumber)} · ${generatedAtText} · ${modelText}`;
+  const createdAtText = new Date(script.createdAt).toLocaleString();
+  const versionLabelStart = `Version ${String(versionNumber)} · ${createdAtText}`;
+  const versionWasEdited = script.editedFromActionScriptId !== null;
+  if (versionWasEdited) {
+    return `${versionLabelStart} · edited`;
+  }
+  const modelText =
+    script.modelId === null
+      ? "unknown model"
+      : describeScriptModel(script.modelId, script.effort, catalogModels);
+  const versionWasRefined = script.refinement !== null;
+  if (versionWasRefined) {
+    return `${versionLabelStart} · refined · ${modelText}`;
+  }
+  return `${versionLabelStart} · ${modelText}`;
 }
 
 /**
- * Compares two of an action's script versions side by side
+ * Compares two of an action's plan versions side by side
  * (`/websites/:websiteId/actions/:itemId/scripts/compare?from=&to=`): the
- * title and description each was generated from, and the code, with removed
- * lines on the left, added lines on the right, and changed words
- * highlighted.
+ * title and description each was generated from, and the plan as indented
+ * JSON (one step per few lines), with removed lines on the left, added lines
+ * on the right, and changed words highlighted.
  *
  * "From" (left) defaults to the second newest version and "To" (right) to
  * the newest. Both choices live in the query string (replaced, not pushed),
@@ -162,7 +178,7 @@ export default function ActionScriptComparePage(): ReactElement {
             {action.title}
           </Typography>
           <Typography variant="h4" component="h1" sx={{ mb: 3 }}>
-            Compare script versions
+            Compare plan versions
           </Typography>
 
           <LoadStatusNotice
@@ -173,7 +189,7 @@ export default function ActionScriptComparePage(): ReactElement {
 
           {scriptListLoadedWithoutError && thereAreTooFewVersions && (
             <Typography color="text.secondary">
-              Convert this action at least twice to compare versions.
+              Convert, refine, or edit this action's plan at least twice to compare versions.
             </Typography>
           )}
 
@@ -208,7 +224,11 @@ export default function ActionScriptComparePage(): ReactElement {
                 leftText={fromScript.actionDescription}
                 rightText={toScript.actionDescription}
               />
-              <SideBySideDiff label="Code" leftText={fromScript.code} rightText={toScript.code} />
+              <SideBySideDiff
+                label="Plan"
+                leftText={formatPlanJson(fromScript.plan)}
+                rightText={formatPlanJson(toScript.plan)}
+              />
             </>
           )}
         </>

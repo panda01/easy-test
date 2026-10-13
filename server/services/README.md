@@ -10,12 +10,12 @@ here; services never touch `req`/`res`.
 | `crawlerService.ts` | `crawlWebsite(startUrl, timingSettings, recordVisitedPage, login?, buttonMode?)`: crawls a website breadth first with headless Chromium, following same-origin links - and, with a button mode, the pages its buttons open - recording each page's aria snapshot, after logging in first when given a `login`. Browser only - it saves nothing itself. |
 | `crawlerButtonService.ts` | `followPageButtons(...)`: clicks a page's buttons one at a time (reloading the page before every click but the first) and reports the same-site pages they landed on; `chooseButtonsToClick(buttons, mode)` picks which (see below). |
 | `pageActionService.ts` | `trackPageRequests(page)`, `waitForTrackedRequestsToFinish(page, tracker, capMs)`, `waitOutMinimumWaitSince(page, startedAt, minimumWaitMs)`: waiting out what an action (a login submit, a button click) set off - shared by the login and the button clicks. |
-| `crawlerLoginService.ts` | `logInWithCredential(page, login, timingSettings)`: fills in and submits a website's login form on the crawl's own page, finding the fields itself unless the credential names CSS selectors, and reports `{ loggedIn }` (never rejects). `captureLoginFailureScreenshot(page, filePath)`: the viewport PNG of a failed login (never rejects). |
+| `crawlerLoginService.ts` | `buildCrawlLoginDetails(credential, website)`: decrypts the password and picks the EFFECTIVE login URL (shared by crawls and action runs). `logInWithCredential(page, login, timingSettings)`: fills in and submits a website's login form on the given page, finding the fields itself unless the credential names CSS selectors, and reports `{ loggedIn }` (never rejects). `captureLoginFailureScreenshot(page, filePath)`: the viewport PNG of a failed login (never rejects). |
 | `crawlRunService.ts` | `startCrawlRun(website, credential, screenshotDirectory, buttonMode)`: decrypts the credential's password (when there is one), starts a crawl in the background (one per website at a time), and records its login, pages, and outcome; `markUnfinishedCrawlRunsInterrupted()` for boot. |
 | `anthropicClient.ts` | `createAnthropicClient()` / `readAnthropicApiKey()` (per call, key passed explicitly) and `ScriptGenerationError`, shared by the two Claude services below. |
 | `scriptModelService.ts` | The live model catalog: `listScriptModels()`, `findScriptModel(id)`, `chooseEffortForModel()`, `chooseDefaultScriptModel()`. |
-| `scriptGenerationService.ts` | `convertActionToScript(request, { model, effort })`: asks the chosen Claude model to turn an action into a Playwright `.mjs` script, following `../prompts/actionScriptGuidelines.md` verbatim. |
-| `scriptRunnerService.ts` | `runPlaywrightScript(code, runDirectory)`: writes the script into its own run folder and runs it with plain `node` (no environment variables), enforcing the 5 minute limit. |
+| `scriptGenerationService.ts` | `convertActionToPlan(request, { model, effort })`: asks the chosen Claude model to turn an action into a JSON step plan, following `../prompts/actionPlanGuidelines.md` verbatim, with the relevant crawled pages' aria snapshots in the user message; only a plan that passes every rule is returned. `refineActionPlan(request, { model, effort })`: asks the model that wrote a version to fix it from a failed run (error, step log, failure screenshot, failing-page snapshot, the user's note), returning the new plan plus the call's token usage. |
+| `actionPlanRunnerService.ts` | `runActionPlan(request)`: runs a validated plan in a visible browser in this process - logs in first when there is a credential, opens `startUrl`, then each step through `runPlanStep`'s fixed `switch` - enforcing the 5 minute limit; a failed run writes `failure.png` and returns the failing page's URL and aria snapshot. |
 
 ## dbService is the only database door
 
@@ -27,13 +27,14 @@ functions:
 |---|---|
 | Website | `createWebsite`, `listWebsites`, `findWebsiteById`, `findWebsiteByUrl`, `updateWebsite`, `softDeleteWebsite` |
 | UseCase | `listUseCasesForWebsite`, `findUseCaseForWebsite`, `createUseCaseForWebsite`, `updateUseCaseForWebsite`, `softDeleteUseCaseForWebsite` |
-| Action | `listActionsForWebsite`, `findActionForWebsite`, `createActionForWebsite`, `updateActionForWebsite`, `softDeleteActionForWebsite` |
+| Action | `listActionsForWebsite`, `findActionForWebsite`, `createActionForWebsite`, `updateActionForWebsite` (all four include `credential: { id, name }` - the `ActionWithCredential` type), `softDeleteActionForWebsite`. The LIST also carries `newestScript` (the `ActionWithNewestScript` type): the newest active version's id and its `latestRun`, or null when the action has no versions - read with `take: 1` on both relations, so it costs no extra rows |
 | ScreenshotRun | `listScreenshotRunsForWebsite`, `findScreenshotRunForWebsite`, `createScreenshotRunForWebsite` (runs are never edited; they are soft deleted with their website) |
-| ActionScript | `listActionScriptsForAction`, `findActionScriptForAction`, `createActionScriptForAction` - **deliberately no update function**, which is what makes scripts immutable |
-| ActionScriptRun | `listActionScriptRunsForScript`, `findActionScriptRunForScript`, `createActionScriptRunForScript` - no update function either |
+| ActionScript | `listActionScriptsForAction`, `findActionScriptForAction`, `createActionScriptForAction`, `createRefinedActionScriptForAction` (one nested write: the refined version AND its `ActionScriptRefinement` row, so both or neither are saved) - **deliberately no update function**, which is what makes plan versions immutable; reads parse `plan` back into an `ActionPlan` (the `ActionScriptWithPlan` type), restoring the field order `jsonb` drops, and include `refinement` (the refinement that produced the version, or null) with its run's `errorMessage`, `failedStepNumber`, `timedOut`, and `failingPageAriaSnapshot` JOINED from the run row, never copied; every read and create also carries `latestRun` (`LatestActionScriptRun`: `{ id, succeeded, createdAt }` of the newest active run, or null) in place of Prisma's `runs` list (`ACTION_SCRIPT_INCLUDE`) |
+| ActionScriptRun | `listActionScriptRunsForScript`, `findActionScriptRunForScript`, `createActionScriptRunForScript` (now also stores `failingPageUrl` / `failingPageAriaSnapshot`) - no update function either |
+| ActionScriptRefinement | created only by `createRefinedActionScriptForAction`, read only through a version's `refinement` include; soft deleted with its action or website |
 | CrawlRun | `listCrawlRunsForWebsite`, `findCrawlRunForWebsite`, `createCrawlRunForWebsite` (created `running`; all three include `credential: { id, name }`), `markCrawlRunLoggedIn`, `finishCrawlRun`, `markRunningCrawlRunsInterrupted` |
-| CrawledPage | `recordCrawledPage` (create-only, see below), `listCrawledPageSummariesForRun` (no `ariaSnapshot` / `linkedUrls`, via Prisma `omit`), `findCrawledPageForRun` |
-| Credential | `listCredentialsForWebsite`, `findCredentialForWebsite`, `createCredentialForWebsite`, `updateCredentialForWebsite` (a null password keeps the saved one), `softDeleteCredentialForWebsite` - all **without** `encryptedPassword` (Prisma `omit`, the `CredentialSummary` type); `findCredentialWithPasswordForWebsite` is the only read that returns it, and only crawl start uses it |
+| CrawledPage | `recordCrawledPage` (create-only, see below), `listCrawledPageSummariesForRun` (no `ariaSnapshot` / `linkedUrls`, via Prisma `omit`), `findCrawledPageForRun`, `findLatestCrawledPagesForWebsite(websiteId, credentialId)` (the successful, snapshotted pages of ONE run: the newest finished crawl done the same way an action runs - logged in as its credential, or logged out - else the newest of any kind) |
+| Credential | `listCredentialsForWebsite`, `findCredentialForWebsite`, `createCredentialForWebsite`, `updateCredentialForWebsite` (a null password keeps the saved one), `softDeleteCredentialForWebsite` (one transaction that also unlinks the actions running as it) - all **without** `encryptedPassword` (Prisma `omit`, the `CredentialSummary` type); `findCredentialWithPasswordForWebsite` is the only read that returns it, used only by crawl start and action runs |
 | Errors | `isUniqueConstraintViolation` (P2002), `isRecordNotFound` (P2025) |
 
 That is also why app code must never import from `../generated/prisma/`
@@ -331,59 +332,117 @@ hard-coded, so models appear and disappear with Anthropic's list. Each
 else the model's highest level, else null; `chooseDefaultScriptModel` picks
 Claude Opus 5.5 at high when listed, else the newest model.
 
-## scriptGenerationService asks Claude for a script
+## scriptGenerationService asks Claude for a JSON step plan
 
-`convertActionToScript` makes **one** request to the Anthropic API, shaped by
+`convertActionToPlan` makes **one** request to the Anthropic API, shaped by
 the chosen model:
 
 - **Model:** the one the user picked. `fallbacks` (beta
   `server-side-fallback-2026-06-01`) are sent only when the model has a
   fallback: if a safety classifier declines, the API retries there inside the
   same call. `thinking: { type: "adaptive" }` is sent only when the model
-  takes it (Opus 4.7/4.8 would otherwise run without thinking; Opus 4.5,
-  Haiku 4.5, and Sonnet 4.5 do not accept it). `output_config.effort` is sent
-  unless the model has no effort setting. The result's `modelId` is whichever
-  model answered and `effort` is the level sent (a fallback inherits it).
-- **System prompt:** `../prompts/actionScriptGuidelines.md`, read per call and
+  takes it. `output_config.effort` is sent unless the model has no effort
+  setting. The result's `modelId` is whichever model answered and `effort` is
+  the level sent (a fallback inherits it).
+- **System prompt:** `../prompts/actionPlanGuidelines.md`, read per call and
   sent **unmodified**, marked `cache_control: { type: "ephemeral" }` so repeat
   conversions on the same model within 5 minutes read it from the prompt
-  cache. Caches are per model, and the prompt (~2.2k tokens) is below the
-  4,096-token minimum of Claude Haiku 4.5, Opus 4.5, and Opus 4.6, so those
-  three never cache - silently, not as an error. Everything that
-  varies (website, action) is in the user message, after the cached prefix.
-  Each call logs `[scripts] ... read from cache, ... written to cache` so the
-  cache can be checked.
-- **Structured output:** `client.beta.messages.parse` with
-  `betaZodOutputFormat({ summary, assumptions, script })`, so the reply is a
-  validated object, not Markdown to scrape. `max_tokens` 16000,
-  non-streaming (at `xhigh`/`max` a large action could hit it, which surfaces
-  as `truncated`).
+  cache. Caches are per model; the prompt is kept above 4,096 tokens (about
+  5.7k on Haiku 4.5 / Opus 4.6, 7.3k on Opus 5.5) so it caches on every model
+  in the catalog - a shorter prompt silently would not on those. Everything
+  that varies is in the user message, after the cached prefix: the website,
+  the action, the credential's NAME (never its username or password) and
+  whether the browser is already logged in, and the selected crawled pages'
+  aria snapshots inside `<page_snapshot>` elements, labelled as page data,
+  not instructions. Each call logs `[scripts] ... read from cache, ...
+  written to cache` so the cache can be checked.
+- **Structured output:** `client.beta.messages.create` with
+  `output_config.format = { type: "json_schema", schema }` (beta
+  `structured-outputs-2025-12-15`, the one the SDK's `parse` sends). The
+  schema is built from `ActionPlanConversionSchema` with `z.toJSONSchema`
+  and `toStructuredOutputSchema` (drops `$schema`, turns type lists into
+  `anyOf`, flattens nested `anyOf`) - NOT with the SDK's
+  `betaZodOutputFormat`, which moves `enum` into description text, so the
+  allowed step actions would only be a hint. `max_tokens` 16000,
+  non-streaming.
+- **The reply is checked in order:** `stop_reason` first (`refusal`,
+  `max_tokens`), then `JSON.parse`, then the zod schema, then every plan rule
+  (`findActionPlanProblems`) - only a valid plan is ever returned.
 - **The client is built per call** (`createAnthropicClient`), with the key
   passed explicitly, so a missing `ANTHROPIC_API_KEY` only affects this
   feature and the SDK never picks up some other credential on this machine.
 - **Known failures throw `ScriptGenerationError`** with a `reason`:
   `missingApiKey`, `refused` (every model declined), `truncated` (hit
-  `max_tokens`), `unparseable` (no schema match, or an empty script). API and
-  network errors reject unchanged.
+  `max_tokens`), `unparseable` (not JSON, no schema match, or a plan that
+  breaks a rule - the message lists the problems). API and network errors
+  reject unchanged.
 
-## scriptRunnerService runs a script like a user would
+### refineActionPlan fixes a plan from a failed run
 
-`runPlaywrightScript` is script-agnostic (future use-case scripts can reuse
-it). In order:
+`refineActionPlan` goes through the same private `askClaudeForPlan` as
+`convertActionToPlan`, so it sends the **same** system prompt, betas,
+fallbacks, thinking, effort, structured-output schema, and `max_tokens` - and
+the two share one prompt cache per model. Only the user message differs: an
+array of content blocks built by `buildRefinementRequestContent`:
 
-1. `mkdir -p` the run folder and write `script.mjs` - **before** starting
-   anything, so a bad directory fails with nothing running.
-2. `spawn(process.execPath, ["script.mjs"], { cwd: runDirectory, env: {},
-   detached: true })`. The working directory is the run folder, so the
-   template's `failure.png` lands next to the script. **No environment
-   variables** reach the script, so generated code never sees secrets; Node
-   and Playwright still find the home folder (where Chromium lives) and `/tmp`
-   without them. The script imports `playwright` from the project's
-   `node_modules`, which is why `ACTION_SCRIPT_DIR` must be inside the project.
-3. stdout and stderr are collected together in arrival order, capped at
-   200,000 characters keeping the **tail** (where the error is), NUL stripped.
-4. **Time limit:** after 5 minutes the script's process group gets SIGTERM -
-   Playwright's own handler closes the browser, which also ends a waiting
-   `page.pause()` - and SIGKILL 5 seconds later if it is still alive.
-5. Resolves on `close`. A run **passes** only with exit code 0, no timeout,
-   AND no `failure.png` (a script can catch its own error and still exit 0).
+1. **Stable context text, marked `cache_control: ephemeral`** (the second
+   cache breakpoint): "Refine a step plan whose run failed.", then the same
+   website / origins / login / action / `<page_snapshot>` lines a conversion
+   sends. It holds nothing about the run, so a refine chain (v1 → v2 → v3)
+   reads it from the cache.
+2. **The failure screenshot** as a base64 `image/png` block - only when the
+   run's `failure.png` was still on disk.
+3. **The run-specific text:** the failed version's summary, assumptions, and
+   plan JSON; the error; "stopped at step N of M: ..." (with the step's
+   JSON) or "before the first step"; whether it timed out; the step log's
+   last 20,000 characters (`MAX_REFINE_RUN_OUTPUT_CHARACTERS`, with a marker)
+   in `<run_output>`; the failing page's URL and aria snapshot in
+   `<failing_page_snapshot>`; and the user's note in `<user_note>`. All of it
+   is labelled as data, never instructions.
+
+It returns the conversion fields plus `usage` (input, output, cache read,
+cache write - null cache figures become 0) and `screenshotWasSent`, and logs
+`[scripts] refined with <model> at <effort> effort with N page snapshot(s),
+screenshot yes|no, failing page snapshot yes|no; ... read from cache, ...
+written to cache ...`. A refusal reads "Claude declined to refine this plan
+(...)". Measured on Opus 5.5: a refine right after a conversion read the
+system prompt from the cache, and a second refine also read the context block.
+
+## actionPlanRunnerService runs a plan like a user would
+
+`runActionPlan` never turns a plan into code. In order:
+
+1. `mkdir -p` the run folder - **before** launching anything, so a bad
+   directory fails with nothing running.
+2. `chromium.launch({ headless: false, slowMo: 100 })` - a visible window on
+   this machine, like the old scripts - with a 1280x720 viewport, a 10 s
+   default timeout per step and 30 s per navigation.
+3. **Login first** when the action has a credential: the crawler's own
+   `logInWithCredential` (it may use `.fill()` - that is setup, not a plan
+   step). A failed login fails the run before any step.
+4. `goto(plan.startUrl)`, then each step through **`runPlanStep`**, an
+   exhaustive `switch (step.action)` whose `default` throws: each allowed
+   action maps to the one Playwright call it stands for (`fill` = click,
+   `ControlOrMeta+A`, `pressSequentially` with a 100 ms delay - never
+   `.fill()`; `waitForUrl` takes a glob string, never a RegExp; `uploadFile`
+   only picks files directly inside `<ACTION_SCRIPT_DIR>/uploads/`). The
+   first failing step stops the run.
+5. **Credential values stay in memory:** a placeholder
+   (`{{credential.username}}` / `{{credential.password}}`) is replaced only
+   while the page is on one of the website's own origins; the log describes
+   steps but never typed text; error messages are cut to their first line
+   and scrubbed of the username and password (Playwright's call log can echo
+   typed text).
+6. **Time limit:** after 5 minutes the failure evidence (below) is captured,
+   then the browser is closed, which makes the pending step reject;
+   the run is `timedOut`. Every fire-and-forget promise (dialog answer, file
+   chooser, close) is `.catch`ed so it cannot become an unhandled rejection.
+7. **Failure evidence**, captured before the browser closes, in order (and
+   never throwing - each piece is null/false when it cannot be read): the
+   screenshot `failure.png` in the run folder, the page's URL
+   (`failingPageUrl`; `about:blank` counts as none), and the aria snapshot of
+   its `<body>` (`failingPageAriaSnapshot`, NUL stripped and cut by
+   `capSnapshot`). The URL and snapshot are scrubbed of the username and
+   password like the error message. A passing run captures none. The log is capped
+   at 200,000 characters keeping the **tail** (where the error is), NUL
+   stripped.

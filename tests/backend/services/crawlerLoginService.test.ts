@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Page } from "playwright";
+import type { Credential, Website } from "../../../server/services/dbService.js";
 
 /**
  * No test here launches a browser. The two page-level helpers the login uses
@@ -10,17 +11,24 @@ import type { Page } from "playwright";
  * how each part behaves. The real browser round trip is proven by the manual
  * verification run against a real login form.
  */
-const { mockNavigateToUrl, mockWaitForPageReadiness, mockMkdir } = vi.hoisted(() => ({
-  mockNavigateToUrl: vi.fn(),
-  mockWaitForPageReadiness: vi.fn(),
-  /** The failure screenshot's folder is "created" here instead of on disk. */
-  mockMkdir: vi.fn(),
-}));
+const { mockNavigateToUrl, mockWaitForPageReadiness, mockMkdir, mockDecryptCredentialPassword } =
+  vi.hoisted(() => ({
+    mockNavigateToUrl: vi.fn(),
+    mockWaitForPageReadiness: vi.fn(),
+    /** The failure screenshot's folder is "created" here instead of on disk. */
+    mockMkdir: vi.fn(),
+    /** Decryption is replaced: its own spec covers the cryptography. */
+    mockDecryptCredentialPassword: vi.fn(),
+  }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actualFsPromises = await importOriginal<typeof import("node:fs/promises")>();
   return { ...actualFsPromises, mkdir: mockMkdir };
 });
+
+vi.mock("../../../server/utils/credentialEncryption.js", () => ({
+  decryptCredentialPassword: mockDecryptCredentialPassword,
+}));
 
 vi.mock("../../../server/services/playwrightService.js", async (importOriginal) => {
   const actualPlaywrightService =
@@ -33,6 +41,7 @@ vi.mock("../../../server/services/playwrightService.js", async (importOriginal) 
 });
 
 import {
+  buildCrawlLoginDetails,
   captureLoginFailureScreenshot,
   DEFAULT_PASSWORD_FIELD_SELECTOR,
   DEFAULT_SUBMIT_BUTTON_SELECTOR,
@@ -657,5 +666,114 @@ describe("captureLoginFailureScreenshot", () => {
     expect(screenshotWasCaptured).toBe(false);
     expect(mockScreenshot).not.toHaveBeenCalled();
     consoleErrorSpy.mockRestore();
+  });
+});
+
+describe("buildCrawlLoginDetails", () => {
+  /** A website without a login page of its own. */
+  const website: Website = {
+    id: "website-1",
+    url: "https://example.com/",
+    name: "Example",
+    description: null,
+    networkIdleTimeoutMs: 5000,
+    screenshotMinimumWaitMs: 1,
+    loginUrl: null,
+    createdAt: new Date("2026-03-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-03-01T00:00:00.000Z"),
+    deletedAt: null,
+  };
+
+  /** The website with a login page, which credentials without one inherit. */
+  const websiteWithLoginUrl: Website = { ...website, loginUrl: "https://example.com/sign-in" };
+
+  /** A credential with its own login page and some of its own selectors. */
+  const credential: Credential = {
+    id: "credential-1",
+    websiteId: "website-1",
+    name: "Admin",
+    description: null,
+    username: "admin@example.com",
+    encryptedPassword: "iv.tag.ciphertext",
+    loginUrl: "https://auth.example.com/login",
+    usernameSelector: "#email",
+    passwordSelector: null,
+    submitSelector: "button.sign-in",
+    createdAt: new Date("2026-03-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-03-01T00:00:00.000Z"),
+    deletedAt: null,
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockDecryptCredentialPassword.mockReturnValue("correct horse");
+  });
+
+  it("decrypts the password and gathers the credential's login page, username, and selectors", () => {
+    const loginDetails = buildCrawlLoginDetails(credential, website);
+
+    expect(loginDetails).toEqual({
+      loginUrl: "https://auth.example.com/login",
+      username: "admin@example.com",
+      password: "correct horse",
+      usernameSelector: "#email",
+      passwordSelector: null,
+      submitSelector: "button.sign-in",
+    });
+    expect(mockDecryptCredentialPassword).toHaveBeenCalledWith("iv.tag.ciphertext");
+  });
+
+  it("prefers the credential's own login page over the website's", () => {
+    const loginDetails = buildCrawlLoginDetails(credential, websiteWithLoginUrl);
+
+    expect(loginDetails.loginUrl).toBe("https://auth.example.com/login");
+  });
+
+  it("falls back to the website's login page when the credential has none", () => {
+    const loginDetails = buildCrawlLoginDetails({ ...credential, loginUrl: null }, websiteWithLoginUrl);
+
+    expect(loginDetails.loginUrl).toBe("https://example.com/sign-in");
+  });
+
+  it("passes every selector through, including when none are set", () => {
+    const credentialWithoutSelectors: Credential = {
+      ...credential,
+      usernameSelector: null,
+      passwordSelector: null,
+      submitSelector: null,
+    };
+    const credentialWithEverySelector: Credential = {
+      ...credential,
+      usernameSelector: "#user",
+      passwordSelector: "#pass",
+      submitSelector: "#go",
+    };
+
+    expect(buildCrawlLoginDetails(credentialWithoutSelectors, website)).toMatchObject({
+      usernameSelector: null,
+      passwordSelector: null,
+      submitSelector: null,
+    });
+    expect(buildCrawlLoginDetails(credentialWithEverySelector, website)).toMatchObject({
+      usernameSelector: "#user",
+      passwordSelector: "#pass",
+      submitSelector: "#go",
+    });
+  });
+
+  it("throws, naming the credential, without decrypting, when neither it nor its website has a login page", () => {
+    expect(() => buildCrawlLoginDetails({ ...credential, loginUrl: null }, website)).toThrow(
+      'The credential "Admin" has no login page URL, and neither does its website',
+    );
+    expect(mockDecryptCredentialPassword).not.toHaveBeenCalled();
+  });
+
+  it("lets a decryption failure throw unchanged", () => {
+    const decryptionError = new Error("Unsupported state or unable to authenticate data");
+    mockDecryptCredentialPassword.mockImplementation(() => {
+      throw decryptionError;
+    });
+
+    expect(() => buildCrawlLoginDetails(credential, website)).toThrow(decryptionError);
   });
 });

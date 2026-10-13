@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   SCRIPT_MODELS_API_URL,
   actionScriptComparePath,
+  actionScriptEditsApiUrl,
   actionScriptRunFailureScreenshotApiUrl,
+  actionScriptRunRefinementsApiUrl,
   actionScriptRunsApiUrl,
   actionScriptsApiUrl,
   crawledPageApiUrl,
@@ -140,9 +142,27 @@ describe("routePaths: action script API urls", () => {
     );
   });
 
+  it("builds the url that saves an edited plan as a new version", () => {
+    expect(actionScriptEditsApiUrl("website-1", "action-1", "script-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/edits",
+    );
+    expect(actionScriptEditsApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/scripts/${ENCODED_UNSAFE_ID}/edits`,
+    );
+  });
+
   it("builds one run's failure screenshot url", () => {
     expect(actionScriptRunFailureScreenshotApiUrl("website-1", "action-1", "script-1", "run-1")).toBe(
       "/api/websites/website-1/actions/action-1/scripts/script-1/runs/run-1/failure-screenshot",
+    );
+  });
+
+  it("builds the url that refines a failed run into a new version", () => {
+    expect(actionScriptRunRefinementsApiUrl("website-1", "action-1", "script-1", "run-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/runs/run-1/refinements",
+    );
+    expect(actionScriptRunRefinementsApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/scripts/${ENCODED_UNSAFE_ID}/runs/${ENCODED_UNSAFE_ID}/refinements`,
     );
   });
 

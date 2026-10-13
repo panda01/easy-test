@@ -22,18 +22,22 @@ export interface WebsiteItemSummaryProps {
   editLinkState: ReturnState;
   /** The delete dialog's state and handlers (see `useWebsiteItemDeletion`). */
   deletion: WebsiteItemDeletion;
+  /** One more line under the description (an action's "Runs as ..."), or undefined for none. */
+  detailText?: string;
 }
 
 /**
  * The top of a use case's or an action's detail page: the kind, the title
- * with Edit and Delete buttons, the description, the timestamps, and the
- * delete confirmation dialog. Shared by `UseCaseDetailPage` and
+ * with Edit and Delete buttons, the description, an optional detail line
+ * (who an action runs as), the timestamps, and the delete confirmation
+ * dialog. Shared by `UseCaseDetailPage` and
  * `ActionDetailPage`, which own the data and the delete flow.
  * @param props - The item, its kind, and the edit / delete wiring
  * @returns The rendered summary
  */
 export default function WebsiteItemSummary(props: WebsiteItemSummaryProps): ReactElement {
-  const { itemKind, websiteId, item, editLinkState, deletion } = props;
+  const { itemKind, websiteId, item, editLinkState, deletion, detailText } = props;
+  const thereIsADetailLine = detailText !== undefined;
 
   return (
     <>
@@ -64,6 +68,11 @@ export default function WebsiteItemSummary(props: WebsiteItemSummaryProps): Reac
       </Stack>
 
       <Typography sx={{ mt: 3, whiteSpace: "pre-wrap" }}>{item.description}</Typography>
+      {thereIsADetailLine && (
+        <Typography variant="body2" sx={{ mt: 1 }}>
+          {detailText}
+        </Typography>
+      )}
       <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
         Created {new Date(item.createdAt).toLocaleString()} · Updated{" "}
         {new Date(item.updatedAt).toLocaleString()}

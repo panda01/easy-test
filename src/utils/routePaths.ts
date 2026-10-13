@@ -209,6 +209,22 @@ export function actionScriptRunsApiUrl(
 }
 
 /**
+ * Builds the API url that saves an edited plan as a NEW version of an
+ * action: POST `{ plan }`, edited from the given version.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The version that was edited
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/edits`
+ */
+export function actionScriptEditsApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+): string {
+  return `${actionScriptsApiUrl(websiteId, actionId)}/${encodeURIComponent(actionScriptId)}/edits`;
+}
+
+/**
  * Builds the API url of one failed run's screenshot PNG, for an `<img src>`.
  * @param websiteId - The owning website's cuid
  * @param actionId - The owning action's cuid
@@ -224,6 +240,26 @@ export function actionScriptRunFailureScreenshotApiUrl(
 ): string {
   const runsApiUrl = actionScriptRunsApiUrl(websiteId, actionId, actionScriptId);
   return `${runsApiUrl}/${encodeURIComponent(actionScriptRunId)}/failure-screenshot`;
+}
+
+/**
+ * Builds the API url that refines a failed run's version into a NEW version
+ * of the action: POST `{ note }`, and Claude (the model that wrote the
+ * version) is sent the run's error, failure screenshot, and failing page.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The version that was run
+ * @param actionScriptRunId - The failed run's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/runs/<actionScriptRunId>/refinements`
+ */
+export function actionScriptRunRefinementsApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+): string {
+  const runsApiUrl = actionScriptRunsApiUrl(websiteId, actionId, actionScriptId);
+  return `${runsApiUrl}/${encodeURIComponent(actionScriptRunId)}/refinements`;
 }
 
 /**

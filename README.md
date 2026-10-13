@@ -71,30 +71,58 @@ clicked. Passwords are stored
 and are never sent back to the browser; see `.env.example` for how to
 generate the key.
 
+An action can be linked to one of the website's credentials (**Log in as**
+on its create / edit form): every run of it then **logs in first** with the
+crawler's own login routine. Deleting the credential unlinks it.
+
 An action's page has **Model** and **Effort** dropdowns and a **Convert to
 script** button. The dropdowns list every Claude model Anthropic's Models API
 offers (live, so new models appear on their own) and exactly the effort levels
 the chosen one supports ("Standard" for models without an effort setting);
-they start on Claude Opus 5.5 at high. The server sends the action (and the
-website's name and URL) to the chosen model, with the script-writing
-guidelines in `server/prompts/actionScriptGuidelines.md` used verbatim as the
-system prompt (prompt-cached). If the model declines, the API retries on its
-fallback (Claude Opus 4.8 where allowed) inside the same call. Claude answers with a summary,
-its assumptions, and a Playwright `.mjs` script that may only do what a user
-could do with a mouse and keyboard. Every conversion is saved as a new,
-**immutable** version - there is no edit - and the page shows each version's
-summary, assumptions, and code. A text scan flags forbidden features (`.fill(`,
-`page.evaluate`, `force: true`, imports other than `playwright`, ...) as
-**warnings only**: the script is still saved and runnable. **Run script** runs
-the selected version with plain `node` and **no environment variables**,
-opening a **visible browser window on this machine**; it records pass/fail,
-the step log, and a failure screenshot, and stops a run after **5 minutes**.
-Each version records the model that answered and the effort level. A version
-generated from a title or description the action no longer has is marked
-**Out of date**, and **Compare versions** shows any two versions side by side:
-the title, description, and code, with changed lines and words highlighted.
-Without `ANTHROPIC_API_KEY` the server still boots, and the model list and
-conversion answer 503.
+they start on Claude Opus 5.5 at high. The server picks the crawled pages
+most relevant to the action - the newest crawl done the same way the action
+runs (logged in as its credential, or logged out); the start page plus the
+pages whose URL, title, and aria snapshot repeat the action's own words most
+(stop words dropped) - and sends the action, the website's name and URL, the
+credential's NAME (never its username or password), and those pages' **aria
+snapshots** to the chosen model, with the plan-writing guidelines in
+`server/prompts/actionPlanGuidelines.md` used verbatim as the system prompt
+(prompt-cached). If the model declines, the API retries on its fallback
+(Claude Opus 4.8 where allowed) inside the same call. Claude answers with a
+summary, its assumptions, and a **JSON step plan** - `{ name, startUrl,
+steps: [{ action, target, value }] }` - whose actions can only come from a
+fixed list of things a user can do with a mouse and keyboard (click, fill,
+press, check, selectOption, expectVisible, ...); structured outputs enforce
+that list and the server re-checks every rule. The page shows each version's
+summary, assumptions, steps, the pages Claude was shown, and the plan JSON.
+**Edit steps** opens a step editor - drag steps (mouse or keyboard) or use the
+up/down buttons, add, change, or delete steps - and **Save as new version**
+saves the result as a new version ("Edited from Version K"); every version
+is **immutable**. **Run script** runs the selected version **inside the
+server**, opening a **visible browser window on this machine**: it logs in
+first when the action has a credential, opens the start URL, and walks the
+steps through a fixed `switch` of allowed Playwright calls - the plan is
+never turned into code, so nothing outside the list can run. `fill` types
+like a person (never `.fill()`), and the placeholders
+`{{credential.username}}` / `{{credential.password}}` are filled in at run
+time only, never stored, logged, or sent to Claude. A run records pass/fail
+("Failed at step N" and why), who it logged in as, the step log, and a
+failure screenshot, plus the URL and aria snapshot of the page it failed on,
+and is stopped after **5 minutes**. A **failed** run of a version Claude
+wrote shows a **Refine** button with an optional **Note for Claude**: it
+sends the run's error, failed step, step log, failure screenshot, and
+failing-page snapshot, with the version's plan, summary, assumptions, the
+same crawled pages, and the note, to **the same model and effort** that wrote
+the version, and saves the reply as a new version ("Refined from Version K").
+Refine is hidden on passing runs and on edited versions (no model wrote
+them). Each refinement is recorded as a link between the source version, the
+failed run, and the new version, with the note, the call's token usage, and
+whether the screenshot was sent. A version generated
+from a title, description, or credential the action no longer has is marked
+**Out of date**, and **Compare versions** shows any two versions side by
+side: the title, description, and plan JSON, with changed lines and words
+highlighted. Without `ANTHROPIC_API_KEY` the server still boots, and the
+model list and conversion answer 503.
 See `server/controllers/README.md` and `server/services/README.md`.
 
 **This project is development-only.** There is no production build, no PM2, no
@@ -157,7 +185,7 @@ that is already set. `.env.example` documents every key.
 | `SERVER_PORT` / `VITE_PORT` | The two dev ports (see above). |
 | `DATABASE_URL` | PostgreSQL connection string. |
 | `SCREENSHOT_DIR` | Where screenshot PNGs are written and served from. Required; default `screenshots` (gitignored). A relative path resolves against the project root; `~` is not expanded. |
-| `ACTION_SCRIPT_DIR` | Where each script run's folder (`script.mjs`, plus `failure.png` when it fails) is written. Required; default `action-scripts` (gitignored). Must be **inside the project** - generated scripts import `playwright` from its `node_modules` - or the server refuses to start. |
+| `ACTION_SCRIPT_DIR` | Where each plan run's folder (`failure.png` when it fails) is written, and where `uploadFile` steps pick files from (its `uploads/` folder). Required; default `action-scripts` (gitignored). Must be **inside the project**, or the server refuses to start. |
 | `ANTHROPIC_API_KEY` | **Secret** - put it in `.env.local` only. Used by "Convert to script". Optional for boot: without it, conversion answers 503 with an explanation. |
 
 ## Database
@@ -206,9 +234,12 @@ push`) still runs and would fail without the Prisma CLI.
 `playwright`, `@anthropic-ai/sdk`, and `zod` are already in `dependencies`,
 because the server imports them at runtime (zod is the SDK's peer dependency
 for its structured-output helper). `diff` (jsdiff, ships its own types) is a
-client dependency used by the version comparison page. Generated scripts also import `playwright`
-from this project's `node_modules`. Its browser is not part of the npm package: a production machine also
-needs `npx playwright install chromium`.
+client dependency used by the version comparison page. `@dnd-kit/core`,
+`@dnd-kit/sortable`, and `@dnd-kit/utilities` (drag-and-drop in the plan step
+editor) and `@mui/icons-material` (pinned to v7, matching `@mui/material`;
+imported per icon path) ship their own types. Playwright's browser is not part
+of the npm package: a production machine also needs `npx playwright install
+chromium`.
 
 The production `express.static(dist)` mount and SPA fallback are also omitted; a
 comment in `server/server.ts` marks the exact insertion point.

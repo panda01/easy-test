@@ -124,6 +124,18 @@ describe.each([
       expect(landing.state).toBe(JSON.stringify({ returnTo: WEBSITE_PATH }));
     });
 
+    it("shows a run status icon only on actions", () => {
+      renderSection(itemKind, {
+        data: [buildWebsiteItemRecord({ id: "item-1", title: "Log in" })],
+        isLoading: false,
+        errorMessage: null,
+      });
+
+      const itemList = screen.getByRole("list", { name: heading });
+      const statusIcons = within(itemList).queryAllByRole("img");
+      expect(statusIcons).toHaveLength(itemKind === ACTION_KIND ? 1 : 0);
+    });
+
     it("passes the return state along when New is clicked", async () => {
       const user = userEvent.setup();
       renderSection(itemKind, { data: [], isLoading: false, errorMessage: null });
@@ -135,3 +147,43 @@ describe.each([
     });
   },
 );
+
+describe("WebsiteItemListSection (actions' run status)", () => {
+  it("judges each action by its newest version's latest run: passed, failed, not run, or no versions yet", () => {
+    renderSection(ACTION_KIND, {
+      data: [
+        buildWebsiteItemRecord({
+          id: "action-passing",
+          title: "Log in",
+          newestScript: {
+            id: "script-a",
+            latestRun: { id: "run-a", succeeded: true, createdAt: "2026-04-03T00:00:00.000Z" },
+          },
+        }),
+        buildWebsiteItemRecord({
+          id: "action-failing",
+          title: "Log out",
+          newestScript: {
+            id: "script-b",
+            latestRun: { id: "run-b", succeeded: false, createdAt: "2026-04-03T00:00:00.000Z" },
+          },
+        }),
+        buildWebsiteItemRecord({
+          id: "action-not-run",
+          title: "Sign up",
+          newestScript: { id: "script-c", latestRun: null },
+        }),
+        buildWebsiteItemRecord({ id: "action-without-versions", title: "Search", newestScript: null }),
+      ],
+      isLoading: false,
+      errorMessage: null,
+    });
+
+    const actionLinks = within(screen.getByRole("list", { name: "Actions" })).getAllByRole("link");
+    expect(within(actionLinks[0]).getByRole("img", { name: "Latest run passed" })).toBeInTheDocument();
+    expect(within(actionLinks[1]).getByRole("img", { name: "Latest run failed" })).toBeInTheDocument();
+    expect(within(actionLinks[2]).getByRole("img", { name: "Not run yet" })).toBeInTheDocument();
+    expect(within(actionLinks[3]).getByRole("img", { name: "Not run yet" })).toBeInTheDocument();
+    expect(actionLinks[0]).toHaveAccessibleName(/^Latest run passed Log in/);
+  });
+});

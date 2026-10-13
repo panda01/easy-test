@@ -7,6 +7,7 @@ import Chip from "@mui/material/Chip";
 import LinearProgress from "@mui/material/LinearProgress";
 import List from "@mui/material/List";
 import ListItemButton from "@mui/material/ListItemButton";
+import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
@@ -14,11 +15,12 @@ import Typography from "@mui/material/Typography";
 import ActionScriptDetails from "./ActionScriptDetails";
 import LoadStatusNotice from "./LoadStatusNotice";
 import ScriptModelPicker, { type ScriptModelPickerProps } from "./ScriptModelPicker";
+import ScriptRunStatusIcon from "./ScriptRunStatusIcon";
 import { type ActionScriptRecord } from "../hooks/useActionScripts";
 import { type ReturnState } from "../hooks/useReturnNavigation";
+import { type ActionPlan } from "../utils/actionPlanSteps";
 import { describeScriptModel } from "../utils/describeScriptModel";
 import { type CurrentActionText, findChangedActionFields } from "../utils/describeScriptStaleness";
-import { formatCount } from "../utils/formatCount";
 
 const HEADING_ID = "action-scripts-section-heading";
 const VERSIONS_HEADING_ID = "action-script-versions-heading";
@@ -51,17 +53,26 @@ export interface ActionScriptsSectionProps {
   comparePath: string;
   /** History state for the "Compare versions" link, so that page can return here. */
   compareLinkState: ReturnState;
+  /** True while an edited plan is being saved as a new version. */
+  isSavingEdit: boolean;
+  /** Why the last save of an edited plan failed, or null. */
+  saveEditErrorMessage: string | null;
+  /** Called with the version that was edited and the edited plan, to save it as a new version. */
+  onSaveEdit: (sourceScript: ActionScriptRecord, plan: ActionPlan) => void;
 }
 
 /**
  * The "Scripts" section of an action's page: the Model and Effort dropdowns
- * and the "Convert to script" button (Claude turns the action into a
- * Playwright script with the chosen model; each conversion is saved as a new,
- * never-edited version), a "Compare versions" link once there are two, the
- * list of versions to pick from - each with its model and effort, and an
- * "Out of date" chip when the action's title or description has changed since
- * - and the selected version in full (the newest unless the user picked
- * another).
+ * and the "Convert to script" button (Claude turns the action into a JSON
+ * step plan with the chosen model; each conversion is saved as a new
+ * version), a "Compare versions" link once there are two, the list of
+ * versions to pick from - each with its run status icon (its latest run
+ * passed, failed, or it has not been run yet), its model and effort, the
+ * version it was refined from (with the model and effort that refined it), or
+ * the version it was edited from, and an "Out of date" chip when the action's
+ * title, description, or credential has changed since - and the selected version in
+ * full (the newest unless the user picked another), whose steps can be
+ * edited and saved as yet another version.
  * @param props - The scripts, the model choice, the request states, and the callbacks
  * @returns The rendered section
  */
@@ -80,6 +91,9 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
     currentAction,
     comparePath,
     compareLinkState,
+    isSavingEdit,
+    saveEditErrorMessage,
+    onSaveEdit,
   } = props;
 
   const selectedScriptIndex = Math.max(
@@ -101,6 +115,64 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
    */
   const versionNumberAt = (scriptIndex: number): number => scripts.length - scriptIndex;
 
+  /**
+   * Finds the version number of a listed version by its id - the version
+   * another one was edited or refined from.
+   * @param scriptId - The source version's id, or null when there is no source
+   * @returns Its version number, or null when there is no source or it is no longer listed
+   */
+  const versionNumberOfScriptId = (scriptId: string | null): number | null => {
+    const thereIsNoSourceVersion = scriptId === null;
+    if (thereIsNoSourceVersion) return null;
+    const sourceIndex = scripts.findIndex((listedScript) => listedScript.id === scriptId);
+    const sourceIsNoLongerListed = sourceIndex === -1;
+    return sourceIsNoLongerListed ? null : versionNumberAt(sourceIndex);
+  };
+
+  /**
+   * Names the version another one came from, for the versions list.
+   * @param scriptId - The source version's id, or null
+   * @returns "Version 2", or "an earlier version" when it is not listed
+   */
+  const describeSourceVersionOf = (scriptId: string | null): string => {
+    const sourceVersionNumber = versionNumberOfScriptId(scriptId);
+    return sourceVersionNumber === null ? "an earlier version" : `Version ${String(sourceVersionNumber)}`;
+  };
+
+  /**
+   * Describes where a listed version came from, checked in this order: the
+   * version it was edited from; the version it was refined from and the
+   * model and effort that refined it; or the model and effort that
+   * generated it.
+   * @param script - A listed version
+   * @returns e.g. "Claude Opus 5.5 (claude-opus-5-5) · high effort", "Edited from Version 2", or "Refined from Version 1 · Claude Opus 5.5 (claude-opus-5-5) · high effort"
+   */
+  const describeVersionSource = (script: ActionScriptRecord): string => {
+    const versionWasEdited = script.editedFromActionScriptId !== null;
+    if (versionWasEdited) {
+      return `Edited from ${describeSourceVersionOf(script.editedFromActionScriptId)}`;
+    }
+    const modelText =
+      script.modelId === null
+        ? "unknown model"
+        : describeScriptModel(script.modelId, script.effort, modelPicker.models);
+    const { refinement } = script;
+    const versionWasRefined = refinement !== null;
+    if (versionWasRefined) {
+      return `Refined from ${describeSourceVersionOf(refinement.sourceActionScriptId)} · ${modelText}`;
+    }
+    return modelText;
+  };
+
+  /**
+   * Hands an edited plan to the page together with the version it was edited from.
+   * @param plan - The edited plan
+   */
+  const handleSaveEdit = (plan: ActionPlan): void => {
+    if (selectedScript === null) return;
+    onSaveEdit(selectedScript, plan);
+  };
+
   return (
     <Box component="section" aria-labelledby={HEADING_ID} sx={{ mt: 5 }}>
       <Stack
@@ -118,8 +190,9 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
         )}
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Claude turns this action into a Playwright script that only does what a user could do with
-        a mouse and keyboard. Each conversion is saved as a new version; versions are never edited.
+        Claude turns this action into a JSON step plan that only does what a user could do with a
+        mouse and keyboard, using the crawled pages most relevant to it. Each conversion is saved
+        as a new version, and so is each edit: a saved version never changes.
       </Typography>
 
       <Stack
@@ -172,19 +245,10 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
             <List disablePadding aria-labelledby={VERSIONS_HEADING_ID}>
               {scripts.map((script, scriptIndex) => {
                 const scriptIsSelected = scriptIndex === selectedScriptIndex;
-                const ruleWarningCount = script.ruleViolations.length;
-                const scriptHasRuleWarnings = ruleWarningCount > 0;
                 const scriptIsOutOfDate =
                   findChangedActionFields(script, currentAction).length > 0;
-                const generatedAtText = new Date(script.createdAt).toLocaleString();
-                const modelText = describeScriptModel(
-                  script.modelId,
-                  script.effort,
-                  modelPicker.models,
-                );
-                const versionDetailsText = scriptHasRuleWarnings
-                  ? `${generatedAtText} · ${modelText} · ${formatCount(ruleWarningCount, "rule warning", "rule warnings")}`
-                  : `${generatedAtText} · ${modelText}`;
+                const createdAtText = new Date(script.createdAt).toLocaleString();
+                const versionDetailsText = `${createdAtText} · ${describeVersionSource(script)}`;
                 return (
                   <ListItemButton
                     key={script.id}
@@ -195,6 +259,9 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
                     }}
                     divider
                   >
+                    <ListItemIcon sx={{ minWidth: 40 }}>
+                      <ScriptRunStatusIcon latestRun={script.latestRun} />
+                    </ListItemIcon>
                     <ListItemText
                       primary={`Version ${String(versionNumberAt(scriptIndex))}`}
                       secondary={versionDetailsText}
@@ -212,10 +279,19 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
 
       {selectedScript !== null && (
         <ActionScriptDetails
+          // Keyed by version, so picking (or saving) another version closes the editor.
+          key={selectedScript.id}
           script={selectedScript}
           versionNumber={versionNumberAt(selectedScriptIndex)}
+          editedFromVersionNumber={versionNumberOfScriptId(selectedScript.editedFromActionScriptId)}
+          refinedFromVersionNumber={versionNumberOfScriptId(
+            selectedScript.refinement?.sourceActionScriptId ?? null,
+          )}
           currentAction={currentAction}
           catalogModels={modelPicker.models}
+          isSavingEdit={isSavingEdit}
+          saveEditErrorMessage={saveEditErrorMessage}
+          onSaveEdit={handleSaveEdit}
         />
       )}
     </Box>

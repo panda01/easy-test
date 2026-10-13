@@ -1,8 +1,10 @@
 import type {
   WebsiteInput,
   TitleDescriptionInput,
+  ActionInput,
   CredentialInput,
 } from "../services/dbService.js";
+import { type ActionPlan, validateActionPlan } from "./actionPlanSchema.js";
 import {
   CRAWL_BUTTON_MODES,
   DEFAULT_CRAWL_BUTTON_MODE,
@@ -293,6 +295,76 @@ export function validateTitleDescriptionInput(
 }
 
 /**
+ * Validates the body of an action create or replace request: `title` and
+ * `description` exactly as `validateTitleDescriptionInput` checks them, plus
+ * the credential the action runs as.
+ *
+ * `credentialId` is optional: a missing or null value means the action runs
+ * logged out - so a PUT that leaves it out UNLINKS the credential, because a
+ * PUT replaces the whole action. Otherwise it must be a non-blank string,
+ * and is trimmed. Whether that credential exists (and belongs to the same
+ * website) is checked by the controller.
+ * @param body - The parsed request body
+ * @returns The cleaned input, or the first problem found as a message
+ */
+export function validateActionInput(body: unknown): ValidationResult<ActionInput> {
+  const titleDescription = validateTitleDescriptionInput(body);
+  if (!titleDescription.isValid) {
+    return titleDescription;
+  }
+  // validateTitleDescriptionInput only succeeds for a JSON object.
+  const bodyObject = body as Record<string, unknown>;
+
+  const rawCredentialId = bodyObject.credentialId;
+  const credentialIdWasLeftOut = rawCredentialId === undefined || rawCredentialId === null;
+  if (credentialIdWasLeftOut) {
+    return { isValid: true, input: { ...titleDescription.input, credentialId: null } };
+  }
+  const credentialId = readTrimmedString(bodyObject, "credentialId");
+  const credentialIdIsNotANonBlankString = credentialId === null || credentialId === "";
+  if (credentialIdIsNotANonBlankString) {
+    return {
+      isValid: false,
+      errorMessage: "The credential id must be a non-blank string, or null to run logged out",
+    };
+  }
+  return { isValid: true, input: { ...titleDescription.input, credentialId } };
+}
+
+/** A "save edited plan" request, as validated. */
+export interface ActionPlanEditInput {
+  /** The edited plan, fully validated. */
+  plan: ActionPlan;
+}
+
+/**
+ * Validates the body of a "save edited plan" request: `{ plan }`, where the
+ * plan must pass every rule a generated plan passes (`validateActionPlan`) -
+ * only the allowed step actions, each with the target and value it needs,
+ * and nothing that leaves the website's origins.
+ * @param body - The parsed request body
+ * @param allowedOrigins - The origins the plan may open (see `buildAllowedPlanOrigins`)
+ * @returns The validated plan, or every problem found as one message
+ */
+export function validateActionPlanEditInput(
+  body: unknown,
+  allowedOrigins: string[],
+): ValidationResult<ActionPlanEditInput> {
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object" };
+  }
+  const planWasLeftOut = body.plan === undefined || body.plan === null;
+  if (planWasLeftOut) {
+    return { isValid: false, errorMessage: "A plan is required" };
+  }
+  const planValidation = validateActionPlan(body.plan, allowedOrigins);
+  if (!planValidation.isValid) {
+    return planValidation;
+  }
+  return { isValid: true, input: { plan: planValidation.input } };
+}
+
+/**
  * The model and effort level a "Convert to script" request asks for, as sent.
  * Whether that model exists and offers that level is checked afterwards,
  * against the live model catalog.
@@ -339,6 +411,52 @@ export function validateScriptModelChoiceInput(
   }
 
   return { isValid: true, input: { modelId, effort } };
+}
+
+/** The most characters a "Refine" request's note may have, after trimming. */
+export const MAX_REFINE_NOTE_LENGTH = 2000;
+
+/** A "Refine a failed run" request, as validated. */
+export interface ActionPlanRefineInput {
+  /** The user's hint for Claude, trimmed, or null when left out or blank. */
+  note: string | null;
+}
+
+/**
+ * Validates the body of a "Refine a failed run" request. The body is
+ * optional: no body at all (Express 5 leaves `req.body` undefined) means
+ * "refine without a note".
+ *
+ * `note` is optional: a missing, null, or blank value becomes null; anything
+ * else must be text, is trimmed, and may be at most `MAX_REFINE_NOTE_LENGTH`
+ * characters long once trimmed.
+ * @param body - The parsed request body, or undefined when none was sent
+ * @returns The cleaned input, or the first problem found as a message
+ */
+export function validateActionPlanRefineInput(
+  body: unknown,
+): ValidationResult<ActionPlanRefineInput> {
+  const bodyWasLeftOut = body === undefined;
+  if (bodyWasLeftOut) {
+    return { isValid: true, input: { note: null } };
+  }
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object" };
+  }
+
+  const note = readOptionalTrimmedText(body, "note");
+  if (!note.isText) {
+    return { isValid: false, errorMessage: "The note must be text" };
+  }
+  const noteIsTooLong = note.value !== null && note.value.length > MAX_REFINE_NOTE_LENGTH;
+  if (noteIsTooLong) {
+    return {
+      isValid: false,
+      errorMessage: `The note must be at most ${MAX_REFINE_NOTE_LENGTH} characters`,
+    };
+  }
+
+  return { isValid: true, input: { note: note.value } };
 }
 
 /**

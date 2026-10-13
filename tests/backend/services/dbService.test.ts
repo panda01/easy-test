@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { ActionPlan } from "../../../server/utils/actionPlanSchema.js";
 
 /**
  * `dbService` reads DATABASE_URL and constructs the PrismaPg adapter in its
@@ -13,6 +14,7 @@ const {
   mockScreenshotRunDelegate,
   mockActionScriptDelegate,
   mockActionScriptRunDelegate,
+  mockActionScriptRefinementDelegate,
   mockCrawlRunDelegate,
   mockCrawledPageDelegate,
   mockCredentialDelegate,
@@ -24,7 +26,8 @@ const {
     /**
      * Builds a stand-in for one Prisma model delegate (`prisma.website`,
      * `prisma.useCase`, `prisma.action`, `prisma.screenshotRun`,
-     * `prisma.actionScript`, `prisma.actionScriptRun`, `prisma.crawlRun`,
+     * `prisma.actionScript`, `prisma.actionScriptRun`,
+     * `prisma.actionScriptRefinement`, `prisma.crawlRun`,
      * `prisma.crawledPage`, `prisma.credential`) carrying every method
      * dbService calls.
      * @returns An object whose query methods are bare vitest mocks
@@ -45,6 +48,7 @@ const {
     const screenshotRunDelegate = createMockModelDelegate();
     const actionScriptDelegate = createMockModelDelegate();
     const actionScriptRunDelegate = createMockModelDelegate();
+    const actionScriptRefinementDelegate = createMockModelDelegate();
     const crawlRunDelegate = createMockModelDelegate();
     const crawledPageDelegate = createMockModelDelegate();
     const credentialDelegate = createMockModelDelegate();
@@ -57,6 +61,7 @@ const {
       screenshotRun: screenshotRunDelegate,
       actionScript: actionScriptDelegate,
       actionScriptRun: actionScriptRunDelegate,
+      actionScriptRefinement: actionScriptRefinementDelegate,
       crawlRun: crawlRunDelegate,
       crawledPage: crawledPageDelegate,
       credential: credentialDelegate,
@@ -69,6 +74,7 @@ const {
       mockScreenshotRunDelegate: screenshotRunDelegate,
       mockActionScriptDelegate: actionScriptDelegate,
       mockActionScriptRunDelegate: actionScriptRunDelegate,
+      mockActionScriptRefinementDelegate: actionScriptRefinementDelegate,
       mockCrawlRunDelegate: crawlRunDelegate,
       mockCrawledPageDelegate: crawledPageDelegate,
       mockCredentialDelegate: credentialDelegate,
@@ -99,6 +105,7 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     screenshotRun = mockScreenshotRunDelegate;
     actionScript = mockActionScriptDelegate;
     actionScriptRun = mockActionScriptRunDelegate;
+    actionScriptRefinement = mockActionScriptRefinementDelegate;
     crawlRun = mockCrawlRunDelegate;
     crawledPage = mockCrawledPageDelegate;
     credential = mockCredentialDelegate;
@@ -131,6 +138,7 @@ import {
   listActionScriptsForAction,
   findActionScriptForAction,
   createActionScriptForAction,
+  createRefinedActionScriptForAction,
   listActionScriptRunsForScript,
   findActionScriptRunForScript,
   createActionScriptRunForScript,
@@ -150,6 +158,7 @@ import {
   updateCredentialForWebsite,
   softDeleteCredentialForWebsite,
   adoptWebsiteLoginUrl,
+  findLatestCrawledPagesForWebsite,
 } from "../../../server/services/dbService.js";
 
 const sampleWebsite = {
@@ -172,15 +181,28 @@ const sampleUseCase = {
   deletedAt: null,
 };
 
+/** An action that runs logged out, as every action read returns it (with `credential`). */
 const sampleAction = {
   id: "action-1",
   websiteId: "cuid-1",
+  credentialId: null,
   title: "Log in",
   description: "Enter credentials and submit",
   createdAt: new Date("2026-01-03T00:00:00.000Z"),
   updatedAt: new Date("2026-01-03T00:00:00.000Z"),
   deletedAt: null,
+  credential: null,
 };
+
+/** The same action linked to a credential, carrying that credential's id and name. */
+const sampleLinkedAction = {
+  ...sampleAction,
+  credentialId: "credential-1",
+  credential: { id: "credential-1", name: "Admin" },
+};
+
+/** What every action read includes: the id and name of the credential it runs as. */
+const ACTION_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true } } };
 
 const sampleScreenshotRun = {
   id: "screenshot-run-1",
@@ -196,6 +218,29 @@ const sampleScreenshotRun = {
   deletedAt: null,
 };
 
+/** A valid step plan, with its fields in the order they are written. */
+const samplePlan: ActionPlan = {
+  name: "Log in",
+  startUrl: "https://example.com",
+  steps: [
+    { action: "fill", target: { label: "Email" }, value: "{{credential.username}}" },
+    { action: "click", target: { role: "button", name: "Sign in" }, value: null },
+  ],
+};
+
+/**
+ * The same plan as Postgres `jsonb` hands it back: every object's keys
+ * shuffled (jsonb keeps no key order).
+ */
+const samplePlanWithShuffledKeys = {
+  steps: [
+    { value: "{{credential.username}}", target: { label: "Email" }, action: "fill" },
+    { value: null, target: { name: "Sign in", role: "button" }, action: "click" },
+  ],
+  startUrl: "https://example.com",
+  name: "Log in",
+};
+
 const sampleActionScript = {
   id: "action-script-1",
   websiteId: "cuid-1",
@@ -204,16 +249,155 @@ const sampleActionScript = {
   startUrl: "https://example.com",
   actionTitle: "Log in",
   actionDescription: "Enter credentials and submit",
+  credentialId: "credential-1",
+  credentialName: "Admin",
   summary: "Logs in",
   assumptions: ["The button says Sign in"],
-  code: "import { chromium } from 'playwright';\n",
-  ruleViolations: [],
+  plan: samplePlan,
+  contextPageUrls: ["https://example.com/", "https://example.com/login"],
   modelId: "claude-opus-5-5",
   effort: "high",
+  editedFromActionScriptId: null,
   createdAt: new Date("2026-01-05T00:00:00.000Z"),
   updatedAt: new Date("2026-01-05T00:00:00.000Z"),
   deletedAt: null,
+  // Every script read includes the refinement that produced it; this version was not refined.
+  refinement: null,
+  // ...and its newest run, as `latestRun`; this version has not been run.
+  latestRun: null,
 };
+
+/**
+ * What every action script read (and create) includes: the refinement that
+ * produced the version - unless it was soft deleted - with a summary of the
+ * failed run it came from, joined (never copied) from that run.
+ */
+const ACTION_SCRIPT_REFINEMENT_INCLUDE = {
+  refinement: {
+    where: { deletedAt: null },
+    include: {
+      actionScriptRun: {
+        select: {
+          id: true,
+          errorMessage: true,
+          failedStepNumber: true,
+          timedOut: true,
+          failingPageAriaSnapshot: true,
+        },
+      },
+    },
+  },
+};
+
+/** How a version's newest run is read: at most one, the newest active one, cut down to its outcome. */
+const LATEST_ACTION_SCRIPT_RUN_QUERY = {
+  where: { deletedAt: null },
+  orderBy: { createdAt: "desc" },
+  take: 1,
+  select: { id: true, succeeded: true, createdAt: true },
+};
+
+/** What every action script read (and create) includes: the refinement, and the newest run. */
+const ACTION_SCRIPT_INCLUDE = {
+  ...ACTION_SCRIPT_REFINEMENT_INCLUDE,
+  runs: LATEST_ACTION_SCRIPT_RUN_QUERY,
+};
+
+/** What the website's action list includes: the credential, and the newest version with its newest run. */
+const ACTION_LIST_INCLUDE = {
+  ...ACTION_CREDENTIAL_INCLUDE,
+  scripts: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: { id: true, runs: LATEST_ACTION_SCRIPT_RUN_QUERY },
+  },
+};
+
+/** A passed run, as `LATEST_ACTION_SCRIPT_RUN_QUERY` selects it. */
+const samplePassedLatestRun = {
+  id: "action-script-run-2",
+  succeeded: true,
+  createdAt: new Date("2026-01-07T00:00:00.000Z"),
+};
+
+/** A failed run, as `LATEST_ACTION_SCRIPT_RUN_QUERY` selects it. */
+const sampleFailedLatestRun = {
+  id: "action-script-run-3",
+  succeeded: false,
+  createdAt: new Date("2026-01-08T00:00:00.000Z"),
+};
+
+/**
+ * Builds the row Prisma hands back for a script read with
+ * `ACTION_SCRIPT_INCLUDE` from the script dbService should answer with: the
+ * same fields without `latestRun`, plus the newest-run list it came from (the
+ * one run, or empty when `latestRun` is null).
+ * @param script - The script as dbService should return it
+ * @returns The Prisma row for that script
+ */
+function toPrismaActionScriptRow<TScript extends { latestRun: unknown }>(
+  script: TScript,
+): Omit<TScript, "latestRun"> & { runs: unknown[] } {
+  const { latestRun, ...scriptColumnsAndRefinement } = script;
+  const newestRunList = latestRun === null ? [] : [latestRun];
+  return { ...scriptColumnsAndRefinement, runs: newestRunList };
+}
+
+/** The facts a caller supplies when recording a refinement (see `ActionScriptRefinementInput`). */
+const sampleRefinementInput = {
+  sourceActionScriptId: "action-script-1",
+  actionScriptRunId: "action-script-run-1",
+  note: "The button is called Log in now",
+  inputTokens: 2408,
+  outputTokens: 989,
+  cacheReadInputTokens: 9519,
+  cacheCreationInputTokens: 1292,
+  screenshotWasSent: true,
+};
+
+/** A version refined from a failed run of `sampleActionScript`, as the refined create answers with it. */
+const sampleRefinedActionScript = {
+  ...sampleActionScript,
+  id: "action-script-2",
+  summary: "Logs in with the renamed button",
+  refinement: {
+    ...sampleRefinementInput,
+    id: "refinement-1",
+    websiteId: "cuid-1",
+    actionId: "action-1",
+    refinedActionScriptId: "action-script-2",
+    createdAt: new Date("2026-01-06T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-06T00:00:00.000Z"),
+    deletedAt: null,
+    actionScriptRun: {
+      id: "action-script-run-1",
+      errorMessage: 'Step 2 (click): button "Sign in" was not found within 10 seconds',
+      failedStepNumber: 2,
+      timedOut: false,
+      failingPageAriaSnapshot: '- button "Log in"',
+    },
+  },
+};
+
+/**
+ * Reads the keys of a returned plan and of each of its steps and targets, in
+ * order, so a test can prove the plan's fields were put back in written order.
+ * @param plan - A plan as dbService returned it
+ * @returns The plan's keys, then each step's keys and its target's keys
+ */
+function readPlanKeyOrder(plan: unknown): {
+  planKeys: string[];
+  stepKeys: string[][];
+  targetKeys: string[][];
+} {
+  const typedPlan = plan as { steps: { target: Record<string, unknown> | null }[] };
+  return {
+    planKeys: Object.keys(typedPlan),
+    stepKeys: typedPlan.steps.map((step) => Object.keys(step)),
+    targetKeys: typedPlan.steps.map((step) => Object.keys(step.target ?? {})),
+  };
+}
 
 const sampleActionScriptRun = {
   id: "action-script-run-1",
@@ -221,12 +405,15 @@ const sampleActionScriptRun = {
   actionId: "action-1",
   actionScriptId: "action-script-1",
   succeeded: true,
-  exitCode: 0,
-  exitSignal: null,
   timedOut: false,
+  errorMessage: null,
+  failedStepNumber: null,
+  credentialName: "Admin",
   output: "✔ Use case completed\n",
   outputWasTruncated: false,
   failureScreenshotFileName: null,
+  failingPageUrl: null,
+  failingPageAriaSnapshot: null,
   durationMs: 3100,
   createdAt: new Date("2026-01-06T00:00:00.000Z"),
   updatedAt: new Date("2026-01-06T00:00:00.000Z"),
@@ -528,13 +715,14 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, crawl runs, crawled pages, and credentials inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script refinements, crawl runs, crawled pages, and credentials inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 4 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 5 });
+      mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 30 });
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 2 });
@@ -568,6 +756,10 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockActionScriptRefinementDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
       expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
@@ -582,13 +774,14 @@ describe("dbService", () => {
       });
     });
 
-    it("softDeleteWebsite writes one shared deletedAt timestamp to all nine tables", async () => {
+    it("softDeleteWebsite writes one shared deletedAt timestamp to all ten tables", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 0 });
@@ -605,6 +798,9 @@ describe("dbService", () => {
       const actionScriptRunDeletedAt = readDeletedAtWrittenBy(
         mockActionScriptRunDelegate.updateMany,
       );
+      const actionScriptRefinementDeletedAt = readDeletedAtWrittenBy(
+        mockActionScriptRefinementDelegate.updateMany,
+      );
       const crawlRunDeletedAt = readDeletedAtWrittenBy(mockCrawlRunDelegate.updateMany);
       const crawledPageDeletedAt = readDeletedAtWrittenBy(mockCrawledPageDelegate.updateMany);
       const credentialDeletedAt = readDeletedAtWrittenBy(mockCredentialDelegate.updateMany);
@@ -615,6 +811,7 @@ describe("dbService", () => {
       expect(screenshotRunDeletedAt).toBe(websiteDeletedAt);
       expect(actionScriptDeletedAt).toBe(websiteDeletedAt);
       expect(actionScriptRunDeletedAt).toBe(websiteDeletedAt);
+      expect(actionScriptRefinementDeletedAt).toBe(websiteDeletedAt);
       expect(crawlRunDeletedAt).toBe(websiteDeletedAt);
       expect(crawledPageDeletedAt).toBe(websiteDeletedAt);
       expect(credentialDeletedAt).toBe(websiteDeletedAt);
@@ -635,6 +832,7 @@ describe("dbService", () => {
       expect(mockScreenshotRunDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockActionScriptRefinementDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockCrawlRunDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockCrawledPageDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockCredentialDelegate.updateMany).not.toHaveBeenCalled();
@@ -767,27 +965,56 @@ describe("dbService", () => {
   });
 
   describe("actions", () => {
-    it("listActionsForWebsite returns the website's active actions, newest first", async () => {
-      mockActionDelegate.findMany.mockResolvedValue([sampleAction]);
+    it("listActionsForWebsite returns the website's active actions, newest first, each with its credential's id and name", async () => {
+      mockActionDelegate.findMany.mockResolvedValue([
+        { ...sampleLinkedAction, scripts: [] },
+        { ...sampleAction, scripts: [] },
+      ]);
 
       const actions = await listActionsForWebsite("cuid-1");
 
       expect(mockActionDelegate.findMany).toHaveBeenCalledWith({
         where: { websiteId: "cuid-1", deletedAt: null },
         orderBy: { createdAt: "desc" },
+        include: ACTION_LIST_INCLUDE,
       });
-      expect(actions).toEqual([sampleAction]);
+      expect(actions).toEqual([
+        { ...sampleLinkedAction, newestScript: null },
+        { ...sampleAction, newestScript: null },
+      ]);
     });
 
-    it("findActionForWebsite scopes the lookup to the website and to active rows", async () => {
-      mockActionDelegate.findFirst.mockResolvedValue(sampleAction);
+    it("listActionsForWebsite answers each action's newest version and its latest run as newestScript, never as scripts", async () => {
+      mockActionDelegate.findMany.mockResolvedValue([
+        { ...sampleAction, id: "action-passing", scripts: [{ id: "script-a", runs: [samplePassedLatestRun] }] },
+        { ...sampleAction, id: "action-failing", scripts: [{ id: "script-b", runs: [sampleFailedLatestRun] }] },
+        { ...sampleAction, id: "action-not-run", scripts: [{ id: "script-c", runs: [] }] },
+        { ...sampleAction, id: "action-without-versions", scripts: [] },
+      ]);
+
+      const actions = await listActionsForWebsite("cuid-1");
+
+      expect(actions.map((action) => action.newestScript)).toEqual([
+        { id: "script-a", latestRun: samplePassedLatestRun },
+        { id: "script-b", latestRun: sampleFailedLatestRun },
+        { id: "script-c", latestRun: null },
+        null,
+      ]);
+      for (const action of actions) {
+        expect(action).not.toHaveProperty("scripts");
+      }
+    });
+
+    it("findActionForWebsite scopes the lookup to the website and to active rows, bringing the credential's id and name", async () => {
+      mockActionDelegate.findFirst.mockResolvedValue(sampleLinkedAction);
 
       const found = await findActionForWebsite("cuid-1", "action-1");
 
       expect(mockActionDelegate.findFirst).toHaveBeenCalledWith({
         where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
+        include: ACTION_CREDENTIAL_INCLUDE,
       });
-      expect(found).toBe(sampleAction);
+      expect(found).toBe(sampleLinkedAction);
     });
 
     it("findActionForWebsite returns null when no active action of that website matches", async () => {
@@ -796,36 +1023,78 @@ describe("dbService", () => {
       expect(await findActionForWebsite("cuid-1", "action-of-another-site")).toBeNull();
     });
 
-    it("createActionForWebsite inserts the title and description under the website", async () => {
-      mockActionDelegate.create.mockResolvedValue(sampleAction);
+    it("createActionForWebsite inserts the title, description, and credential under the website, answering with the credential's id and name", async () => {
+      mockActionDelegate.create.mockResolvedValue(sampleLinkedAction);
 
       const created = await createActionForWebsite("cuid-1", {
         title: "Log in",
         description: "Enter credentials and submit",
+        credentialId: "credential-1",
       });
 
       expect(mockActionDelegate.create).toHaveBeenCalledWith({
         data: {
           title: "Log in",
           description: "Enter credentials and submit",
+          credentialId: "credential-1",
           websiteId: "cuid-1",
         },
+        include: ACTION_CREDENTIAL_INCLUDE,
+      });
+      expect(created).toBe(sampleLinkedAction);
+    });
+
+    it("createActionForWebsite inserts an action that runs logged out with a null credential", async () => {
+      mockActionDelegate.create.mockResolvedValue(sampleAction);
+
+      const created = await createActionForWebsite("cuid-1", {
+        title: "Log in",
+        description: "Enter credentials and submit",
+        credentialId: null,
+      });
+
+      expect(mockActionDelegate.create).toHaveBeenCalledWith({
+        data: {
+          title: "Log in",
+          description: "Enter credentials and submit",
+          credentialId: null,
+          websiteId: "cuid-1",
+        },
+        include: ACTION_CREDENTIAL_INCLUDE,
       });
       expect(created).toBe(sampleAction);
     });
 
-    it("updateActionForWebsite updates only an active action of that website", async () => {
-      const updatedAction = { ...sampleAction, title: "Log out" };
+    it("updateActionForWebsite updates only an active action of that website, credential included", async () => {
+      const updatedAction = { ...sampleLinkedAction, title: "Log out" };
       mockActionDelegate.update.mockResolvedValue(updatedAction);
-      const replacement = { title: "Log out", description: "Open the menu and log out" };
+      const replacement = {
+        title: "Log out",
+        description: "Open the menu and log out",
+        credentialId: "credential-1",
+      };
 
       const updated = await updateActionForWebsite("cuid-1", "action-1", replacement);
 
       expect(mockActionDelegate.update).toHaveBeenCalledWith({
         where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
         data: replacement,
+        include: ACTION_CREDENTIAL_INCLUDE,
       });
       expect(updated).toBe(updatedAction);
+    });
+
+    it("updateActionForWebsite writes a null credential to unlink it", async () => {
+      mockActionDelegate.update.mockResolvedValue(sampleAction);
+      const replacement = { title: "Log in", description: "Enter credentials", credentialId: null };
+
+      await updateActionForWebsite("cuid-1", "action-1", replacement);
+
+      expect(mockActionDelegate.update).toHaveBeenCalledWith({
+        where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
+        data: { title: "Log in", description: "Enter credentials", credentialId: null },
+        include: ACTION_CREDENTIAL_INCLUDE,
+      });
     });
 
     it("updateActionForWebsite returns null when no active action matched (P2025)", async () => {
@@ -834,6 +1103,7 @@ describe("dbService", () => {
       const updated = await updateActionForWebsite("cuid-1", "missing", {
         title: "t",
         description: "d",
+        credentialId: null,
       });
 
       expect(updated).toBeNull();
@@ -844,14 +1114,19 @@ describe("dbService", () => {
       mockActionDelegate.update.mockRejectedValue(connectionError);
 
       await expect(
-        updateActionForWebsite("cuid-1", "action-1", { title: "t", description: "d" }),
+        updateActionForWebsite("cuid-1", "action-1", {
+          title: "t",
+          description: "d",
+          credentialId: null,
+        }),
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteActionForWebsite stamps the active action and its scripts and script runs inside one transaction", async () => {
+    it("softDeleteActionForWebsite stamps the active action and its scripts, script runs, and script refinements inside one transaction", async () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 3 });
+      mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 1 });
 
       const actionWasDeleted = await softDeleteActionForWebsite("cuid-1", "action-1");
 
@@ -869,12 +1144,17 @@ describe("dbService", () => {
         where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockActionScriptRefinementDelegate.updateMany).toHaveBeenCalledWith({
+        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
     });
 
-    it("softDeleteActionForWebsite writes one shared deletedAt timestamp to the action, its scripts, and their runs", async () => {
+    it("softDeleteActionForWebsite writes one shared deletedAt timestamp to the action, its scripts, their runs, and their refinements", async () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 0 });
 
       await softDeleteActionForWebsite("cuid-1", "action-1");
 
@@ -882,6 +1162,9 @@ describe("dbService", () => {
       expect(actionDeletedAt).toBeInstanceOf(Date);
       expect(readDeletedAtWrittenBy(mockActionScriptDelegate.updateMany)).toBe(actionDeletedAt);
       expect(readDeletedAtWrittenBy(mockActionScriptRunDelegate.updateMany)).toBe(actionDeletedAt);
+      expect(readDeletedAtWrittenBy(mockActionScriptRefinementDelegate.updateMany)).toBe(
+        actionDeletedAt,
+      );
     });
 
     it("softDeleteActionForWebsite returns false and touches no scripts when no active action matched", async () => {
@@ -890,6 +1173,7 @@ describe("dbService", () => {
       expect(await softDeleteActionForWebsite("cuid-1", "already-deleted")).toBe(false);
       expect(mockActionScriptDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockActionScriptRefinementDelegate.updateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -943,27 +1227,132 @@ describe("dbService", () => {
     });
   });
   describe("action scripts", () => {
-    it("listActionScriptsForAction returns the action's active scripts, newest first", async () => {
-      mockActionScriptDelegate.findMany.mockResolvedValue([sampleActionScript]);
+    it("listActionScriptsForAction returns the action's active scripts, newest first, each with its refinement", async () => {
+      mockActionScriptDelegate.findMany.mockResolvedValue([toPrismaActionScriptRow(sampleActionScript)]);
 
       const actionScripts = await listActionScriptsForAction("cuid-1", "action-1");
 
       expect(mockActionScriptDelegate.findMany).toHaveBeenCalledWith({
         where: { websiteId: "cuid-1", actionId: "action-1", deletedAt: null },
         orderBy: { createdAt: "desc" },
+        include: ACTION_SCRIPT_INCLUDE,
       });
       expect(actionScripts).toEqual([sampleActionScript]);
     });
 
+    it("listActionScriptsForAction passes a refined version's refinement and its failed-run summary through", async () => {
+      mockActionScriptDelegate.findMany.mockResolvedValue([
+        toPrismaActionScriptRow(sampleRefinedActionScript),
+        toPrismaActionScriptRow(sampleActionScript),
+      ]);
+
+      const actionScripts = await listActionScriptsForAction("cuid-1", "action-1");
+
+      expect(actionScripts).toEqual([sampleRefinedActionScript, sampleActionScript]);
+      expect(actionScripts[0].refinement?.actionScriptRun.failedStepNumber).toBe(2);
+      expect(actionScripts[1].refinement).toBeNull();
+    });
+
+    it("listActionScriptsForAction answers each version's newest run as latestRun, never as runs", async () => {
+      mockActionScriptDelegate.findMany.mockResolvedValue([
+        toPrismaActionScriptRow({ ...sampleActionScript, id: "script-passing", latestRun: samplePassedLatestRun }),
+        toPrismaActionScriptRow({ ...sampleActionScript, id: "script-failing", latestRun: sampleFailedLatestRun }),
+        toPrismaActionScriptRow({ ...sampleActionScript, id: "script-not-run" }),
+      ]);
+
+      const actionScripts = await listActionScriptsForAction("cuid-1", "action-1");
+
+      expect(actionScripts.map((actionScript) => actionScript.latestRun)).toEqual([
+        samplePassedLatestRun,
+        sampleFailedLatestRun,
+        null,
+      ]);
+      for (const actionScript of actionScripts) {
+        expect(actionScript).not.toHaveProperty("runs");
+      }
+    });
+
+    it("listActionScriptsForAction puts every stored plan's fields back in written order", async () => {
+      mockActionScriptDelegate.findMany.mockResolvedValue([
+        toPrismaActionScriptRow({ ...sampleActionScript, plan: samplePlanWithShuffledKeys }),
+      ]);
+
+      const [actionScript] = await listActionScriptsForAction("cuid-1", "action-1");
+
+      expect(actionScript.plan).toEqual(samplePlan);
+      expect(readPlanKeyOrder(actionScript.plan)).toEqual({
+        planKeys: ["name", "startUrl", "steps"],
+        stepKeys: [
+          ["action", "target", "value"],
+          ["action", "target", "value"],
+        ],
+        targetKeys: [["label"], ["role", "name"]],
+      });
+    });
+
+    it("listActionScriptsForAction passes a stored plan that is not a valid plan through unchanged", async () => {
+      const handEditedPlan = { name: "Log in", steps: "not a list" };
+      mockActionScriptDelegate.findMany.mockResolvedValue([
+        toPrismaActionScriptRow({ ...sampleActionScript, plan: handEditedPlan }),
+      ]);
+
+      const [actionScript] = await listActionScriptsForAction("cuid-1", "action-1");
+
+      expect(actionScript.plan).toBe(handEditedPlan);
+      expect(actionScript).toEqual({ ...sampleActionScript, plan: handEditedPlan });
+    });
+
     it("findActionScriptForAction scopes the lookup to the website, the action, and active rows", async () => {
-      mockActionScriptDelegate.findFirst.mockResolvedValue(sampleActionScript);
+      mockActionScriptDelegate.findFirst.mockResolvedValue(toPrismaActionScriptRow(sampleActionScript));
 
       const found = await findActionScriptForAction("cuid-1", "action-1", "action-script-1");
 
       expect(mockActionScriptDelegate.findFirst).toHaveBeenCalledWith({
         where: { id: "action-script-1", websiteId: "cuid-1", actionId: "action-1", deletedAt: null },
+        include: ACTION_SCRIPT_INCLUDE,
       });
-      expect(found).toBe(sampleActionScript);
+      expect(found).toEqual(sampleActionScript);
+    });
+
+    it("findActionScriptForAction answers the version's newest run as latestRun, never as runs", async () => {
+      const scriptWithFailedLatestRun = { ...sampleActionScript, latestRun: sampleFailedLatestRun };
+      mockActionScriptDelegate.findFirst.mockResolvedValue(toPrismaActionScriptRow(scriptWithFailedLatestRun));
+
+      const found = await findActionScriptForAction("cuid-1", "action-1", "action-script-1");
+
+      expect(found).toEqual(scriptWithFailedLatestRun);
+      expect(found).not.toHaveProperty("runs");
+    });
+
+    it("findActionScriptForAction answers a refined version with its refinement", async () => {
+      mockActionScriptDelegate.findFirst.mockResolvedValue(toPrismaActionScriptRow(sampleRefinedActionScript));
+
+      const found = await findActionScriptForAction("cuid-1", "action-1", "action-script-2");
+
+      expect(found).toEqual(sampleRefinedActionScript);
+    });
+
+    it("findActionScriptForAction puts the stored plan's fields back in written order", async () => {
+      mockActionScriptDelegate.findFirst.mockResolvedValue(
+        toPrismaActionScriptRow({ ...sampleActionScript, plan: samplePlanWithShuffledKeys }),
+      );
+
+      const found = await findActionScriptForAction("cuid-1", "action-1", "action-script-1");
+
+      expect(found?.plan).toEqual(samplePlan);
+      expect(readPlanKeyOrder(found?.plan).planKeys).toEqual(["name", "startUrl", "steps"]);
+      expect(readPlanKeyOrder(found?.plan).stepKeys[0]).toEqual(["action", "target", "value"]);
+    });
+
+    it("findActionScriptForAction passes a stored plan that is not a valid plan through unchanged", async () => {
+      const handEditedPlan = { startUrl: 42 };
+      mockActionScriptDelegate.findFirst.mockResolvedValue(
+        toPrismaActionScriptRow({ ...sampleActionScript, plan: handEditedPlan }),
+      );
+
+      const found = await findActionScriptForAction("cuid-1", "action-1", "action-script-1");
+
+      expect(found?.plan).toBe(handEditedPlan);
     });
 
     it("findActionScriptForAction returns null when no active script of that action matches", async () => {
@@ -972,27 +1361,192 @@ describe("dbService", () => {
       expect(await findActionScriptForAction("cuid-1", "action-1", "script-of-another")).toBeNull();
     });
 
-    it("createActionScriptForAction inserts the script under the website and action", async () => {
-      mockActionScriptDelegate.create.mockResolvedValue(sampleActionScript);
+    it("createActionScriptForAction inserts a generated version under the website and action", async () => {
+      mockActionScriptDelegate.create.mockResolvedValue(toPrismaActionScriptRow(sampleActionScript));
       const scriptInput = {
         websiteName: "Example",
         startUrl: "https://example.com",
         actionTitle: "Log in",
         actionDescription: "Enter credentials and submit",
+        credentialId: "credential-1",
+        credentialName: "Admin",
         summary: "Logs in",
         assumptions: [],
-        code: "import { chromium } from 'playwright';\n",
-        ruleViolations: ["Line 2: .fill( - sets a whole value at once; type with pressSequentially"],
+        plan: samplePlan,
+        contextPageUrls: ["https://example.com/", "https://example.com/login"],
         modelId: "claude-opus-5-5",
         effort: "high",
+        editedFromActionScriptId: null,
       };
 
       const created = await createActionScriptForAction("cuid-1", "action-1", scriptInput);
 
       expect(mockActionScriptDelegate.create).toHaveBeenCalledWith({
         data: { ...scriptInput, websiteId: "cuid-1", actionId: "action-1" },
+        include: ACTION_SCRIPT_INCLUDE,
       });
-      expect(created).toBe(sampleActionScript);
+      expect(created).toEqual(sampleActionScript);
+    });
+
+    it("createActionScriptForAction inserts an edited version with no model, no effort, and its source's id", async () => {
+      const editedScript = {
+        ...sampleActionScript,
+        id: "action-script-2",
+        modelId: null,
+        effort: null,
+        editedFromActionScriptId: "action-script-1",
+      };
+      mockActionScriptDelegate.create.mockResolvedValue(toPrismaActionScriptRow(editedScript));
+      const scriptInput = {
+        websiteName: "Example",
+        startUrl: "https://example.com",
+        actionTitle: "Log in",
+        actionDescription: "Enter credentials and submit",
+        credentialId: null,
+        credentialName: null,
+        summary: "Logs in",
+        assumptions: [],
+        plan: samplePlan,
+        contextPageUrls: [],
+        modelId: null,
+        effort: null,
+        editedFromActionScriptId: "action-script-1",
+      };
+
+      const created = await createActionScriptForAction("cuid-1", "action-1", scriptInput);
+
+      expect(mockActionScriptDelegate.create).toHaveBeenCalledWith({
+        data: { ...scriptInput, websiteId: "cuid-1", actionId: "action-1" },
+        include: ACTION_SCRIPT_INCLUDE,
+      });
+      expect(created).toEqual(editedScript);
+    });
+
+    it("createActionScriptForAction answers with the saved plan's fields in written order", async () => {
+      mockActionScriptDelegate.create.mockResolvedValue(
+        toPrismaActionScriptRow({ ...sampleActionScript, plan: samplePlanWithShuffledKeys }),
+      );
+
+      const created = await createActionScriptForAction("cuid-1", "action-1", {
+        websiteName: "Example",
+        startUrl: "https://example.com",
+        actionTitle: "Log in",
+        actionDescription: "Enter credentials and submit",
+        credentialId: null,
+        credentialName: null,
+        summary: "Logs in",
+        assumptions: [],
+        plan: samplePlan,
+        contextPageUrls: [],
+        modelId: "claude-opus-5-5",
+        effort: "high",
+        editedFromActionScriptId: null,
+      });
+
+      expect(readPlanKeyOrder(created.plan).planKeys).toEqual(["name", "startUrl", "steps"]);
+      expect(created.plan).toEqual(samplePlan);
+    });
+
+    describe("createRefinedActionScriptForAction", () => {
+      /** The refined version's own fields: its source's snapshots and Claude's new plan. */
+      const refinedScriptInput = {
+        websiteName: "Example",
+        startUrl: "https://example.com",
+        actionTitle: "Log in",
+        actionDescription: "Enter credentials and submit",
+        credentialId: "credential-1",
+        credentialName: "Admin",
+        summary: "Logs in with the renamed button",
+        assumptions: ["Refined: the button is called Log in now"],
+        plan: samplePlan,
+        contextPageUrls: ["https://example.com/login"],
+        modelId: "claude-opus-5-5",
+        effort: "high",
+        editedFromActionScriptId: null,
+      };
+
+      it("inserts the version and its refinement in one nested create, both under the website and action", async () => {
+        mockActionScriptDelegate.create.mockResolvedValue(toPrismaActionScriptRow(sampleRefinedActionScript));
+
+        const created = await createRefinedActionScriptForAction(
+          "cuid-1",
+          "action-1",
+          refinedScriptInput,
+          sampleRefinementInput,
+        );
+
+        expect(mockActionScriptDelegate.create).toHaveBeenCalledTimes(1);
+        expect(mockActionScriptDelegate.create).toHaveBeenCalledWith({
+          data: {
+            ...refinedScriptInput,
+            websiteId: "cuid-1",
+            actionId: "action-1",
+            refinement: {
+              create: { ...sampleRefinementInput, websiteId: "cuid-1", actionId: "action-1" },
+            },
+          },
+          include: ACTION_SCRIPT_INCLUDE,
+        });
+        // One nested write is atomic on its own: no separate refinement insert, no transaction.
+        expect(mockActionScriptRefinementDelegate.create).not.toHaveBeenCalled();
+        expect(mockTransaction).not.toHaveBeenCalled();
+        expect(created).toEqual(sampleRefinedActionScript);
+      });
+
+      it("stores a refinement without a note, whose screenshot was not sent", async () => {
+        mockActionScriptDelegate.create.mockResolvedValue(toPrismaActionScriptRow(sampleRefinedActionScript));
+        const refinementWithoutNoteOrScreenshot = {
+          ...sampleRefinementInput,
+          note: null,
+          screenshotWasSent: false,
+        };
+
+        await createRefinedActionScriptForAction(
+          "cuid-1",
+          "action-1",
+          refinedScriptInput,
+          refinementWithoutNoteOrScreenshot,
+        );
+
+        const [createArguments] = mockActionScriptDelegate.create.mock.calls[0] as [
+          { data: { refinement: { create: Record<string, unknown> } } },
+        ];
+        expect(createArguments.data.refinement.create).toMatchObject({
+          note: null,
+          screenshotWasSent: false,
+        });
+      });
+
+      it("answers with the saved plan's fields in written order", async () => {
+        mockActionScriptDelegate.create.mockResolvedValue(
+          toPrismaActionScriptRow({ ...sampleRefinedActionScript, plan: samplePlanWithShuffledKeys }),
+        );
+
+        const created = await createRefinedActionScriptForAction(
+          "cuid-1",
+          "action-1",
+          refinedScriptInput,
+          sampleRefinementInput,
+        );
+
+        expect(readPlanKeyOrder(created.plan).planKeys).toEqual(["name", "startUrl", "steps"]);
+        expect(created.plan).toEqual(samplePlan);
+        expect(created.refinement).toEqual(sampleRefinedActionScript.refinement);
+      });
+
+      it("lets a failed insert propagate, so neither row is written", async () => {
+        const insertError = new Error("foreign key violation");
+        mockActionScriptDelegate.create.mockRejectedValue(insertError);
+
+        await expect(
+          createRefinedActionScriptForAction(
+            "cuid-1",
+            "action-1",
+            refinedScriptInput,
+            sampleRefinementInput,
+          ),
+        ).rejects.toBe(insertError);
+      });
     });
   });
 
@@ -1044,16 +1598,19 @@ describe("dbService", () => {
       ).toBeNull();
     });
 
-    it("createActionScriptRunForScript inserts the run's outcome under the website, action, and script", async () => {
+    it("createActionScriptRunForScript inserts the run's outcome, failing page included, under the website, action, and script", async () => {
       mockActionScriptRunDelegate.create.mockResolvedValue(sampleActionScriptRun);
       const runInput = {
         succeeded: false,
-        exitCode: null,
-        exitSignal: "SIGKILL",
         timedOut: true,
+        errorMessage: "The run hit the 5 minute time limit and was stopped",
+        failedStepNumber: 2,
+        credentialName: "Admin",
         output: "▶ Open the site\n",
         outputWasTruncated: false,
         failureScreenshotFileName: null,
+        failingPageUrl: "https://example.com/login",
+        failingPageAriaSnapshot: '- button "Log in"',
         durationMs: 305000,
       };
 
@@ -1274,6 +1831,125 @@ describe("dbService", () => {
     });
   });
 
+  describe("findLatestCrawledPagesForWebsite", () => {
+    /** What every crawl run lookup requires: active, finished, and with at least one page visited. */
+    const FINISHED_RUN_WITH_PAGES_WHERE = {
+      websiteId: "cuid-1",
+      deletedAt: null,
+      status: { not: "running" },
+      visitedPageCount: { gt: 0 },
+    };
+
+    /**
+     * Builds the page query expected for one picked run: its active,
+     * successful pages that have a snapshot, in visiting order.
+     * @param crawlRunId - The id of the run that was picked
+     * @returns The arguments `crawledPage.findMany` should receive
+     */
+    const pagesQueryForRun = (crawlRunId: string) => ({
+      where: {
+        websiteId: "cuid-1",
+        crawlRunId,
+        deletedAt: null,
+        succeeded: true,
+        ariaSnapshot: { not: null },
+      },
+      orderBy: { visitOrder: "asc" },
+      select: { url: true, title: true, depth: true, ariaSnapshot: true },
+    });
+
+    const startPageSnapshot = {
+      url: "https://example.com/",
+      title: "Home",
+      depth: 0,
+      ariaSnapshot: '- link "Log in"',
+    };
+    const loginPageSnapshot = {
+      url: "https://example.com/login",
+      title: "Log in",
+      depth: 1,
+      ariaSnapshot: '- textbox "Email"',
+    };
+
+    it("reads the pages of the newest run logged in as the action's credential", async () => {
+      mockCrawlRunDelegate.findFirst.mockResolvedValue({ id: "logged-in-run" });
+      mockCrawledPageDelegate.findMany.mockResolvedValue([startPageSnapshot, loginPageSnapshot]);
+
+      const pages = await findLatestCrawledPagesForWebsite("cuid-1", "credential-1");
+
+      expect(pages).toEqual([startPageSnapshot, loginPageSnapshot]);
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledTimes(1);
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledWith({
+        where: { ...FINISHED_RUN_WITH_PAGES_WHERE, credentialId: "credential-1", isLoggedIn: true },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      expect(mockCrawledPageDelegate.findMany).toHaveBeenCalledWith(
+        pagesQueryForRun("logged-in-run"),
+      );
+    });
+
+    it("reads the pages of the newest logged-out run for an action that runs logged out", async () => {
+      mockCrawlRunDelegate.findFirst.mockResolvedValue({ id: "logged-out-run" });
+      mockCrawledPageDelegate.findMany.mockResolvedValue([startPageSnapshot]);
+
+      const pages = await findLatestCrawledPagesForWebsite("cuid-1", null);
+
+      expect(pages).toEqual([startPageSnapshot]);
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledTimes(1);
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledWith({
+        where: { ...FINISHED_RUN_WITH_PAGES_WHERE, credentialId: null },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      expect(mockCrawledPageDelegate.findMany).toHaveBeenCalledWith(
+        pagesQueryForRun("logged-out-run"),
+      );
+    });
+
+    it("falls back to the newest finished run of any kind when none was crawled the same way", async () => {
+      mockCrawlRunDelegate.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: "any-kind-of-run" });
+      mockCrawledPageDelegate.findMany.mockResolvedValue([startPageSnapshot]);
+
+      const pages = await findLatestCrawledPagesForWebsite("cuid-1", "credential-1");
+
+      expect(pages).toEqual([startPageSnapshot]);
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledTimes(2);
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenNthCalledWith(2, {
+        where: FINISHED_RUN_WITH_PAGES_WHERE,
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      expect(mockCrawledPageDelegate.findMany).toHaveBeenCalledWith(
+        pagesQueryForRun("any-kind-of-run"),
+      );
+    });
+
+    it("returns no pages, and reads none, when the website was never crawled", async () => {
+      mockCrawlRunDelegate.findFirst.mockResolvedValue(null);
+
+      const pages = await findLatestCrawledPagesForWebsite("cuid-1", null);
+
+      expect(pages).toEqual([]);
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledTimes(2);
+      expect(mockCrawledPageDelegate.findMany).not.toHaveBeenCalled();
+    });
+
+    it("leaves out any page that comes back without a snapshot", async () => {
+      mockCrawlRunDelegate.findFirst.mockResolvedValue({ id: "logged-out-run" });
+      mockCrawledPageDelegate.findMany.mockResolvedValue([
+        startPageSnapshot,
+        { ...loginPageSnapshot, ariaSnapshot: null },
+      ]);
+
+      const pages = await findLatestCrawledPagesForWebsite("cuid-1", null);
+
+      expect(pages).toEqual([startPageSnapshot]);
+    });
+  });
+
   describe("credentials", () => {
     it("listCredentialsForWebsite returns the website's active credentials, newest first, without passwords", async () => {
       mockCredentialDelegate.findMany.mockResolvedValue([sampleCredentialSummary]);
@@ -1381,6 +2057,7 @@ describe("dbService", () => {
 
     it("softDeleteCredentialForWebsite stamps deletedAt on the active credential and reports it", async () => {
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
 
       const credentialWasDeleted = await softDeleteCredentialForWebsite("cuid-1", "credential-1");
 
@@ -1391,10 +2068,40 @@ describe("dbService", () => {
       });
     });
 
-    it("softDeleteCredentialForWebsite returns false when no active credential matched", async () => {
+    it("softDeleteCredentialForWebsite unlinks the credential from its website's actions inside the same transaction", async () => {
+      mockCredentialDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
+
+      await softDeleteCredentialForWebsite("cuid-1", "credential-1");
+
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+      expect(mockTransaction).toHaveBeenCalledWith(expect.any(Function));
+      expect(mockActionDelegate.updateMany).toHaveBeenCalledTimes(1);
+      expect(mockActionDelegate.updateMany).toHaveBeenCalledWith({
+        where: { credentialId: "credential-1", websiteId: "cuid-1" },
+        data: { credentialId: null },
+      });
+      const credentialStampOrder = mockCredentialDelegate.updateMany.mock.invocationCallOrder[0];
+      const actionUnlinkOrder = mockActionDelegate.updateMany.mock.invocationCallOrder[0];
+      expect(credentialStampOrder).toBeLessThan(actionUnlinkOrder);
+    });
+
+    it("softDeleteCredentialForWebsite returns false and unlinks no actions when no active credential matched", async () => {
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 0 });
 
       expect(await softDeleteCredentialForWebsite("cuid-1", "deleted-credential")).toBe(false);
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+      expect(mockActionDelegate.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("softDeleteCredentialForWebsite propagates a failure inside the transaction", async () => {
+      const unlinkError = new Error("deadlock detected");
+      mockCredentialDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionDelegate.updateMany.mockRejectedValue(unlinkError);
+
+      await expect(softDeleteCredentialForWebsite("cuid-1", "credential-1")).rejects.toBe(
+        unlinkError,
+      );
     });
   });
 });

@@ -4,16 +4,18 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import List from "@mui/material/List";
 import ListItemButton from "@mui/material/ListItemButton";
+import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import LoadStatusNotice from "./LoadStatusNotice";
+import ScriptRunStatusIcon from "./ScriptRunStatusIcon";
 import { type JsonResourceState } from "../hooks/useJsonResource";
 import { type WebsiteItemRecord } from "../hooks/useWebsiteItems";
 import { type ReturnState } from "../hooks/useReturnNavigation";
 import { newWebsiteItemPath, websiteItemDetailPath } from "../utils/routePaths";
-import { type WebsiteItemKind } from "../utils/websiteItemKinds";
+import { ACTION_KIND, type WebsiteItemKind } from "../utils/websiteItemKinds";
 
 /** Props for `WebsiteItemListSection`. */
 export interface WebsiteItemListSectionProps {
@@ -30,7 +32,9 @@ export interface WebsiteItemListSectionProps {
 /**
  * One "Use cases" or "Actions" section of a website's detail page: a heading,
  * a "New ..." button, and the items as links to their own detail pages (or an
- * empty-state line when there are none).
+ * empty-state line when there are none). Each action also shows its run
+ * status icon, judged by its newest version's latest run: passed, failed, or
+ * not run yet (also shown when the action has no versions).
  * @param props - The kind, the owning website, the list request, and the link state
  * @returns The rendered section
  */
@@ -38,6 +42,7 @@ export default function WebsiteItemListSection(props: WebsiteItemListSectionProp
   const { itemKind, websiteId, itemsResource, returnToHereState } = props;
   const items = itemsResource.data;
   const headingId = `${itemKind.kindId}-section-heading`;
+  const itemsAreActions = itemKind.kindId === ACTION_KIND.kindId;
 
   return (
     <Box component="section" aria-labelledby={headingId} sx={{ mt: 5 }}>
@@ -76,6 +81,11 @@ export default function WebsiteItemListSection(props: WebsiteItemListSectionProp
                 state={returnToHereState}
                 divider
               >
+                {itemsAreActions && (
+                  <ListItemIcon sx={{ minWidth: 40 }}>
+                    <ScriptRunStatusIcon latestRun={item.newestScript?.latestRun ?? null} />
+                  </ListItemIcon>
+                )}
                 <ListItemText
                   primary={item.title}
                   secondary={item.description}

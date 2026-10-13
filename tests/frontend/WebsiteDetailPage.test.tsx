@@ -387,7 +387,8 @@ describe("WebsiteDetailPage", () => {
       renderWebsiteDetailPage(OPENED_FROM_LIST);
 
       expect(await screen.findByRole("status")).toHaveTextContent("Failed · HTTP 404");
-      expect(screen.getByRole("img")).toHaveAttribute(
+      // Named: the actions list has run status icons, which are images too.
+      expect(screen.getByRole("img", { name: /^Screenshot of / })).toHaveAttribute(
         "src",
         `${SCREENSHOT_RUNS_API_URL}/run-2/screenshot`,
       );
@@ -406,7 +407,8 @@ describe("WebsiteDetailPage", () => {
       await user.click(within(runHistory).getByRole("button", { name: /Succeeded · HTTP 200/ }));
 
       expect(screen.getByRole("status")).toHaveTextContent("Succeeded · HTTP 200");
-      expect(screen.getByRole("img")).toHaveAttribute(
+      // Named: the actions list has run status icons, which are images too.
+      expect(screen.getByRole("img", { name: /^Screenshot of / })).toHaveAttribute(
         "src",
         `${SCREENSHOT_RUNS_API_URL}/run-1/screenshot`,
       );
@@ -450,7 +452,8 @@ describe("WebsiteDetailPage", () => {
       const historyItems = within(runHistory).getAllByRole("button");
       expect(historyItems[0]).toHaveAttribute("aria-current", "true");
       expect(screen.getByRole("status")).toHaveTextContent("Succeeded · HTTP 200 · 2.1 s");
-      expect(screen.getByRole("img")).toHaveAttribute(
+      // Named: the actions list has run status icons, which are images too.
+      expect(screen.getByRole("img", { name: /^Screenshot of / })).toHaveAttribute(
         "src",
         `${SCREENSHOT_RUNS_API_URL}/run-3/screenshot`,
       );

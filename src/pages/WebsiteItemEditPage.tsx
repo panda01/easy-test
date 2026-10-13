@@ -4,6 +4,7 @@ import Typography from "@mui/material/Typography";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import TitleDescriptionForm from "../components/TitleDescriptionForm";
+import { useCredentials } from "../hooks/useCredentials";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnNavigation } from "../hooks/useReturnNavigation";
@@ -19,7 +20,9 @@ import { type WebsiteItemPageProps } from "../utils/websiteItemKinds";
 
 /**
  * The edit page for a use case or an action
- * (`/websites/:websiteId/<use-cases|actions>/:itemId/edit`).
+ * (`/websites/:websiteId/<use-cases|actions>/:itemId/edit`). An action's form
+ * also asks which of the website's credentials it logs in as (or none), and
+ * waits for the credential list before it appears.
  *
  * Loads the item first and only then mounts the form, keyed by kind and id,
  * so the fields always start from the saved values. Save and Cancel both
@@ -38,6 +41,13 @@ export default function WebsiteItemEditPage(props: WebsiteItemPageProps): ReactE
   const { sendJsonRequest, isSubmitting, errorMessage } = useJsonMutation();
   const { returnTo } = useReturnNavigation();
   const itemPath = websiteItemDetailPath(itemKind, websiteId, itemId);
+  const itemTakesACredential = itemKind.kindId === "action";
+  const credentialsResource = useCredentials(websiteId, itemTakesACredential);
+  const credentials = credentialsResource.data;
+  // An action's form waits for the credential list: a form without it would
+  // show (and save) the action's credential as "Logged out".
+  const formIsReady = !itemTakesACredential || credentials !== null;
+  const credentialOptions = itemTakesACredential ? (credentials ?? []) : undefined;
 
   /**
    * PUTs the edited item and, when the server accepts it, returns to the
@@ -89,15 +99,28 @@ export default function WebsiteItemEditPage(props: WebsiteItemPageProps): ReactE
         loadingLabel={`Loading ${itemKind.singularLabel}`}
       />
 
-      {item !== null && (
+      {itemTakesACredential && (
+        <LoadStatusNotice
+          isLoading={credentialsResource.isLoading}
+          errorMessage={credentialsResource.errorMessage}
+          loadingLabel="Loading credentials"
+        />
+      )}
+
+      {item !== null && formIsReady && (
         <TitleDescriptionForm
           key={`${itemKind.kindId}-${item.id}`}
-          initialValues={{ title: item.title, description: item.description }}
+          initialValues={{
+            title: item.title,
+            description: item.description,
+            credentialId: item.credentialId ?? null,
+          }}
           submitLabel="Save changes"
           isSubmitting={isSubmitting}
           errorMessage={errorMessage}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
+          credentialOptions={credentialOptions}
         />
       )}
     </Container>

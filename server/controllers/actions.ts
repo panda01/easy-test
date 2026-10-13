@@ -6,12 +6,32 @@ import {
   createActionForWebsite,
   updateActionForWebsite,
   softDeleteActionForWebsite,
+  findCredentialForWebsite,
 } from "../services/dbService.js";
 import { describeError } from "../utils/describeError.js";
-import { validateTitleDescriptionInput } from "../utils/validateRequestBodies.js";
+import { validateActionInput } from "../utils/validateRequestBodies.js";
 
 const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
 const ACTION_NOT_FOUND_MESSAGE = "Action not found";
+const CREDENTIAL_NOT_ON_WEBSITE_MESSAGE =
+  "That credential does not exist on this website; pick one of the website's credentials or none";
+
+/**
+ * Checks that the credential an action should run as is an active credential
+ * of the same website. Null (run logged out) always passes.
+ * @param websiteId - The cuid of the website row (never a raw path parameter)
+ * @param credentialId - The validated `credentialId` from the body, or null
+ * @returns True when the action may use it
+ */
+async function credentialBelongsToWebsite(
+  websiteId: string,
+  credentialId: string | null,
+): Promise<boolean> {
+  const actionRunsLoggedOut = credentialId === null;
+  if (actionRunsLoggedOut) return true;
+  const credential = await findCredentialForWebsite(websiteId, credentialId);
+  return credential !== null;
+}
 
 /**
  * Registers the action CRUD routes on the given express app. Every action
@@ -25,7 +45,12 @@ const ACTION_NOT_FOUND_MESSAGE = "Action not found";
  */
 export function registerActionRoutes(app: Express): void {
   /**
-   * Lists a website's active actions, newest first.
+   * Lists a website's active actions, newest first. Each action carries
+   * `credential: { id, name }` (the credential it logs in as) or null, and
+   * `newestScript: { id, latestRun }` - its newest version and that version's
+   * newest run (`{ id, succeeded, createdAt }`, or null when it has not been
+   * run) - or null when it has no versions yet, so the list can show whether
+   * the action's script passes.
    * @route GET /api/websites/:websiteId/actions
    * @param websiteId - Path parameter: the owning website's cuid
    * @returns 200 with an array of actions; 404 with `{ error }` when the website does not exist or was deleted; 500 with `{ error }` when a query fails
@@ -45,14 +70,15 @@ export function registerActionRoutes(app: Express): void {
   });
 
   /**
-   * Creates an action on a website.
+   * Creates an action on a website, optionally linked to one of the
+   * website's credentials (the action then logs in as it before each run).
    * @route POST /api/websites/:websiteId/actions
    * @param websiteId - Path parameter: the owning website's cuid
-   * @param body - JSON `{ title, description }`; both required
-   * @returns 201 with the created action; 400 with `{ error }` for an invalid body; 404 with `{ error }` when the website does not exist or was deleted; 500 with `{ error }` otherwise
+   * @param body - JSON `{ title, description, credentialId }`; title and description required; `credentialId` an active credential of this website, or null / left out to run logged out
+   * @returns 201 with the created action (with `credential`); 400 with `{ error }` for an invalid body or a credential that is not this website's; 404 with `{ error }` when the website does not exist or was deleted; 500 with `{ error }` otherwise
    */
   app.post("/api/websites/:websiteId/actions", async (req, res) => {
-    const validation = validateTitleDescriptionInput(req.body);
+    const validation = validateActionInput(req.body);
     if (!validation.isValid) {
       res.status(400).json({ error: validation.errorMessage });
       return;
@@ -64,6 +90,14 @@ export function registerActionRoutes(app: Express): void {
         res.status(404).json({ error: WEBSITE_NOT_FOUND_MESSAGE });
         return;
       }
+      const credentialIsUsable = await credentialBelongsToWebsite(
+        website.id,
+        validation.input.credentialId,
+      );
+      if (!credentialIsUsable) {
+        res.status(400).json({ error: CREDENTIAL_NOT_ON_WEBSITE_MESSAGE });
+        return;
+      }
       const created = await createActionForWebsite(website.id, validation.input);
       res.status(201).json(created);
     } catch (error: unknown) {
@@ -72,7 +106,8 @@ export function registerActionRoutes(app: Express): void {
   });
 
   /**
-   * Fetches one active action of a website.
+   * Fetches one active action of a website, with `credential: { id, name }`
+   * (the credential it logs in as) or null.
    * @route GET /api/websites/:websiteId/actions/:actionId
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action's cuid
@@ -97,15 +132,16 @@ export function registerActionRoutes(app: Express): void {
   });
 
   /**
-   * Replaces an active action's title and description.
+   * Replaces an active action's title, description, and credential. A PUT
+   * replaces the whole action, so leaving `credentialId` out unlinks it.
    * @route PUT /api/websites/:websiteId/actions/:actionId
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action's cuid
-   * @param body - JSON `{ title, description }`; both required
-   * @returns 200 with the updated action; 400 with `{ error }` for an invalid body; 404 with `{ error }` when the website or the action does not exist or was deleted; 500 with `{ error }` otherwise
+   * @param body - JSON `{ title, description, credentialId }`; title and description required; `credentialId` an active credential of this website, or null / left out to run logged out
+   * @returns 200 with the updated action (with `credential`); 400 with `{ error }` for an invalid body or a credential that is not this website's; 404 with `{ error }` when the website or the action does not exist or was deleted; 500 with `{ error }` otherwise
    */
   app.put("/api/websites/:websiteId/actions/:actionId", async (req, res) => {
-    const validation = validateTitleDescriptionInput(req.body);
+    const validation = validateActionInput(req.body);
     if (!validation.isValid) {
       res.status(400).json({ error: validation.errorMessage });
       return;
@@ -115,6 +151,14 @@ export function registerActionRoutes(app: Express): void {
       const website = await findWebsiteById(req.params.websiteId);
       if (website === null) {
         res.status(404).json({ error: WEBSITE_NOT_FOUND_MESSAGE });
+        return;
+      }
+      const credentialIsUsable = await credentialBelongsToWebsite(
+        website.id,
+        validation.input.credentialId,
+      );
+      if (!credentialIsUsable) {
+        res.status(400).json({ error: CREDENTIAL_NOT_ON_WEBSITE_MESSAGE });
         return;
       }
       const updated = await updateActionForWebsite(

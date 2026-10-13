@@ -3,8 +3,10 @@ import { screen, waitFor, within, type RenderResult } from "@testing-library/rea
 import { userEvent } from "@testing-library/user-event";
 import { Route } from "react-router-dom";
 import ActionScriptComparePage from "../../src/pages/ActionScriptComparePage";
+import { type ActionPlan } from "../../src/utils/actionPlanSteps";
 import {
   buildActionScriptRecord,
+  buildActionScriptRefinementRecord,
   buildScriptModelCatalog,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
@@ -19,16 +21,32 @@ const COMPARE_PATH = "/websites/website-1/actions/item-1/scripts/compare";
 const ACTION_API_URL = "/api/websites/website-1/actions/item-1";
 const SCRIPTS_API_URL = `${ACTION_API_URL}/scripts`;
 
+/**
+ * Builds a two-step login plan whose first step clicks the given link.
+ * @param linkName - The name of the link the first step clicks
+ * @returns The plan
+ */
+function buildLoginPlan(linkName: string): ActionPlan {
+  return {
+    name: "Log in",
+    startUrl: "https://example.com/",
+    steps: [
+      { action: "click", target: { role: "link", name: linkName }, value: null },
+      { action: "expectVisible", target: { role: "heading", name: "Welcome" }, value: null },
+    ],
+  };
+}
+
 const versionThree = buildActionScriptRecord({
   id: "script-3",
   actionTitle: "Log in to the shop",
-  code: "line one\nline three\n",
+  plan: buildLoginPlan("Log in"),
   createdAt: "2026-04-03T00:00:00.000Z",
 });
 const versionTwo = buildActionScriptRecord({
   id: "script-2",
   actionTitle: "Log in",
-  code: "line one\nline two\n",
+  plan: buildLoginPlan("Sign in"),
   modelId: "claude-haiku-4-5-20251001",
   effort: null,
   createdAt: "2026-04-02T00:00:00.000Z",
@@ -37,7 +55,7 @@ const versionOne = buildActionScriptRecord({
   id: "script-1",
   actionTitle: "Sign in",
   actionDescription: "An older description",
-  code: "first draft\n",
+  plan: buildLoginPlan("Sign in"),
   createdAt: "2026-04-01T00:00:00.000Z",
 });
 
@@ -77,7 +95,7 @@ function stubComparePage(scripts: unknown[], extraRoutes: StubbedRouteTable = {}
 
 /**
  * Reads the text of a diff section's changed words.
- * @param sectionName - "Title", "Description", or "Code"
+ * @param sectionName - "Title", "Description", or "Plan"
  * @returns The highlighted words, in order
  */
 function readChangedWords(sectionName: string): string[] {
@@ -97,17 +115,18 @@ describe("ActionScriptComparePage", () => {
 
     renderComparePage();
 
-    expect(await screen.findByRole("heading", { level: 1, name: "Compare script versions" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Compare plan versions" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByRole("combobox", { name: /^From/ })).toHaveTextContent(/^Version 2 · /);
     });
     expect(screen.getByRole("combobox", { name: /^To/ })).toHaveTextContent(/^Version 3 · /);
     expect(readChangedWords("Title")).toEqual([" to the shop"]);
     expect(within(screen.getByRole("region", { name: "Description" })).getByText("No differences.")).toBeInTheDocument();
-    const codeSection = screen.getByRole("region", { name: "Code" });
-    expect(codeSection).toHaveTextContent("line two");
-    expect(codeSection).toHaveTextContent("line three");
-    expect(readChangedWords("Code")).toEqual(["two", "three"]);
+    const planSection = screen.getByRole("region", { name: "Plan" });
+    expect(planSection).toHaveTextContent('"name": "Sign in"');
+    expect(planSection).toHaveTextContent('"name": "Log in"');
+    expect(planSection).toHaveTextContent('"action": "expectVisible"');
+    expect(readChangedWords("Plan")).toEqual(["Sign", "Log"]);
   });
 
   it("labels versions with their model and effort once the model list loads", async () => {
@@ -123,6 +142,60 @@ describe("ActionScriptComparePage", () => {
     expect(screen.getByRole("combobox", { name: /^To/ })).toHaveTextContent(
       "Claude Opus 5.5 (claude-opus-5-5) · high effort",
     );
+  });
+
+  it("labels a version saved from the step editor as edited", async () => {
+    const editedVersion = buildActionScriptRecord({
+      ...versionThree,
+      editedFromActionScriptId: "script-2",
+      modelId: null,
+      effort: null,
+    });
+    stubComparePage([editedVersion, versionTwo]);
+
+    renderComparePage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: /^To/ })).toHaveTextContent(/^Version 2 · .+ · edited$/);
+    });
+    expect(screen.getByRole("combobox", { name: /^From/ })).toHaveTextContent(
+      /^Version 1 · .+ · Claude Haiku 4\.5 \(claude-haiku-4-5-20251001\) · Standard effort$/,
+    );
+  });
+
+  it("labels a version Claude refined from a failed run as refined, with its model and effort", async () => {
+    const refinedVersion = buildActionScriptRecord({
+      ...versionThree,
+      refinement: buildActionScriptRefinementRecord({
+        sourceActionScriptId: "script-2",
+        refinedActionScriptId: "script-3",
+      }),
+    });
+    stubComparePage([refinedVersion, versionTwo]);
+
+    renderComparePage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: /^To/ })).toHaveTextContent(
+        /^Version 2 · .+ · refined · Claude Opus 5\.5 \(claude-opus-5-5\) · high effort$/,
+      );
+    });
+    expect(screen.getByRole("combobox", { name: /^From/ })).toHaveTextContent(
+      /^Version 1 · .+ · Claude Haiku 4\.5 \(claude-haiku-4-5-20251001\) · Standard effort$/,
+    );
+  });
+
+  it("labels a generated version whose model was not recorded as an unknown model", async () => {
+    const versionWithoutModel = buildActionScriptRecord({ ...versionThree, modelId: null });
+    stubComparePage([versionWithoutModel, versionTwo]);
+
+    renderComparePage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: /^To/ })).toHaveTextContent(
+        /^Version 2 · .+ · unknown model$/,
+      );
+    });
   });
 
   it("shows the versions named in the query string", async () => {
@@ -154,7 +227,7 @@ describe("ActionScriptComparePage", () => {
     const user = userEvent.setup();
     stubComparePage([versionThree, versionTwo, versionOne]);
     renderComparePage();
-    await screen.findByRole("heading", { level: 1, name: "Compare script versions" });
+    await screen.findByRole("heading", { level: 1, name: "Compare plan versions" });
 
     await user.click(await screen.findByRole("combobox", { name: /^From/ }));
     await user.click(await screen.findByRole("option", { name: /^Version 1 · / }));
@@ -168,6 +241,7 @@ describe("ActionScriptComparePage", () => {
       expect(screen.getByRole("combobox", { name: /^To/ })).toHaveTextContent(/^Version 2 · /);
     });
     expect(readChangedWords("Title")).toEqual(["Sign", "Log"]);
+    expect(within(screen.getByRole("region", { name: "Plan" })).getByText("No differences.")).toBeInTheDocument();
   });
 
   it("explains that two versions are needed when there are fewer", async () => {
@@ -176,7 +250,7 @@ describe("ActionScriptComparePage", () => {
     renderComparePage();
 
     expect(
-      await screen.findByText("Convert this action at least twice to compare versions."),
+      await screen.findByText("Convert, refine, or edit this action's plan at least twice to compare versions."),
     ).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: /^From/ })).not.toBeInTheDocument();
   });
@@ -186,7 +260,7 @@ describe("ActionScriptComparePage", () => {
 
     renderComparePage();
 
-    await screen.findByRole("heading", { level: 1, name: "Compare script versions" });
+    await screen.findByRole("heading", { level: 1, name: "Compare plan versions" });
     await waitFor(() => {
       expect(readBreadcrumbTrail()).toEqual([
         { label: "Websites", href: "/websites" },

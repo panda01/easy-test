@@ -11,7 +11,7 @@ root, which loads `main.tsx`.
 | `pages/` | One component per route. |
 | `components/` | Reusable pieces pages are built from (forms, dialogs, breadcrumbs, header). |
 | `hooks/` | Reusable stateful logic, including all API calls. |
-| `utils/` | Pure helpers: URL builders, item-kind config, error and count formatting. |
+| `utils/` | Pure helpers: URL builders, item-kind config, error and count formatting, and run outcome / status wording (e.g. `describeScriptRunStatus.ts`: `findScriptRunStatus` decides passed / failed / not run from a version's latest run). |
 
 ## Conventions
 

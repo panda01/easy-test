@@ -27,6 +27,28 @@ describe("useCredentials", () => {
     expect(fetchStub).toHaveBeenCalledWith(CREDENTIALS_API_URL);
   });
 
+  it("fetches nothing and stays idle while the credentials are not needed", async () => {
+    const fetchStub = stubFetchRoutes({
+      [`GET ${CREDENTIALS_API_URL}`]: { status: 200, body: [buildCredentialRecord()] },
+    });
+
+    const { result, rerender } = renderHook(
+      ({ isNeeded }: { isNeeded: boolean }) => useCredentials("website-1", isNeeded),
+      { initialProps: { isNeeded: false } },
+    );
+
+    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null });
+    expect(fetchStub).not.toHaveBeenCalled();
+
+    rerender({ isNeeded: true });
+
+    expect(result.current.isLoading).toBe(true);
+    await waitFor(() => {
+      expect(result.current.data).toEqual([buildCredentialRecord()]);
+    });
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+  });
+
   it("reports the server's reason when the list cannot be fetched", async () => {
     stubFetchRoutes({
       [`GET ${CREDENTIALS_API_URL}`]: { status: 404, body: { error: "Website not found" } },

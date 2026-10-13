@@ -15,6 +15,8 @@ import {
   waitOutMinimumWaitSince,
   type PageRequestTracker,
 } from "./pageActionService.js";
+import type { Credential, Website } from "./dbService.js";
+import { decryptCredentialPassword } from "../utils/credentialEncryption.js";
 
 /**
  * How long the crawler waits for each login form field (and the submit button
@@ -62,6 +64,33 @@ export interface CrawlLoginDetails {
   passwordSelector: string | null;
   /** A CSS selector for the submit button, or null to find it automatically. */
   submitSelector: string | null;
+}
+
+/**
+ * Decrypts a credential's password and gathers what a browser needs to log in
+ * with it - used by crawls and by action runs alike. The login page is the
+ * credential's EFFECTIVE login URL: its own `loginUrl` when it has one,
+ * otherwise the website's.
+ * @param credential - The credential to log in as, with its encrypted password
+ * @param website - The credential's website, for its login URL
+ * @returns The login details, with the password decrypted (never log them)
+ * @throws When neither the credential nor the website has a login URL; when the password cannot be decrypted (no key configured, or the key changed since it was saved)
+ */
+export function buildCrawlLoginDetails(credential: Credential, website: Website): CrawlLoginDetails {
+  const effectiveLoginUrl = credential.loginUrl ?? website.loginUrl;
+  if (effectiveLoginUrl === null) {
+    throw new Error(
+      `The credential "${credential.name}" has no login page URL, and neither does its website`,
+    );
+  }
+  return {
+    loginUrl: effectiveLoginUrl,
+    username: credential.username,
+    password: decryptCredentialPassword(credential.encryptedPassword),
+    usernameSelector: credential.usernameSelector,
+    passwordSelector: credential.passwordSelector,
+    submitSelector: credential.submitSelector,
+  };
 }
 
 /** How a login attempt ended. */

@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { act, screen, type RenderResult } from "@testing-library/react";
+import { act, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 import { userEvent, type UserEvent } from "@testing-library/user-event";
 import { Route } from "react-router-dom";
 import WebsiteItemCreatePage from "../../src/pages/WebsiteItemCreatePage";
 import { ACTION_KIND, USE_CASE_KIND } from "../../src/utils/websiteItemKinds";
 import {
   ITEM_KIND_TEST_CASES,
+  buildCredentialRecord,
   buildJsonResponse,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
@@ -23,6 +24,15 @@ import {
 const LIST_PATH = "/websites";
 const WEBSITE_PATH = "/websites/website-1";
 const WEBSITE_API_URL = "/api/websites/website-1";
+const CREDENTIALS_API_URL = `${WEBSITE_API_URL}/credentials`;
+const ACTION_CREATE_PATH = `${WEBSITE_PATH}/actions/new`;
+const ACTIONS_API_URL = `${WEBSITE_API_URL}/actions`;
+
+/** The website's two credentials, newest first, as the credential list returns them. */
+const WEBSITE_CREDENTIALS = [
+  buildCredentialRecord({ id: "credential-2", name: "Viewer" }),
+  buildCredentialRecord({ id: "credential-1", name: "Admin" }),
+];
 
 /**
  * Renders the create page on both of its real routes, keyed per kind exactly
@@ -47,15 +57,28 @@ function renderWebsiteItemCreatePage(routerStart: RouterStart): RenderResult {
 }
 
 /**
- * Stubs a successful load of the owning website, plus any extra routes.
+ * Stubs a successful load of the owning website and its credentials, plus
+ * any extra or replacement routes.
  * @param extraRoutes - More replies, e.g. for the POST
  * @returns The installed fetch stub
  */
 function stubLoadedWebsite(extraRoutes: StubbedRouteTable = {}): FetchStub {
   return stubFetchRoutes({
     [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord() },
+    [`GET ${CREDENTIALS_API_URL}`]: { status: 200, body: WEBSITE_CREDENTIALS },
     ...extraRoutes,
   });
+}
+
+/**
+ * Picks an option from one of the form's MUI select dropdowns.
+ * @param user - The user-event session
+ * @param selectName - The dropdown's accessible name pattern (its label comes first)
+ * @param optionName - The option's text
+ */
+async function pickFromSelect(user: UserEvent, selectName: RegExp, optionName: string): Promise<void> {
+  await user.click(screen.getByRole("combobox", { name: selectName }));
+  await user.click(await screen.findByRole("option", { name: optionName }));
 }
 
 /**
@@ -74,6 +97,8 @@ describe.each(ITEM_KIND_TEST_CASES)(
     const createPath = `${WEBSITE_PATH}/${segment}/new`;
     const itemsApiUrl = `${WEBSITE_API_URL}/${segment}`;
     const submitLabel = `Create ${singularLabel}`;
+    /** What the create request adds for this kind: an action says who it logs in as (nobody, by default). */
+    const expectedCredentialFields = segment === "actions" ? { credentialId: null } : {};
 
     /** History as it is after clicking "New ..." on the website's page. */
     const openedFromWebsite: RouterStart = {
@@ -93,7 +118,7 @@ describe.each(ITEM_KIND_TEST_CASES)(
 
     it("shows the heading, a spinner, placeholder breadcrumbs, and no form while the website loads", () => {
       const pendingWebsite = createDeferred<Response>();
-      stubFetchRoutes({ [`GET ${WEBSITE_API_URL}`]: () => pendingWebsite.promise });
+      stubLoadedWebsite({ [`GET ${WEBSITE_API_URL}`]: () => pendingWebsite.promise });
 
       renderWebsiteItemCreatePage(openedFromWebsite);
 
@@ -110,7 +135,7 @@ describe.each(ITEM_KIND_TEST_CASES)(
     });
 
     it("shows the server's not-found text and no form for an unknown website", async () => {
-      stubFetchRoutes({
+      stubLoadedWebsite({
         [`GET ${WEBSITE_API_URL}`]: { status: 404, body: { error: "Website not found" } },
       });
 
@@ -162,7 +187,7 @@ describe.each(ITEM_KIND_TEST_CASES)(
       expect(fetchStub).toHaveBeenCalledWith(itemsApiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "Log in", description: "Sign in" }),
+        body: JSON.stringify({ title: "Log in", description: "Sign in", ...expectedCredentialFields }),
       });
 
       // The form's entry is gone, so Back goes straight to the website.
@@ -230,3 +255,111 @@ describe.each(ITEM_KIND_TEST_CASES)(
     });
   },
 );
+
+describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
+  /** History as it is after clicking "New action" on the website's page. */
+  const openedFromWebsite: RouterStart = {
+    initialEntries: [WEBSITE_PATH, { pathname: ACTION_CREATE_PATH, state: { returnTo: WEBSITE_PATH } }],
+  };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("waits for the website's credentials before showing the form", async () => {
+    const pendingCredentials = createDeferred<Response>();
+    stubLoadedWebsite({ [`GET ${CREDENTIALS_API_URL}`]: () => pendingCredentials.promise });
+
+    renderWebsiteItemCreatePage(openedFromWebsite);
+
+    expect(await screen.findByRole("progressbar", { name: "Loading credentials" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("progressbar", { name: "Loading website" })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingCredentials.resolve(buildJsonResponse(200, WEBSITE_CREDENTIALS));
+      await pendingCredentials.promise;
+    });
+
+    expect(await screen.findByRole("textbox", { name: "Title" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no credential)");
+    expect(screen.queryByRole("progressbar", { name: "Loading credentials" })).not.toBeInTheDocument();
+  });
+
+  it("shows why the credentials could not be loaded, and no form", async () => {
+    stubLoadedWebsite({
+      [`GET ${CREDENTIALS_API_URL}`]: { status: 500, body: { error: "Database unavailable" } },
+    });
+
+    renderWebsiteItemCreatePage(openedFromWebsite);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Database unavailable");
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  });
+
+  it("offers logged out and each of the website's credentials, and sends the one picked", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedWebsite({
+      [`POST ${ACTIONS_API_URL}`]: { status: 201, body: buildWebsiteItemRecord({ id: "item-9" }) },
+    });
+    renderWebsiteItemCreatePage(openedFromWebsite);
+    await fillForm(user);
+
+    await user.click(screen.getByRole("combobox", { name: /^Log in as/ }));
+    const credentialOptions = within(await screen.findByRole("listbox")).getAllByRole("option");
+    expect(credentialOptions.map((credentialOption) => credentialOption.textContent)).toEqual([
+      "Logged out (no credential)",
+      "Viewer",
+      "Admin",
+    ]);
+    await user.click(screen.getByRole("option", { name: "Admin" }));
+    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Admin");
+    await user.click(screen.getByRole("button", { name: "Create action" }));
+
+    await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
+    expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: "credential-1" }),
+    });
+  });
+
+  it("sends logged out again when Logged out is picked after a credential", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedWebsite({
+      [`POST ${ACTIONS_API_URL}`]: { status: 201, body: buildWebsiteItemRecord({ id: "item-9" }) },
+    });
+    renderWebsiteItemCreatePage(openedFromWebsite);
+    await fillForm(user);
+
+    await pickFromSelect(user, /^Log in as/, "Viewer");
+    await pickFromSelect(user, /^Log in as/, "Logged out (no credential)");
+    await user.click(screen.getByRole("button", { name: "Create action" }));
+
+    await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
+    expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: null }),
+    });
+  });
+});
+
+describe("WebsiteItemCreatePage ('use-cases'): no credential", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("neither fetches credentials nor asks who to log in as", async () => {
+    const fetchStub = stubLoadedWebsite();
+
+    renderWebsiteItemCreatePage({ initialEntries: [`${WEBSITE_PATH}/use-cases/new`] });
+
+    expect(await screen.findByRole("textbox", { name: "Title" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /^Log in as/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar", { name: "Loading credentials" })).not.toBeInTheDocument();
+    expect(countRequests(fetchStub, "GET", CREDENTIALS_API_URL)).toBe(0);
+  });
+});

@@ -11,21 +11,27 @@ export interface ActionScriptRunRecord {
   websiteId: string;
   actionId: string;
   actionScriptId: string;
-  /** True only for exit code 0, no timeout, and no failure screenshot. */
+  /** True only when the login (if any) and every step finished in time. */
   succeeded: boolean;
-  /** The process exit code, or null when it was killed by a signal. */
-  exitCode: number | null;
-  /** The signal that ended the process, or null when it exited on its own. */
-  exitSignal: string | null;
   /** True when the run hit the time limit and was stopped. */
   timedOut: boolean;
-  /** The script's combined output (its step log). */
+  /** Why the run stopped, or null when it passed. */
+  errorMessage: string | null;
+  /** The 1-based step the run stopped at, or null when it passed or stopped before the first step. */
+  failedStepNumber: number | null;
+  /** The credential the run logged in as, or null for a logged-out run. */
+  credentialName: string | null;
+  /** The run's step log. */
   output: string;
   /** True when the start of the output was dropped to fit the cap. */
   outputWasTruncated: boolean;
-  /** Non-null when the script wrote a failure screenshot; fetch it via `actionScriptRunFailureScreenshotApiUrl`. */
+  /** Non-null when the run saved a failure screenshot; fetch it via `actionScriptRunFailureScreenshotApiUrl`. */
   failureScreenshotFileName: string | null;
-  /** How long the script ran, in milliseconds. */
+  /** The URL the browser was on when the run failed (credentials scrubbed), or null when it passed or none was captured. */
+  failingPageUrl: string | null;
+  /** The failing page's aria snapshot (credentials scrubbed, capped), or null when it passed or none was captured. */
+  failingPageAriaSnapshot: string | null;
+  /** How long the run took, in milliseconds. */
   durationMs: number;
   createdAt: string;
   updatedAt: string;

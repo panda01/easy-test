@@ -20,10 +20,9 @@ import {
   type CrawlLogin,
   type CrawlStopReason,
 } from "./crawlerService.js";
-import type { CrawlLoginDetails } from "./crawlerLoginService.js";
+import { buildCrawlLoginDetails, type CrawlLoginDetails } from "./crawlerLoginService.js";
 import { measureElapsedMs } from "./playwrightService.js";
 import { describeError } from "../utils/describeError.js";
-import { decryptCredentialPassword } from "../utils/credentialEncryption.js";
 import { DEFAULT_CRAWL_BUTTON_MODE, type CrawlButtonMode } from "../utils/crawlButtonModes.js";
 
 /**
@@ -107,12 +106,11 @@ async function recordCrawlFailure(
 }
 
 /**
- * Decrypts a credential's password and gathers what the crawler needs to log
- * in with it, including where a screenshot of a failed login would go: like
- * the screenshot runs' PNGs, `<websiteId>/<uuid>.png` in the screenshot
+ * Gathers what the crawler needs to log in with a credential (see
+ * `buildCrawlLoginDetails`, which decrypts the password and picks the
+ * EFFECTIVE login URL), plus where a screenshot of a failed login would go:
+ * like the screenshot runs' PNGs, `<websiteId>/<uuid>.png` in the screenshot
  * directory. Nothing is written unless the login fails.
- * The login page is the credential's EFFECTIVE login URL: its own `loginUrl`
- * when it has one, otherwise the website's.
  * @param credential - The credential the crawl logs in as, with its encrypted password
  * @param website - The crawled website, for its login URL and the screenshot's folder
  * @param screenshotDirectory - Absolute path of the screenshot directory (`SCREENSHOT_DIR`)
@@ -124,25 +122,13 @@ function buildCredentialLogin(
   website: Website,
   screenshotDirectory: string,
 ): CredentialLogin {
-  const effectiveLoginUrl = credential.loginUrl ?? website.loginUrl;
-  if (effectiveLoginUrl === null) {
-    throw new Error(
-      `The credential "${credential.name}" has no login page URL, and neither does its website`,
-    );
-  }
+  const details = buildCrawlLoginDetails(credential, website);
   const failureScreenshotFileName = `${website.id}/${randomUUID()}.png`;
   return {
     credentialName: credential.name,
     failureScreenshotFileName,
     failureScreenshotPath: path.join(screenshotDirectory, failureScreenshotFileName),
-    details: {
-      loginUrl: effectiveLoginUrl,
-      username: credential.username,
-      password: decryptCredentialPassword(credential.encryptedPassword),
-      usernameSelector: credential.usernameSelector,
-      passwordSelector: credential.passwordSelector,
-      submitSelector: credential.submitSelector,
-    },
+    details,
   };
 }
 

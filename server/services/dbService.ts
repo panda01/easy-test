@@ -7,12 +7,14 @@ import {
   type ScreenshotRun,
   type ActionScript,
   type ActionScriptRun,
+  type ActionScriptRefinement,
   type CrawlRun,
   type CrawledPage,
   type Credential,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import type { CrawlButtonMode } from "../utils/crawlButtonModes.js";
+import { type ActionPlan, parseActionPlan } from "../utils/actionPlanSchema.js";
 
 export type {
   Website,
@@ -21,6 +23,7 @@ export type {
   ScreenshotRun,
   ActionScript,
   ActionScriptRun,
+  ActionScriptRefinement,
   CrawlRun,
   CrawledPage,
   Credential,
@@ -79,7 +82,32 @@ export interface TitleDescriptionInput {
 export type UseCaseInput = TitleDescriptionInput;
 
 /** The fields a caller supplies when creating or replacing an action. */
-export type ActionInput = TitleDescriptionInput;
+export interface ActionInput extends TitleDescriptionInput {
+  /** The credential the action logs in as before each run, or null to run logged out. */
+  credentialId: string | null;
+}
+
+/** An action as the API returns it: the row plus the id and name of the credential it runs as. */
+export type ActionWithCredential = Action & {
+  credential: { id: string; name: string } | null;
+};
+
+/** An action's newest active script version, cut down to its id and its newest active run. */
+export interface NewestActionScriptSummary {
+  /** The newest version's cuid. */
+  id: string;
+  /** That version's newest active run, or null when it has not been run yet. */
+  latestRun: LatestActionScriptRun | null;
+}
+
+/**
+ * An action as the website's action list returns it: the row with its
+ * credential, plus its `newestScript` (null when it has no versions yet), so
+ * the list can show whether the newest version's latest run passed.
+ */
+export type ActionWithNewestScript = ActionWithCredential & {
+  newestScript: NewestActionScriptSummary | null;
+};
 
 /**
  * The fields a caller supplies when recording one screenshot run. The
@@ -102,54 +130,165 @@ export interface ScreenshotRunInput {
 }
 
 /**
- * The fields a caller supplies when saving one generated action script. The
- * four snapshots record exactly what was sent to Claude; the rest is what came
- * back, plus the rule scan of the code. Scripts are create-only, so there is
- * no matching "update" input.
+ * The fields a caller supplies when saving one action script version - a plan
+ * Claude generated, one Claude refined from a failed run, or one saved from
+ * the step editor. The snapshots record exactly what was sent to Claude (an
+ * edited or refined version copies its source's). Scripts are create-only, so
+ * there is no matching "update" input.
  */
 export interface ActionScriptInput {
   /** The website's name at conversion time. */
   websiteName: string;
-  /** The website's URL at conversion time - the script's START_URL. */
+  /** The website's URL at conversion time. */
   startUrl: string;
   /** The action's title at conversion time. */
   actionTitle: string;
   /** The action's description at conversion time. */
   actionDescription: string;
-  /** Claude's one-line summary of what the script does. */
+  /** The credential the action ran as at conversion time, or null for logged out. */
+  credentialId: string | null;
+  /** That credential's name at conversion time, or null for logged out. */
+  credentialName: string | null;
+  /** Claude's one-line summary of what the plan does. */
   summary: string;
   /** The assumptions Claude made where the action was ambiguous. */
   assumptions: string[];
-  /** The complete `.mjs` source. */
-  code: string;
-  /** Warn-only rule scan results; empty when the code is clean. */
-  ruleViolations: string[];
-  /** The model that actually wrote the script. */
-  modelId: string;
-  /** The effort level sent with the request, or null for a model with no effort setting ("Standard"). */
+  /** The validated step plan. */
+  plan: ActionPlan;
+  /** The crawled pages whose aria snapshots Claude was shown. */
+  contextPageUrls: string[];
+  /** The model that actually wrote the plan (for a refined version, the model that refined it), or null for a version saved from the editor. */
+  modelId: string | null;
+  /** The effort level sent with the request, or null for "Standard" and for edited versions. */
   effort: string | null;
+  /** The version this one was edited from, or null for a generated or refined version. */
+  editedFromActionScriptId: string | null;
 }
+
+/**
+ * The facts a caller supplies when recording how a version was refined from a
+ * failed run - only what is stored nowhere else (see the
+ * `ActionScriptRefinement` model's doc comment). The run's error and failed
+ * step stay on the run, and the model and effort on the refined version.
+ * Refinements are create-only, so there is no matching "update" input.
+ */
+export interface ActionScriptRefinementInput {
+  /** The version whose failed run was refined. */
+  sourceActionScriptId: string;
+  /** The failed run Claude was shown. */
+  actionScriptRunId: string;
+  /** The user's hint for Claude (trimmed), or null when they gave none. */
+  note: string | null;
+  /** Input tokens of the refine call that were neither read from nor written to the prompt cache. */
+  inputTokens: number;
+  /** Output tokens of the refine call, thinking included. */
+  outputTokens: number;
+  /** Input tokens of the refine call read from the prompt cache. */
+  cacheReadInputTokens: number;
+  /** Input tokens of the refine call written to the prompt cache. */
+  cacheCreationInputTokens: number;
+  /** True when the failure screenshot went to Claude as an image; false when the run had none or its file was missing. */
+  screenshotWasSent: boolean;
+}
+
+/**
+ * What every action script read (and create) brings along: the refinement
+ * that produced the version - null when the version was not refined - with
+ * a summary of the failed run it came from. The run's error and failed step
+ * are JOINED from the run here, never copied onto the refinement row, so
+ * there is one source of truth. A soft-deleted refinement is left out
+ * (refinements are only ever soft deleted together with their version, so
+ * this only guards against a row deleted by hand).
+ */
+const ACTION_SCRIPT_REFINEMENT_INCLUDE = {
+  refinement: {
+    where: { deletedAt: null },
+    include: {
+      actionScriptRun: {
+        select: {
+          id: true,
+          errorMessage: true,
+          failedStepNumber: true,
+          timedOut: true,
+          failingPageAriaSnapshot: true,
+        },
+      },
+    },
+  },
+} as const;
+
+/**
+ * How a version's newest run is read wherever its run status is shown (the
+ * versions list and the website's actions list): at most ONE run - the
+ * newest active one - and only what it takes to say whether it passed.
+ */
+const LATEST_ACTION_SCRIPT_RUN_QUERY = {
+  where: { deletedAt: null },
+  orderBy: { createdAt: "desc" },
+  take: 1,
+  select: { id: true, succeeded: true, createdAt: true },
+} as const;
+
+/**
+ * What every action script read (and create) includes: the refinement that
+ * produced it (`ACTION_SCRIPT_REFINEMENT_INCLUDE`) and its newest active run
+ * (`LATEST_ACTION_SCRIPT_RUN_QUERY`, as a list of zero or one run).
+ */
+const ACTION_SCRIPT_INCLUDE = {
+  ...ACTION_SCRIPT_REFINEMENT_INCLUDE,
+  runs: LATEST_ACTION_SCRIPT_RUN_QUERY,
+} as const;
+
+/** An action script row as Prisma returns it with `ACTION_SCRIPT_INCLUDE`. */
+type ActionScriptRow = Prisma.ActionScriptGetPayload<{
+  include: typeof ACTION_SCRIPT_INCLUDE;
+}>;
+
+/**
+ * A version's newest active run, cut down to what its pass / fail / not run
+ * status needs: the run's id, whether it passed, and when it ran.
+ */
+export type LatestActionScriptRun = Pick<ActionScriptRun, "id" | "succeeded" | "createdAt">;
+
+/**
+ * An action script as dbService returns it: the row with `plan` typed as a
+ * plan (Prisma types a `Json` column as any JSON value), plus its
+ * `refinement` - the refinement row with its failed run's id, error, failed
+ * step, time-out flag, and failing-page snapshot, or null when the version
+ * was not refined - and its `latestRun`: its newest active run, or null when
+ * it has not been run yet.
+ */
+export type ActionScriptWithPlan = Omit<ActionScriptRow, "plan" | "runs"> & {
+  plan: ActionPlan;
+  latestRun: LatestActionScriptRun | null;
+};
 
 /**
  * The fields a caller supplies when recording one script run. Runs are
  * create-only, so there is no matching "update" input.
  */
 export interface ActionScriptRunInput {
-  /** True only for exit code 0, no timeout, and no failure screenshot. */
+  /** True only when the login (if any) and every step finished in time. */
   succeeded: boolean;
-  /** The process exit code, or null when it was killed by a signal. */
-  exitCode: number | null;
-  /** The signal that killed the process, or null when it exited on its own. */
-  exitSignal: string | null;
   /** True when the run hit the time limit and was stopped. */
   timedOut: boolean;
-  /** Combined stdout + stderr, capped. */
+  /** Why the run stopped (first line, credential values scrubbed), or null when it passed. */
+  errorMessage: string | null;
+  /** The 1-based step the run stopped at, or null when it passed or stopped before the first step. */
+  failedStepNumber: number | null;
+  /** The credential the run logged in as, or null for a logged-out run. */
+  credentialName: string | null;
+  /** The step log, capped. */
   output: string;
   /** True when the cap dropped the start of the output. */
   outputWasTruncated: boolean;
   /** The failure PNG's path relative to the action script directory, or null when none was written. */
   failureScreenshotFileName: string | null;
-  /** How long the process ran, in milliseconds. */
+  /** The address the browser was on when the run failed (credential values scrubbed), or null when it passed or could not be read. */
+  failingPageUrl: string | null;
+  /** The aria snapshot of the failing page's `<body>` (credential values scrubbed, capped), or null when it passed or none was taken. */
+  failingPageAriaSnapshot: string | null;
+  /** How long the run took, in milliseconds. */
   durationMs: number;
 }
 
@@ -446,10 +585,10 @@ export async function updateWebsite(
 
 /**
  * Soft deletes an active website AND its active use cases, actions, screenshot
- * runs, action scripts, action script runs, crawl runs, crawled pages, and
- * credentials.
+ * runs, action scripts, action script runs, action script refinements, crawl
+ * runs, crawled pages, and credentials.
  *
- * All nine updates run in one transaction and share one `deletedAt`
+ * All ten updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
@@ -493,6 +632,10 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.actionScriptRun.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionScriptRefinement.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -607,64 +750,120 @@ export async function softDeleteUseCaseForWebsite(
 // === Actions ===
 
 /**
- * Lists a website's active actions, newest first.
- * @param websiteId - The owning website's cuid
- * @returns The website's active actions ordered by `createdAt` descending
+ * The relation every action read brings along: the id and name of the
+ * credential it runs as. A deleted credential is unlinked from its actions
+ * (see `softDeleteCredentialForWebsite`), so it never shows up here.
  */
-export async function listActionsForWebsite(websiteId: string): Promise<Action[]> {
-  const actions = await prisma.action.findMany({
+const ACTION_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true } } } as const;
+
+/**
+ * What the website's action list brings along on top of the credential: the
+ * action's newest active version (as a list of zero or one), with only its id
+ * and its newest active run (`LATEST_ACTION_SCRIPT_RUN_QUERY`).
+ */
+const ACTION_LIST_INCLUDE = {
+  ...ACTION_CREDENTIAL_INCLUDE,
+  scripts: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: { id: true, runs: LATEST_ACTION_SCRIPT_RUN_QUERY },
+  },
+} as const;
+
+/** An action row as Prisma returns it with `ACTION_LIST_INCLUDE`. */
+type ActionListRow = Prisma.ActionGetPayload<{ include: typeof ACTION_LIST_INCLUDE }>;
+
+/**
+ * Turns an action list row into the shape the API answers with: the
+ * zero-or-one `scripts` list becomes `newestScript` (null when the action has
+ * no versions), and that version's zero-or-one `runs` list becomes its
+ * `latestRun` (null when it has not been run).
+ * @param actionRow - An action row as Prisma returns it with `ACTION_LIST_INCLUDE`
+ * @returns The action with its credential and its `newestScript`, without `scripts`
+ */
+function toActionWithNewestScript(actionRow: ActionListRow): ActionWithNewestScript {
+  const { scripts: newestScriptList, ...action } = actionRow;
+  const newestScriptRow = newestScriptList.at(0);
+  const actionHasNoScripts = newestScriptRow === undefined;
+  if (actionHasNoScripts) {
+    return { ...action, newestScript: null };
+  }
+  const newestScriptLatestRun = newestScriptRow.runs.at(0) ?? null;
+  return { ...action, newestScript: { id: newestScriptRow.id, latestRun: newestScriptLatestRun } };
+}
+
+/**
+ * Lists a website's active actions, newest first, each with its newest
+ * version's latest run, so the list can show whether the action's script
+ * currently passes.
+ * @param websiteId - The owning website's cuid
+ * @returns The website's active actions ordered by `createdAt` descending, each with its credential's id and name and its `newestScript` (null when it has no versions)
+ */
+export async function listActionsForWebsite(websiteId: string): Promise<ActionWithNewestScript[]> {
+  const actionRows = await prisma.action.findMany({
     where: { websiteId, deletedAt: null },
     orderBy: { createdAt: "desc" },
+    include: ACTION_LIST_INCLUDE,
   });
-  return actions;
+  return actionRows.map(toActionWithNewestScript);
 }
 
 /**
  * Looks up one active action, scoped to the website that owns it.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
- * @returns The active action, or null when it does not exist, was soft deleted, or belongs to another website
+ * @returns The active action with its credential's id and name, or null when it does not exist, was soft deleted, or belongs to another website
  */
 export async function findActionForWebsite(
   websiteId: string,
   actionId: string,
-): Promise<Action | null> {
+): Promise<ActionWithCredential | null> {
   const action = await prisma.action.findFirst({
     where: { id: actionId, websiteId, deletedAt: null },
+    include: ACTION_CREDENTIAL_INCLUDE,
   });
   return action;
 }
 
 /**
- * Inserts an action belonging to the given website.
+ * Inserts an action belonging to the given website. The caller has already
+ * checked that `credentialId` (when set) is an active credential of the same
+ * website.
  * @param websiteId - The owning website's cuid
- * @param data - The action's title and description
- * @returns The created row
+ * @param data - The action's title, description, and credential
+ * @returns The created row with its credential's id and name
  */
 export async function createActionForWebsite(
   websiteId: string,
   data: ActionInput,
-): Promise<Action> {
-  const created = await prisma.action.create({ data: { ...data, websiteId } });
+): Promise<ActionWithCredential> {
+  const created = await prisma.action.create({
+    data: { ...data, websiteId },
+    include: ACTION_CREDENTIAL_INCLUDE,
+  });
   return created;
 }
 
 /**
- * Replaces the title and description of an active action.
+ * Replaces the title, description, and credential of an active action. The
+ * caller has already checked that `credentialId` (when set) is an active
+ * credential of the same website.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
- * @param data - The new title and description
- * @returns The updated row, or null when no active action with that id belongs to the website
+ * @param data - The new title, description, and credential (null unlinks it)
+ * @returns The updated row with its credential's id and name, or null when no active action with that id belongs to the website
  */
 export async function updateActionForWebsite(
   websiteId: string,
   actionId: string,
   data: ActionInput,
-): Promise<Action | null> {
+): Promise<ActionWithCredential | null> {
   try {
     const updated = await prisma.action.update({
       where: { id: actionId, websiteId, deletedAt: null },
       data,
+      include: ACTION_CREDENTIAL_INCLUDE,
     });
     return updated;
   } catch (error: unknown) {
@@ -676,11 +875,12 @@ export async function updateActionForWebsite(
 }
 
 /**
- * Soft deletes one active action AND its active scripts and script runs.
+ * Soft deletes one active action AND its active scripts, script runs, and
+ * script refinements.
  *
- * All three updates run in one transaction and share one `deletedAt`
+ * All four updates run in one transaction and share one `deletedAt`
  * timestamp, like `softDeleteWebsite`. When no active action matched, the
- * scripts and runs are left untouched.
+ * scripts, runs, and refinements are left untouched.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
  * @returns True when an active action was deleted; false when none matched
@@ -715,6 +915,10 @@ export async function softDeleteActionForWebsite(
       data: { deletedAt },
     });
     await transaction.actionScriptRun.updateMany({
+      where: { actionId, websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionScriptRefinement.updateMany({
       where: { actionId, websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -773,12 +977,36 @@ export async function createScreenshotRunForWebsite(
 }
 
 // === Action scripts ===
-// Create-only: there is deliberately no update function for scripts or their
-// runs, which is what makes them immutable. They are soft deleted only through
-// `softDeleteActionForWebsite` and `softDeleteWebsite`.
+// Create-only: there is deliberately no update function for scripts, their
+// runs, or their refinements, which is what makes them immutable. They are
+// soft deleted only through `softDeleteActionForWebsite` and
+// `softDeleteWebsite`.
 
 /**
- * Lists an action's active scripts, newest first.
+ * Types a script row's `plan` as a plan, and turns its zero-or-one `runs`
+ * list into `latestRun` (null when the version has not been run), so the API
+ * answers with `latestRun` and never with `runs`. Parsing the plan also puts
+ * its fields back in their written order, which Postgres `jsonb` does not
+ * keep.
+ *
+ * Every plan is validated before it is saved, so the parse only fails for a
+ * row edited by hand; that raw value is passed through as-is, and the run
+ * route validates a plan again before running it.
+ * @param actionScriptRow - A script row as Prisma returns it with `ACTION_SCRIPT_INCLUDE` (its refinement and newest run)
+ * @returns The same row with `plan` typed (and its fields in order) and `latestRun` in place of `runs`
+ */
+function toActionScriptWithPlan(actionScriptRow: ActionScriptRow): ActionScriptWithPlan {
+  const { runs: newestRunList, ...actionScript } = actionScriptRow;
+  const planParse = parseActionPlan(actionScript.plan);
+  const plan = planParse.isValid ? planParse.input : (actionScript.plan as ActionPlan);
+  const latestRun = newestRunList.at(0) ?? null;
+  return { ...actionScript, plan, latestRun };
+}
+
+/**
+ * Lists an action's active scripts, newest first, each with the refinement
+ * that produced it (null when it was not refined) and its newest run (null
+ * when it has not been run).
  * @param websiteId - The owning website's cuid
  * @param actionId - The owning action's cuid
  * @returns The action's active scripts ordered by `createdAt` descending
@@ -786,16 +1014,19 @@ export async function createScreenshotRunForWebsite(
 export async function listActionScriptsForAction(
   websiteId: string,
   actionId: string,
-): Promise<ActionScript[]> {
+): Promise<ActionScriptWithPlan[]> {
   const actionScripts = await prisma.actionScript.findMany({
     where: { websiteId, actionId, deletedAt: null },
     orderBy: { createdAt: "desc" },
+    include: ACTION_SCRIPT_INCLUDE,
   });
-  return actionScripts;
+  return actionScripts.map(toActionScriptWithPlan);
 }
 
 /**
- * Looks up one active script, scoped to the website and action that own it.
+ * Looks up one active script, scoped to the website and action that own it,
+ * with the refinement that produced it (null when it was not refined) and its
+ * newest run (null when it has not been run).
  * @param websiteId - The owning website's cuid
  * @param actionId - The owning action's cuid
  * @param actionScriptId - The script's cuid
@@ -805,28 +1036,65 @@ export async function findActionScriptForAction(
   websiteId: string,
   actionId: string,
   actionScriptId: string,
-): Promise<ActionScript | null> {
+): Promise<ActionScriptWithPlan | null> {
   const actionScript = await prisma.actionScript.findFirst({
     where: { id: actionScriptId, websiteId, actionId, deletedAt: null },
+    include: ACTION_SCRIPT_INCLUDE,
   });
-  return actionScript;
+  return actionScript === null ? null : toActionScriptWithPlan(actionScript);
 }
 
 /**
- * Saves one generated script for an action. The row is never edited after
- * this; converting the action again saves another row.
+ * Saves one script version for an action - generated by Claude or saved from
+ * the step editor. The row is never edited after this; converting or editing
+ * again saves another row. (A version refined from a failed run is saved by
+ * `createRefinedActionScriptForAction` instead.)
  * @param websiteId - The owning website's cuid
  * @param actionId - The owning action's cuid
- * @param data - The snapshots sent to Claude, what Claude returned, and the rule scan
- * @returns The created row
+ * @param data - The snapshots, the validated plan, and where it came from
+ * @returns The created row, with `refinement` and `latestRun` null (like every read, it carries both fields)
  */
 export async function createActionScriptForAction(
   websiteId: string,
   actionId: string,
   data: ActionScriptInput,
-): Promise<ActionScript> {
-  const created = await prisma.actionScript.create({ data: { ...data, websiteId, actionId } });
-  return created;
+): Promise<ActionScriptWithPlan> {
+  const created = await prisma.actionScript.create({
+    data: { ...data, websiteId, actionId },
+    include: ACTION_SCRIPT_INCLUDE,
+  });
+  return toActionScriptWithPlan(created);
+}
+
+/**
+ * Saves a version Claude refined from a failed run, together with the
+ * refinement row linking it to its source version and that run.
+ *
+ * It is ONE nested `create`, so both rows are written atomically: a refinement
+ * row never exists without its version, or the other way round. Neither row
+ * is edited after this.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param script - The new version: its source's snapshots, Claude's summary, assumptions, and plan, the pages sent, and the model and effort that refined it
+ * @param refinement - The source version, the failed run, the note, the call's token usage, and whether the screenshot was sent
+ * @returns The created version, with its `refinement` (and that refinement's failed-run summary) and `latestRun` null
+ */
+export async function createRefinedActionScriptForAction(
+  websiteId: string,
+  actionId: string,
+  script: ActionScriptInput,
+  refinement: ActionScriptRefinementInput,
+): Promise<ActionScriptWithPlan> {
+  const created = await prisma.actionScript.create({
+    data: {
+      ...script,
+      websiteId,
+      actionId,
+      refinement: { create: { ...refinement, websiteId, actionId } },
+    },
+    include: ACTION_SCRIPT_INCLUDE,
+  });
+  return toActionScriptWithPlan(created);
 }
 
 // === Action script runs ===
@@ -1110,6 +1378,90 @@ export async function findCrawledPageForRun(
   return crawledPage;
 }
 
+/** One crawled page as the plan generator needs it: where it is and what a screen reader sees. */
+export interface CrawledPageSnapshot {
+  /** The page's identity (origin + path) within its crawl run. */
+  url: string;
+  /** The page's `<title>`, or null when it had none. */
+  title: string | null;
+  /** Links followed from the start page; 0 is the start page itself. */
+  depth: number;
+  /** Playwright's YAML aria snapshot of `<body>`. */
+  ariaSnapshot: string;
+}
+
+/**
+ * Finds the newest finished crawl run of a website that recorded pages and
+ * matches the filter. A run still `running` is never picked.
+ * @param websiteId - The owning website's cuid
+ * @param credentialFilter - Extra conditions on the run (which credential it was logged in as)
+ * @returns The run's id, or null when no run matches
+ */
+async function findNewestCrawlRunWithPages(
+  websiteId: string,
+  credentialFilter: Prisma.CrawlRunWhereInput,
+): Promise<string | null> {
+  const crawlRun = await prisma.crawlRun.findFirst({
+    where: {
+      websiteId,
+      deletedAt: null,
+      status: { not: "running" },
+      visitedPageCount: { gt: 0 },
+      ...credentialFilter,
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+  return crawlRun?.id ?? null;
+}
+
+/**
+ * Collects the pages of a website's most relevant crawl, for showing Claude
+ * what the site looks like. It picks ONE run - the newest one crawled the
+ * same way the action runs (logged in as its credential, or logged out) -
+ * falling back to the newest run of any kind, and returns that run's
+ * successful pages that have an aria snapshot.
+ *
+ * One run is picked first, and only then its pages read, so only one run's
+ * snapshots are ever loaded.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The action's credential, or null when it runs logged out
+ * @returns The pages in visiting order; empty when the website was never crawled
+ */
+export async function findLatestCrawledPagesForWebsite(
+  websiteId: string,
+  credentialId: string | null,
+): Promise<CrawledPageSnapshot[]> {
+  const actionRunsLoggedIn = credentialId !== null;
+  const sameWayFilter: Prisma.CrawlRunWhereInput = actionRunsLoggedIn
+    ? { credentialId, isLoggedIn: true }
+    : { credentialId: null };
+  const crawlRunId =
+    (await findNewestCrawlRunWithPages(websiteId, sameWayFilter)) ??
+    (await findNewestCrawlRunWithPages(websiteId, {}));
+  const websiteWasNeverCrawled = crawlRunId === null;
+  if (websiteWasNeverCrawled) {
+    return [];
+  }
+
+  const pages = await prisma.crawledPage.findMany({
+    where: {
+      websiteId,
+      crawlRunId,
+      deletedAt: null,
+      succeeded: true,
+      ariaSnapshot: { not: null },
+    },
+    orderBy: { visitOrder: "asc" },
+    select: { url: true, title: true, depth: true, ariaSnapshot: true },
+  });
+  // The query only returns pages with a snapshot; the filter narrows the type.
+  return pages.filter(
+    (page: Omit<CrawledPageSnapshot, "ariaSnapshot"> & { ariaSnapshot: string | null }) =>
+      page.ariaSnapshot !== null,
+  ) as CrawledPageSnapshot[];
+}
+
 // === Credentials ===
 // Every read that can reach an API response omits `encryptedPassword` (see
 // `CredentialSummary`); only `findCredentialWithPasswordForWebsite` returns it.
@@ -1222,8 +1574,9 @@ export async function updateCredentialForWebsite(
 }
 
 /**
- * Soft deletes one active credential. Crawl runs that used it keep their link
- * to it, so their history still names it.
+ * Soft deletes one active credential and unlinks it from the actions that run
+ * as it (they go back to running logged out), in one transaction. Crawl runs
+ * that used it keep their link to it, so their history still names it.
  * @param websiteId - The owning website's cuid
  * @param credentialId - The credential's cuid
  * @returns True when an active credential was deleted; false when none matched
@@ -1232,10 +1585,33 @@ export async function softDeleteCredentialForWebsite(
   websiteId: string,
   credentialId: string,
 ): Promise<boolean> {
-  const credentialUpdate = await prisma.credential.updateMany({
-    where: { id: credentialId, websiteId, deletedAt: null },
-    data: { deletedAt: new Date() },
-  });
-  const anActiveCredentialWasDeleted = credentialUpdate.count > 0;
+  /**
+   * The transaction body. Declared with an explicit parameter type because
+   * the overloaded `$transaction` signature does not contextually type an
+   * inline callback (tsc reports an implicit any).
+   * @param transaction - The transaction-scoped Prisma client
+   * @returns True when the credential was active and is now deleted; false when none matched
+   */
+  const softDeleteCredentialAndUnlinkActions = async (
+    transaction: Prisma.TransactionClient,
+  ): Promise<boolean> => {
+    const credentialUpdate = await transaction.credential.updateMany({
+      where: { id: credentialId, websiteId, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+    const noActiveCredentialMatched = credentialUpdate.count === 0;
+    if (noActiveCredentialMatched) {
+      return false;
+    }
+    await transaction.action.updateMany({
+      where: { credentialId, websiteId },
+      data: { credentialId: null },
+    });
+    return true;
+  };
+
+  const anActiveCredentialWasDeleted = await prisma.$transaction(
+    softDeleteCredentialAndUnlinkActions,
+  );
   return anActiveCredentialWasDeleted;
 }

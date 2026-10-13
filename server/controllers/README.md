@@ -7,9 +7,9 @@ Route registrars. One file per API section.
 | `health.ts` | `GET /api/health` |
 | `websites.ts` | `GET`/`POST /api/websites`, `GET`/`PUT`/`DELETE /api/websites/:websiteId` |
 | `useCases.ts` | `GET`/`POST /api/websites/:websiteId/use-cases`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/use-cases/:useCaseId` |
-| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` |
+| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId }`; the credential must be one of the website's). The list answers each action with `newestScript: { id, latestRun }` (or null when it has no versions) for its run status icon |
 | `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
-| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot` |
+| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, createdAt }` of its newest run, or null) |
 | `scriptModels.ts` | `GET /api/script-models` |
 | `crawlRuns.ts` | `GET`/`POST /api/websites/:websiteId/crawl-runs`, `GET .../crawl-runs/:crawlRunId`, `GET .../crawl-runs/:crawlRunId/pages/:crawledPageId`, `GET .../crawl-runs/:crawlRunId/login-failure-screenshot` |
 | `credentials.ts` | `GET`/`POST /api/websites/:websiteId/credentials`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/credentials/:credentialId` |
@@ -92,51 +92,132 @@ can point it at a fixture directory. The browser work itself lives in
 
 ## The action scripts controller (`actionScripts.ts`)
 
+The routes keep the name "scripts", but each version is now a **JSON step
+plan** `{ name, startUrl, steps: [{ action, target, value }] }` (see
+`../utils/actionPlanSchema.ts`), never code.
 `registerActionScriptRoutes(app, actionScriptDirectory)` also takes the
 directory as a second argument, resolved once at boot by
 `resolveActionScriptDirectory()` in `server.ts` (from `ACTION_SCRIPT_DIR`), so
-tests can point it at a fixture directory. Claude lives in
-`../services/scriptGenerationService.ts`; running lives in
-`../services/scriptRunnerService.ts`.
+tests can point it at a fixture directory: run folders and failure
+screenshots live there, and `uploadFile` steps pick files from its
+`uploads/` folder. Claude lives in `../services/scriptGenerationService.ts`;
+running lives in `../services/actionPlanRunnerService.ts`.
 
-- **Scripts and runs are create-only.** There is no `PUT`, `PATCH`, or
-  `DELETE` for them; converting again creates a new version. They are soft
-  deleted only with their action or website.
+- **Versions, runs, and refinements are create-only.** There is no `PUT`,
+  `PATCH`, or `DELETE` for them; converting again, saving an edit, or
+  refining a failed run creates a new version. They are soft deleted only
+  with their action or website.
+- **Every version JSON carries `refinement`** (list, convert, edit, and
+  refine alike): `null`, unless the version was refined from a failed run.
+  Then it is the refinement row - `id`, `websiteId`, `actionId`,
+  `sourceActionScriptId`, `actionScriptRunId`, `refinedActionScriptId`,
+  `note`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`,
+  `cacheCreationInputTokens`, `screenshotWasSent`, and the timestamps - plus
+  `actionScriptRun: { id, errorMessage, failedStepNumber, timedOut,
+  failingPageAriaSnapshot }`, JOINED from the failed run
+  (`ACTION_SCRIPT_REFINEMENT_INCLUDE` in dbService). The row never copies the
+  run's error or step, nor the version's `modelId` / `effort`: one source of
+  truth for each.
+- **Every version JSON also carries `latestRun`** (list, convert, edit, and
+  refine alike): `{ id, succeeded, createdAt }` of the version's newest
+  active run, or `null` when it has not been run - a new version is always
+  `null`. It drives the versions list's pass / fail / not run icon. The JSON
+  never carries a `runs` list; the runs themselves come from `GET .../runs`.
+- **The allowed origins** of a plan are the website URL's and the login
+  URLs' (the website's and the action credential's), from
+  `buildAllowedPlanOrigins`. A plan's `startUrl` and every `goto` must stay
+  on them - checked when Claude answers, when an edit is saved, and again
+  before every run.
 - **`POST .../scripts` converts and saves.** Its JSON body is
   `{ modelId, effort }` (`validateScriptModelChoiceInput`). The model must be
   in the live catalog (`findScriptModel`) and the level one it offers - or
   null for a model with no effort setting (module-private
   `resolveEffortForModel`); otherwise `400` with a message naming what the
-  model offers. It sends snapshots of the FOUND website (name, URL) and
-  action (title, description) to Claude, stores the same snapshots on the
-  script, stores the model that answered (`modelId`) and the level sent
-  (`effort`), and stores `findScriptRuleViolations(code)` as
-  `ruleViolations` - warnings only, the script is saved either way. Extra
-  status codes beyond the CRUD set:
+  model offers. It picks the crawled pages Claude is shown
+  (`findLatestCrawledPagesForWebsite`, then `extractActionSearchTerms` +
+  `selectRelevantCrawledPages`), sends snapshots of the FOUND website (name,
+  URL), action (title, description), and the NAME of the credential it runs
+  as to Claude, and stores the same snapshots on the version, plus the
+  validated `plan`, the pages' URLs (`contextPageUrls`), the model that
+  answered (`modelId`), and the level sent (`effort`). Extra status codes
+  beyond the CRUD set:
   - `503 { error }` when `ANTHROPIC_API_KEY` is not configured (the server
     itself boots fine without it);
   - `502 { error }` when Claude declined (every model in the fallback chain),
-    its reply hit the token limit, or the reply had no usable script.
+    its reply hit the token limit, or the reply was not a valid plan.
   Known failures are mapped by `statusForScriptGenerationFailure`
   (`../utils/`), structurally (`name: "ScriptGenerationError"` plus a known
   `reason`); any other error - an Anthropic API error included - answers
   `500`. The request lasts as long as Claude takes.
+- **`POST .../scripts/:actionScriptId/edits` saves an edited plan as a NEW
+  version.** Body `{ plan }` (`validateActionPlanEditInput`, which applies
+  every plan rule - the lookups come first because the rules need the
+  website's origins). The new version copies its source's snapshots,
+  summary, assumptions, and context pages, names the source in
+  `editedFromActionScriptId`, and has null `modelId` / `effort`. `400` lists
+  every problem.
 - **`POST .../runs` answers `201` for a failed or timed-out run too**, like
-  the screenshot POST, so the run reaches the client. Each run gets its own
-  folder, `<website.id>/<random uuid>`, under the action script directory;
-  `failureScreenshotFileName` is stored relative to it. Only infrastructure
-  failures answer `500` (the folder cannot be written, node cannot start, a
-  query fails). The request lasts as long as the script, at most 5 minutes
-  plus a few seconds to stop it.
+  the screenshot POST, so the run reaches the client. Before running:
+  - `409` when this action already has a run in progress (a module `Set`,
+    claimed before the first await - one visible browser per action);
+  - with a credential: `503` when `CREDENTIAL_ENCRYPTION_KEY` is not
+    configured, `409` when the credential is gone, `400` when neither it nor
+    the website has a login page URL;
+  - `409` when the stored plan no longer passes the rules (e.g. the website
+    URL changed), or types a credential placeholder while the action runs
+    logged out.
+  Each run gets its own folder, `<website.id>/<random uuid>`, under the
+  action script directory; `failureScreenshotFileName` is stored relative to
+  it, and `credentialName` names who it logged in as. A failed run also
+  stores `failingPageUrl` and `failingPageAriaSnapshot` - where the browser
+  was, and what a screen reader saw there (both scrubbed of the credential's
+  values, the snapshot capped), or null when they could not be read; every
+  run JSON carries both fields. Only infrastructure
+  failures answer `500` (the password cannot be decrypted, the folder cannot
+  be written, the browser cannot start, a query fails). The request lasts as
+  long as the run, at most 5 minutes plus a few seconds to stop it.
 - **`GET .../failure-screenshot`** serves the PNG with the same
   `res.sendFile(name, { root }, cb)` pattern as the screenshot route (the
   shared `readSendErrorStatus` lives in `../utils/`): `404 "This run did not
   capture a failure screenshot"`, `404 "Failure screenshot file not found"`,
   `500` otherwise.
-- **A dev server restart mid-request loses that request.** `tsx watch`
-  restarting (any edit under `server/`) or `./stop-dev.sh` during a run drops
-  the response, and the script keeps running on its own - a script waiting in
-  `page.pause()` stays open until it is closed by hand.
+- **`POST .../runs/:actionScriptRunId/refinements` refines a failed run**
+  into a new version with the model that wrote the run's version. The body
+  is optional: `{ note }` (`validateActionPlanRefineInput`) - text, trimmed,
+  blank becomes null, at most 2000 characters. Checks, in order:
+  - `400` for a bad body (before any lookup, like convert);
+  - `404` for a missing website, action, version, or run (`"Script run not
+    found"`);
+  - `409` when the run passed or recorded no error, when the version was
+    saved from the step editor (`modelId` null - no model wrote it), when
+    this run is already being refined (a module `Set` keyed by run id,
+    claimed with no await after the check and released in `finally`), and
+    when the source model is no longer in the live catalog ("convert the
+    action again");
+  - then `503` / `502` / `500` from `statusForScriptGenerationFailure`, the
+    same as convert.
+
+  Claude is shown the SOURCE version's snapshots (like the edit route), the
+  action's current allowed origins, the crawled pages the source version was
+  shown (`selectContextPagesByUrl` over the newest crawl done the way it
+  ran, falling back to `selectRelevantCrawledPages` when none are left), the
+  source summary, assumptions, and plan, the run's error, step, time-out
+  flag, step log, and failing page, the failure screenshot as base64
+  (module-private `readFailureScreenshotAsBase64`: null when the run has
+  none, when the stored name would leave the action script directory, or
+  when the file is gone - then the refine goes ahead without it and records
+  `screenshotWasSent: false`), and the note. The effort is the source
+  version's when the model still offers it, otherwise `chooseEffortForModel`.
+  `201` answers the new version (its own `modelId` / `effort` are the
+  refining call's, `editedFromActionScriptId` is null, `contextPageUrls` are
+  the pages actually sent) with its `refinement`; the version and its
+  refinement row are ONE nested write (`createRefinedActionScriptForAction`).
+  A failed Claude call writes nothing. The request lasts as long as Claude
+  takes.
+- **A dev server restart mid-request loses that request.** The browser runs
+  inside the server process now, so `tsx watch` restarting (any edit under
+  `server/`) or `./stop-dev.sh` during a run closes its window and records
+  nothing.
 
 ## The crawl runs controller (`crawlRuns.ts`)
 

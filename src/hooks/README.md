@@ -8,11 +8,11 @@ than inline in a component.
 | `useHealth` | `{ health, isLoading, errorMessage }` from `GET /api/health` |
 | `useJsonResource` | `{ data, isLoading, errorMessage }` for any `GET` url; `data` is `unknown`. A `null` url stays idle (no request, not loading) |
 | `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website; `WebsiteRecord.loginUrl` is null when the website doesn't require login |
-| `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them |
+| `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them; the action LIST also carries each action's `newestScript` (a `NewestActionScriptRecord`: the newest version's id and its `latestRun`, or null when it has no versions) |
 | `useScreenshotRuns` | `{ runs, isLoading, errorMessage, addTakenRun }` for a website's screenshot runs; see below |
 | `useRecordListWithAdditions` | `{ records, isLoading, errorMessage, addRecord }`: the generic "fetched list plus rows a POST just created" behind the two hooks below |
-| `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript }` for an action's saved script versions |
-| `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun }` for one script's runs; a `null` script id fetches nothing |
+| `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript, recordFinishedRun }` for an action's saved plan versions (each with its `plan`, see `../utils/actionPlanSteps.ts`; its `refinement`: an `ActionScriptRefinementRecord` - the note, token usage, `screenshotWasSent`, and the failed run's `RefinedActionScriptRunSummary` - or null when it was not refined; and its `latestRun`: a `LatestActionScriptRunRecord` - `{ id, succeeded, createdAt }` of its newest run - or null when it has not been run). `recordFinishedRun(run)` makes a run a "Run script" POST just recorded its version's `latestRun` for the rest of the visit, so the version's status icon updates without refetching |
+| `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun }` for one version's runs (each with `failingPageUrl` and `failingPageAriaSnapshot`, null when it passed or none was captured); a `null` script id fetches nothing |
 | `useScriptModels` | Typed `useJsonResource` wrapper for `GET /api/script-models`: the live model list, each model's effort levels and fallback, and the default choice |
 | `useCrawlRuns` | Typed `useJsonResource` wrapper for a website's crawl runs (newest first, no pages); exports `CrawlRunRecord` (with `credentialId`, `isLoggedIn`, `credential: { id, name }`, and `buttonMode`) and `CrawlButtonModeRecord` |
 | `useCredentials` / `useCredential` | Typed wrappers for a website's credentials / one of them; export `CredentialRecord` (no password - only `hasPassword: true`) and `CredentialRequestBody` |
@@ -67,7 +67,8 @@ fetched list:
 apart from any runs taken in the meantime.
 
 `useRecordListWithAdditions` is that same pattern made generic, and is what
-`useActionScripts` (a new version from "Convert to script") and
+`useActionScripts` (a new version from "Convert to script", "Refine", or
+"Save as new version") and
 `useActionScriptRuns` (a new run from "Run script") are built on: added
 records are kept only while a caller-supplied check says they belong to the
 list on screen (the same action / the same script), and a fetched record

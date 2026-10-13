@@ -2,9 +2,21 @@ import { type ChangeEvent, type ReactElement, type SubmitEvent, useState } from 
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import { type WebsiteItemRequestBody } from "../hooks/useWebsiteItems";
+
+/** The "Log in as" choice for running logged out (no credential). */
+export const LOGGED_OUT_CREDENTIAL_VALUE = "";
+
+/** One credential the "Log in as" select offers. */
+export interface CredentialOption {
+  /** The credential's cuid. */
+  id: string;
+  /** The credential's label. */
+  name: string;
+}
 
 /** Props for `TitleDescriptionForm`. */
 export interface TitleDescriptionFormProps {
@@ -20,6 +32,11 @@ export interface TitleDescriptionFormProps {
   onSubmit: (values: WebsiteItemRequestBody) => void;
   /** Called when the user clicks Cancel. */
   onCancel: () => void;
+  /**
+   * The website's credentials, to show the "Log in as" select (actions
+   * only); undefined hides it and leaves `credentialId` out of the values.
+   */
+  credentialOptions?: CredentialOption[];
 }
 
 /**
@@ -27,15 +44,40 @@ export interface TitleDescriptionFormProps {
  * cases and actions. Both fields are required, so submit is disabled until
  * both are non-blank; the server validates the same rule.
  *
+ * Given `credentialOptions` (actions), it also shows a "Log in as" select -
+ * the credential the action logs in as before each run, or "Logged out" -
+ * and submits the choice as `credentialId` (null for logged out). A saved
+ * credential that is no longer offered falls back to "Logged out".
+ *
  * Field state is seeded from `initialValues` once, on mount - see
  * `WebsiteForm` for why the edit pages mount it keyed by the record's id.
  * @param props - Initial values, labels, request state, and callbacks
  * @returns The title / description form
  */
 export default function TitleDescriptionForm(props: TitleDescriptionFormProps): ReactElement {
-  const { initialValues, submitLabel, isSubmitting, errorMessage, onSubmit, onCancel } = props;
+  const {
+    initialValues,
+    submitLabel,
+    isSubmitting,
+    errorMessage,
+    onSubmit,
+    onCancel,
+    credentialOptions,
+  } = props;
   const [title, setTitle] = useState(initialValues.title);
   const [description, setDescription] = useState(initialValues.description);
+  const [selectedCredentialId, setSelectedCredentialId] = useState(
+    initialValues.credentialId ?? LOGGED_OUT_CREDENTIAL_VALUE,
+  );
+  const credentialPickerIsShown = credentialOptions !== undefined;
+  const selectedCredentialIsOffered =
+    credentialOptions?.some((credentialOption) => credentialOption.id === selectedCredentialId) ??
+    false;
+  // A credential that is not (or no longer) offered would leave the select
+  // blank; it is shown - and saved - as logged out instead.
+  const credentialIdToShow = selectedCredentialIsOffered
+    ? selectedCredentialId
+    : LOGGED_OUT_CREDENTIAL_VALUE;
 
   const titleIsFilled = title.trim() !== "";
   const descriptionIsFilled = description.trim() !== "";
@@ -62,6 +104,16 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
   };
 
   /**
+   * Keeps the "Log in as" choice in sync with the select.
+   * @param event - The select's change event
+   */
+  const handleCredentialChange = (
+    event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+  ): void => {
+    setSelectedCredentialId(event.target.value);
+  };
+
+  /**
    * Stops the browser's full-page form post and hands the values to the page.
    * Ignored while submit is blocked (e.g. Enter pressed with a blank field).
    * @param event - The form's submit event
@@ -69,7 +121,12 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
   const handleSubmit = (event: SubmitEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (submitIsBlocked) return;
-    onSubmit({ title, description });
+    if (!credentialPickerIsShown) {
+      onSubmit({ title, description });
+      return;
+    }
+    const actionRunsLoggedOut = credentialIdToShow === LOGGED_OUT_CREDENTIAL_VALUE;
+    onSubmit({ title, description, credentialId: actionRunsLoggedOut ? null : credentialIdToShow });
   };
 
   return (
@@ -85,6 +142,26 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
           minRows={3}
           fullWidth
         />
+        {credentialPickerIsShown && (
+          <TextField
+            select
+            label="Log in as"
+            value={credentialIdToShow}
+            onChange={handleCredentialChange}
+            helperText="Before each run, the browser logs in as this credential first"
+            // The logged-out option's value is "", which MUI renders as an
+            // empty field unless told to display it.
+            slotProps={{ select: { displayEmpty: true }, inputLabel: { shrink: true } }}
+            fullWidth
+          >
+            <MenuItem value={LOGGED_OUT_CREDENTIAL_VALUE}>Logged out (no credential)</MenuItem>
+            {credentialOptions.map((credentialOption) => (
+              <MenuItem key={credentialOption.id} value={credentialOption.id}>
+                {credentialOption.name}
+              </MenuItem>
+            ))}
+          </TextField>
+        )}
         {saveFailed && <Alert severity="error">{errorMessage}</Alert>}
         <Stack direction="row" spacing={1}>
           <Button type="submit" variant="contained" disabled={submitIsBlocked}>

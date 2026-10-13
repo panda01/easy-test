@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { useActionScripts } from "../../src/hooks/useActionScripts";
 import {
   buildActionScriptRecord,
+  buildActionScriptRunRecord,
   countRequests,
   stubFetchRoutes,
 } from "./support/frontendTestHelpers";
@@ -48,6 +49,57 @@ describe("useActionScripts", () => {
     });
 
     expect(result.current.scripts.map((script) => script.id)).toEqual(["script-2", "script-1"]);
+    expect(countRequests(fetchStub, "GET", SCRIPTS_API_URL)).toBe(1);
+  });
+
+  it("makes a run recorded on this visit its version's latestRun, without refetching, leaving other versions alone", async () => {
+    const serverLatestRun = { id: "run-1", succeeded: true, createdAt: "2026-04-03T00:00:00.000Z" };
+    const fetchStub = stubFetchRoutes({
+      [`GET ${SCRIPTS_API_URL}`]: {
+        status: 200,
+        body: [
+          buildActionScriptRecord({ id: "script-2", latestRun: null }),
+          buildActionScriptRecord({ id: "script-1", latestRun: serverLatestRun }),
+        ],
+      },
+    });
+    const { result } = renderHook(() => useActionScripts("website-1", "item-1"));
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    act(() => {
+      result.current.recordFinishedRun(
+        buildActionScriptRunRecord({
+          id: "run-2",
+          actionScriptId: "script-2",
+          succeeded: false,
+          createdAt: "2026-04-04T00:00:00.000Z",
+        }),
+      );
+    });
+
+    expect(result.current.scripts.map((script) => script.latestRun)).toEqual([
+      { id: "run-2", succeeded: false, createdAt: "2026-04-04T00:00:00.000Z" },
+      serverLatestRun,
+    ]);
+
+    act(() => {
+      result.current.recordFinishedRun(
+        buildActionScriptRunRecord({
+          id: "run-3",
+          actionScriptId: "script-2",
+          succeeded: true,
+          createdAt: "2026-04-05T00:00:00.000Z",
+        }),
+      );
+    });
+
+    expect(result.current.scripts[0].latestRun).toEqual({
+      id: "run-3",
+      succeeded: true,
+      createdAt: "2026-04-05T00:00:00.000Z",
+    });
     expect(countRequests(fetchStub, "GET", SCRIPTS_API_URL)).toBe(1);
   });
 

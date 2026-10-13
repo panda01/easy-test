@@ -11,12 +11,15 @@ import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnToHereState } from "../hooks/useReturnNavigation";
 import { type ScriptModelOption, useScriptModels } from "../hooks/useScriptModels";
+import { type ActionPlan } from "../utils/actionPlanSteps";
 import { useWebsiteItem } from "../hooks/useWebsiteItems";
 import { useWebsiteItemDeletion } from "../hooks/useWebsiteItemDeletion";
 import { useWebsite } from "../hooks/useWebsites";
 import {
   WEBSITE_LIST_PATH,
   actionScriptComparePath,
+  actionScriptEditsApiUrl,
+  actionScriptRunRefinementsApiUrl,
   actionScriptRunsApiUrl,
   actionScriptsApiUrl,
   websiteDetailPath,
@@ -58,22 +61,30 @@ function chooseEffortForModel(model: ScriptModelOption, currentEffort: string | 
 
 /**
  * An action's own page (`/websites/:websiteId/actions/:itemId`): its title,
- * description, and timestamps with Edit and Delete buttons, then its scripts
- * and their runs.
+ * description, who it runs as, and timestamps with Edit and Delete buttons,
+ * then its plan versions and their runs.
  *
  * - The Model and Effort dropdowns list every model Anthropic offers (live)
  *   and the chosen model's own effort levels; they start on the server's
  *   default (Claude Opus 5.5 at high).
  * - "Convert to script" asks the server to have Claude turn the action into a
- *   Playwright script with that model and level; each conversion is saved as
- *   a new, immutable version, which becomes the selected one.
+ *   JSON step plan with that model and level; each conversion is saved as a
+ *   new, immutable version, which becomes the selected one.
  * - The selected version (the newest unless the user picked another) shows
- *   its model, effort, an "Out of date" warning when the action's title or
- *   description changed since, its summary, assumptions, rule warnings, and
- *   code, followed by its runs. "Compare versions" opens two versions side by
- *   side.
+ *   where it came from, an "Out of date" warning when the action's title,
+ *   description, or credential changed since, its summary, assumptions,
+ *   steps, the pages Claude was shown, and its JSON, followed by its runs.
+ *   "Edit steps" opens the step editor; saving there creates a NEW version,
+ *   which becomes the selected one. "Compare versions" opens two versions
+ *   side by side.
  * - "Run script" runs the selected version (a browser window opens on this
- *   computer) and shows the recorded result.
+ *   computer and logs in first when the action has a credential) and shows
+ *   the recorded result.
+ * - A failed run of a version Claude wrote shows "Refine" (with an optional
+ *   note): the model that wrote the version fixes the plan from the run's
+ *   error, failure screenshot, and failing page, and the result is saved as
+ *   a new version, which becomes the selected one. Versions saved from the
+ *   step editor have no model, so their runs cannot be refined.
  *
  * The page owns every request; the sections only take props. The owning
  * website is fetched only for the breadcrumb; the action request alone
@@ -91,8 +102,13 @@ export default function ActionDetailPage(): ReactElement {
   const returnToHereState = useReturnToHereState();
   const deletion = useWebsiteItemDeletion(ACTION_KIND, websiteId, actionId);
 
-  const { scripts, isLoading: scriptsAreLoading, errorMessage: scriptsErrorMessage, addCreatedScript } =
-    useActionScripts(websiteId, actionId);
+  const {
+    scripts,
+    isLoading: scriptsAreLoading,
+    errorMessage: scriptsErrorMessage,
+    addCreatedScript,
+    recordFinishedRun,
+  } = useActionScripts(websiteId, actionId);
   const [pickedScriptId, setPickedScriptId] = useState<string | null>(null);
   const selectedScriptIndex = Math.max(
     scripts.findIndex((script) => script.id === pickedScriptId),
@@ -148,6 +164,16 @@ export default function ActionDetailPage(): ReactElement {
     isSubmitting: runIsInFlight,
     errorMessage: runErrorMessage,
   } = useJsonMutation();
+  const {
+    sendJsonRequest: sendEditRequest,
+    isSubmitting: editSaveIsInFlight,
+    errorMessage: saveEditErrorMessage,
+  } = useJsonMutation();
+  const {
+    sendJsonRequest: sendRefineRequest,
+    isSubmitting: refineIsInFlight,
+    errorMessage: refineErrorMessage,
+  } = useJsonMutation();
 
   /**
    * POSTs a conversion with the chosen model and effort level and, when it
@@ -175,9 +201,79 @@ export default function ActionDetailPage(): ReactElement {
   };
 
   /**
+   * POSTs an edited plan as a new version of the action and, when it is
+   * saved, adds it to the list and selects it (which closes the editor). A
+   * failure is shown in the editor from `saveEditErrorMessage`.
+   * @param sourceScript - The version that was edited
+   * @param plan - The edited plan
+   * @returns Resolves once the request is done
+   */
+  const saveEditedPlan = async (sourceScript: ActionScriptRecord, plan: ActionPlan): Promise<void> => {
+    const result = await sendEditRequest(
+      "POST",
+      actionScriptEditsApiUrl(websiteId, actionId, sourceScript.id),
+      { plan },
+    );
+    if (!result.succeeded) return;
+    const createdScript = result.data as ActionScriptRecord;
+    addCreatedScript(createdScript);
+    setPickedScriptId(createdScript.id);
+  };
+
+  /**
+   * Starts saving an edited plan without returning its promise (the editor expects a void callback).
+   * @param sourceScript - The version that was edited
+   * @param plan - The edited plan
+   */
+  const handleSaveEdit = (sourceScript: ActionScriptRecord, plan: ActionPlan): void => {
+    void saveEditedPlan(sourceScript, plan);
+  };
+
+  /**
+   * POSTs a refine of a failed run - Claude (the model that wrote the run's
+   * version) fixes the plan from the run's error, screenshot, and failing
+   * page - and, when the new version is saved, adds it to the list and
+   * selects it. A failure is shown in the run's details from
+   * `refineErrorMessage`.
+   * @param failedRun - The failed run to refine
+   * @param note - The user's note for Claude, or null when they gave none
+   * @returns Resolves once the request is done
+   */
+  const refineFailedRun = async (failedRun: ActionScriptRunRecord, note: string | null): Promise<void> => {
+    const result = await sendRefineRequest(
+      "POST",
+      actionScriptRunRefinementsApiUrl(websiteId, actionId, failedRun.actionScriptId, failedRun.id),
+      { note },
+    );
+    if (!result.succeeded) return;
+    const createdScript = result.data as ActionScriptRecord;
+    addCreatedScript(createdScript);
+    setPickedScriptId(createdScript.id);
+  };
+
+  /**
+   * Starts a refine without returning its promise (the run details expect a void callback).
+   * @param failedRun - The failed run to refine
+   * @param note - The user's note for Claude, or null when they gave none
+   */
+  const handleRefine = (failedRun: ActionScriptRunRecord, note: string | null): void => {
+    void refineFailedRun(failedRun, note);
+  };
+
+  // A version saved from the step editor has no model to refine it with.
+  const versionCanBeRefined = selectedScript !== null && selectedScript.modelId !== null;
+
+  const credentialName = action?.credential?.name ?? null;
+  const loginDetailText =
+    credentialName === null
+      ? "Runs as: logged out (no credential)"
+      : `Runs as: "${credentialName}" (logs in first)`;
+
+  /**
    * POSTs a run of the selected script and, when it is recorded, adds it to
-   * the history and selects it. A failed RUN is still a recorded run; only a
-   * failed REQUEST is shown from `runErrorMessage`.
+   * the history, selects it, and makes it the version's latest run (so the
+   * version's status icon updates at once). A failed RUN is still a recorded
+   * run; only a failed REQUEST is shown from `runErrorMessage`.
    * @returns Resolves once the request is done
    */
   const runSelectedScript = async (): Promise<void> => {
@@ -190,6 +286,7 @@ export default function ActionDetailPage(): ReactElement {
     if (!result.succeeded) return;
     const finishedRun = result.data as ActionScriptRunRecord;
     addFinishedRun(finishedRun);
+    recordFinishedRun(finishedRun);
     setPickedRunId(finishedRun.id);
   };
 
@@ -222,6 +319,7 @@ export default function ActionDetailPage(): ReactElement {
             item={action}
             editLinkState={returnToHereState}
             deletion={deletion}
+            detailText={loginDetailText}
           />
 
           <ActionScriptsSection
@@ -244,9 +342,16 @@ export default function ActionDetailPage(): ReactElement {
               onModelChange: handleModelChange,
               onEffortChange: handleEffortChange,
             }}
-            currentAction={action}
+            currentAction={{
+              title: action.title,
+              description: action.description,
+              credentialId: action.credentialId ?? null,
+            }}
             comparePath={actionScriptComparePath(websiteId, actionId)}
             compareLinkState={returnToHereState}
+            isSavingEdit={editSaveIsInFlight}
+            saveEditErrorMessage={saveEditErrorMessage}
+            onSaveEdit={handleSaveEdit}
           />
 
           {selectedScript !== null && (
@@ -261,6 +366,11 @@ export default function ActionDetailPage(): ReactElement {
               isRunning={runIsInFlight}
               runErrorMessage={runErrorMessage}
               onRunClick={handleRunClick}
+              credentialName={credentialName}
+              versionCanBeRefined={versionCanBeRefined}
+              isRefining={refineIsInFlight}
+              refineErrorMessage={refineErrorMessage}
+              onRefine={handleRefine}
             />
           )}
         </>

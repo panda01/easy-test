@@ -1,12 +1,14 @@
-/** An action field a script snapshots when it is generated. */
-export type ActionTextField = "title" | "description";
+/** An action field a plan snapshots when it is generated. */
+export type ActionTextField = "title" | "description" | "credential";
 
-/** The snapshot a script keeps of the action that generated it. */
+/** The snapshot a plan keeps of the action that generated it. */
 export interface ActionTextSnapshot {
-  /** The action's title when the script was generated. */
+  /** The action's title when the plan was generated. */
   actionTitle: string;
-  /** The action's description when the script was generated. */
+  /** The action's description when the plan was generated. */
   actionDescription: string;
+  /** The credential the action ran as when the plan was generated, or null for logged out. */
+  credentialId: string | null;
 }
 
 /** The action as it is now. */
@@ -15,12 +17,15 @@ export interface CurrentActionText {
   title: string;
   /** The action's current description. */
   description: string;
+  /** The credential the action runs as now, or null for logged out. */
+  credentialId: string | null;
 }
 
 /**
- * Finds which of the action's fields changed since a script was generated
- * from it - a script with any change is out of date and should be converted
- * again. Compared exactly: both sides are stored trimmed by the server.
+ * Finds which of the action's fields changed since a plan was generated
+ * from it - a plan with any change is out of date and should be converted
+ * again (a different credential means a different logged-in site). Compared
+ * exactly: both sides are stored trimmed by the server.
  * @param script - The script's snapshot of the action
  * @param action - The action as it is now
  * @returns The changed fields, title first; empty when the script is up to date
@@ -38,15 +43,22 @@ export function findChangedActionFields(
   if (descriptionChanged) {
     changedFields.push("description");
   }
+  const credentialChanged = script.credentialId !== action.credentialId;
+  if (credentialChanged) {
+    changedFields.push("credential");
+  }
   return changedFields;
 }
 
 /**
- * Names the changed fields for running text: "title", "description", or
- * "title and description".
+ * Names the changed fields for running text: "title", "title and
+ * description", or "title, description and credential".
  * @param changedFields - The fields that changed, as `findChangedActionFields` returns them
- * @returns The fields joined with "and"
+ * @returns The fields joined with commas and a final "and"
  */
 export function describeChangedActionFields(changedFields: ActionTextField[]): string {
-  return changedFields.join(" and ");
+  const fieldsBeforeTheLast = changedFields.slice(0, -1);
+  const lastField = changedFields.at(-1) ?? "";
+  const thereIsOnlyOneField = fieldsBeforeTheLast.length === 0;
+  return thereIsOnlyOneField ? lastField : `${fieldsBeforeTheLast.join(", ")} and ${lastField}`;
 }

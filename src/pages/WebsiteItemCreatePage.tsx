@@ -4,6 +4,7 @@ import Typography from "@mui/material/Typography";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import TitleDescriptionForm from "../components/TitleDescriptionForm";
+import { useCredentials } from "../hooks/useCredentials";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnNavigation } from "../hooks/useReturnNavigation";
@@ -22,7 +23,8 @@ const EMPTY_ITEM_VALUES: WebsiteItemRequestBody = { title: "", description: "" }
 
 /**
  * The create page for a use case or an action
- * (`/websites/:websiteId/<use-cases|actions>/new`).
+ * (`/websites/:websiteId/<use-cases|actions>/new`). An action's form also
+ * asks which of the website's credentials it logs in as (or none).
  *
  * Loads the owning website first - for the breadcrumb, and so a deleted or
  * unknown website shows "Website not found" instead of a form that cannot be
@@ -39,6 +41,13 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
   const { sendJsonRequest, isSubmitting, errorMessage } = useJsonMutation();
   const { returnTo, replaceKeepingReturnState } = useReturnNavigation();
   const websitePath = websiteDetailPath(websiteId);
+  const itemTakesACredential = itemKind.kindId === "action";
+  const credentialsResource = useCredentials(websiteId, itemTakesACredential);
+  const credentials = credentialsResource.data;
+  // An action's form waits for the credential list, so "Log in as" never
+  // starts out missing a credential the user could pick.
+  const formIsReady = !itemTakesACredential || credentials !== null;
+  const credentialOptions = itemTakesACredential ? (credentials ?? []) : undefined;
 
   /**
    * POSTs the new item and, when the server accepts it, moves on to the
@@ -86,7 +95,15 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
         loadingLabel="Loading website"
       />
 
-      {website !== null && (
+      {itemTakesACredential && (
+        <LoadStatusNotice
+          isLoading={credentialsResource.isLoading}
+          errorMessage={credentialsResource.errorMessage}
+          loadingLabel="Loading credentials"
+        />
+      )}
+
+      {website !== null && formIsReady && (
         <TitleDescriptionForm
           key={`${itemKind.kindId}-${website.id}`}
           initialValues={EMPTY_ITEM_VALUES}
@@ -95,6 +112,7 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
           errorMessage={errorMessage}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
+          credentialOptions={credentialOptions}
         />
       )}
     </Container>

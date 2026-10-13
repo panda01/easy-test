@@ -81,4 +81,36 @@ describe("WebsiteItemSummary", () => {
       "Action not found",
     );
   });
+
+  it("shows the detail line under the description only when one is given", () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <WebsiteItemSummary
+          itemKind={ACTION_KIND}
+          websiteId="website-1"
+          item={buildWebsiteItemRecord()}
+          editLinkState={{ returnTo: "/" }}
+          deletion={buildDeletion()}
+          detailText='Runs as: "Admin" (logs in first)'
+        />
+      </MemoryRouter>,
+    );
+
+    const detailLine = screen.getByText('Runs as: "Admin" (logs in first)');
+    const descriptionLine = screen.getByText("Sign in with a valid account");
+    expect(descriptionLine.compareDocumentPosition(detailLine) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    rerender(
+      <MemoryRouter>
+        <WebsiteItemSummary
+          itemKind={ACTION_KIND}
+          websiteId="website-1"
+          item={buildWebsiteItemRecord()}
+          editLinkState={{ returnTo: "/" }}
+          deletion={buildDeletion()}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText(/Runs as/)).not.toBeInTheDocument();
+  });
 });

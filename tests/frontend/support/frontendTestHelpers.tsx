@@ -11,7 +11,10 @@ import {
 } from "react-router-dom";
 import { expect, vi, type Mock } from "vitest";
 import { type ActionScriptRunRecord } from "../../../src/hooks/useActionScriptRuns";
-import { type ActionScriptRecord } from "../../../src/hooks/useActionScripts";
+import {
+  type ActionScriptRecord,
+  type ActionScriptRefinementRecord,
+} from "../../../src/hooks/useActionScripts";
 import { type CrawledPageRecord } from "../../../src/hooks/useCrawledPage";
 import {
   type CrawledPageSummaryRecord,
@@ -377,8 +380,9 @@ export function buildCrawlRunWithPagesRecord(
 }
 
 /**
- * Builds an action script version as the API returns it: by default a clean
- * script for action item-1 of website-1, with one assumption.
+ * Builds an action plan version as the API returns it: by default a
+ * generated, logged-out plan for action item-1 of website-1, with one
+ * assumption, two steps, one page given to Claude, and no runs yet.
  * @param overrides - Fields to replace in the default script
  * @returns A complete action script record
  */
@@ -393,15 +397,65 @@ export function buildActionScriptRecord(
     startUrl: "https://example.com",
     actionTitle: "Log in",
     actionDescription: "Sign in with a valid account",
+    credentialId: null,
+    credentialName: null,
     summary: "Opens the site and signs in.",
     assumptions: ["The sign-in button is labelled Sign in"],
-    code: "import { chromium } from 'playwright';\n// script-1 steps\n",
-    ruleViolations: [],
+    plan: {
+      name: "Log in",
+      startUrl: "https://example.com/",
+      steps: [
+        { action: "click", target: { role: "link", name: "Sign in" }, value: null },
+        { action: "expectVisible", target: { role: "heading", name: "Welcome" }, value: null },
+      ],
+    },
+    contextPageUrls: ["https://example.com/"],
     modelId: "claude-opus-5-5",
     effort: "high",
+    editedFromActionScriptId: null,
+    refinement: null,
+    latestRun: null,
     createdAt: "2026-04-02T03:04:05.000Z",
     updatedAt: "2026-04-02T03:04:05.000Z",
     deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds the refinement record a refined version carries, as the API returns
+ * it: by default script-2 refined from script-1's run script-run-1, which
+ * failed at step 2 with a failing page snapshot captured, with a note, the
+ * screenshot sent, and some token usage.
+ * @param overrides - Fields to replace in the default refinement
+ * @returns A complete action script refinement record
+ */
+export function buildActionScriptRefinementRecord(
+  overrides: Partial<ActionScriptRefinementRecord> = {},
+): ActionScriptRefinementRecord {
+  return {
+    id: "refinement-1",
+    websiteId: "website-1",
+    actionId: "item-1",
+    sourceActionScriptId: "script-1",
+    actionScriptRunId: "script-run-1",
+    refinedActionScriptId: "script-2",
+    note: "The link is called Profile now",
+    inputTokens: 2408,
+    outputTokens: 989,
+    cacheReadInputTokens: 9519,
+    cacheCreationInputTokens: 1292,
+    screenshotWasSent: true,
+    createdAt: "2026-04-04T03:04:05.000Z",
+    updatedAt: "2026-04-04T03:04:05.000Z",
+    deletedAt: null,
+    actionScriptRun: {
+      id: "script-run-1",
+      errorMessage: 'Step 2 (Click link "Account"): Timeout 10000ms exceeded.',
+      failedStepNumber: 2,
+      timedOut: false,
+      failingPageAriaSnapshot: '- link "Profile"',
+    },
     ...overrides,
   };
 }
@@ -421,12 +475,15 @@ export function buildActionScriptRunRecord(
     actionId: "item-1",
     actionScriptId: "script-1",
     succeeded: true,
-    exitCode: 0,
-    exitSignal: null,
     timedOut: false,
+    errorMessage: null,
+    failedStepNumber: null,
+    credentialName: null,
     output: "▶ Open the site\n✔ Use case completed\n",
     outputWasTruncated: false,
     failureScreenshotFileName: null,
+    failingPageUrl: null,
+    failingPageAriaSnapshot: null,
     durationMs: 4321,
     createdAt: "2026-04-03T03:04:05.000Z",
     updatedAt: "2026-04-03T03:04:05.000Z",

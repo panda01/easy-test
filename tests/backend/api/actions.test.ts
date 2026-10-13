@@ -10,6 +10,7 @@ const mockDbService = vi.hoisted(() => ({
   createActionForWebsite: vi.fn(),
   updateActionForWebsite: vi.fn(),
   softDeleteActionForWebsite: vi.fn(),
+  findCredentialForWebsite: vi.fn(),
 }));
 
 // The real dbService builds a PrismaClient at load time; this spec is about
@@ -32,6 +33,10 @@ function createActionsApp(): Express {
 
 const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
 const ACTION_NOT_FOUND_MESSAGE = "Action not found";
+const CREDENTIAL_NOT_ON_WEBSITE_MESSAGE =
+  "That credential does not exist on this website; pick one of the website's credentials or none";
+const CREDENTIAL_ID_INVALID_MESSAGE =
+  "The credential id must be a non-blank string, or null to run logged out";
 
 // The id in the request path and the id on the row the lookup returns are
 // deliberately different, so each test can prove the child query is scoped by
@@ -54,11 +59,36 @@ const ACTION_PATH = `${ACTIONS_PATH}/action-1`;
 const sampleAction = {
   id: "action-1",
   websiteId: foundWebsite.id,
+  credentialId: null,
   title: "Log in",
   description: "Enter credentials and submit the form",
   createdAt: "2026-01-03T00:00:00.000Z",
   updatedAt: "2026-01-03T00:00:00.000Z",
   deletedAt: null,
+  credential: null,
+};
+
+/** One of the found website's credentials, as the password-free lookup returns it. */
+const foundCredential = {
+  id: "credential-id-from-db",
+  websiteId: foundWebsite.id,
+  name: "Admin",
+  description: null,
+  username: "admin@example.com",
+  loginUrl: "https://example.com/login",
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+  createdAt: "2026-01-02T00:00:00.000Z",
+  updatedAt: "2026-01-02T00:00:00.000Z",
+  deletedAt: null,
+};
+
+/** The same action linked to that credential, carrying its id and name. */
+const sampleLinkedAction = {
+  ...sampleAction,
+  credentialId: foundCredential.id,
+  credential: { id: foundCredential.id, name: foundCredential.name },
 };
 
 describe("action routes", () => {
@@ -78,6 +108,21 @@ describe("action routes", () => {
       expect(res.body).toEqual([sampleAction]);
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.listActionsForWebsite).toHaveBeenCalledWith(foundWebsite.id);
+    });
+
+    it("answers each action with its newestScript - the newest version and its latest run, or null without versions", async () => {
+      const passedLatestRun = { id: "run-1", succeeded: true, createdAt: "2026-01-05T00:00:00.000Z" };
+      const actionsWithNewestScripts = [
+        { ...sampleAction, id: "action-passing", newestScript: { id: "script-a", latestRun: passedLatestRun } },
+        { ...sampleAction, id: "action-not-run", newestScript: { id: "script-b", latestRun: null } },
+        { ...sampleAction, id: "action-without-versions", newestScript: null },
+      ];
+      mockDbService.listActionsForWebsite.mockResolvedValue(actionsWithNewestScripts);
+
+      const res = await request(createActionsApp()).get(ACTIONS_PATH);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(actionsWithNewestScripts);
     });
 
     it("returns 404 Website not found and lists nothing when the website does not exist or was deleted", async () => {
@@ -123,7 +168,101 @@ describe("action routes", () => {
       expect(mockDbService.createActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, {
         title: "Log in",
         description: "Enter credentials and submit the form",
+        credentialId: null,
       });
+      expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
+    });
+
+    it("creates an action linked to one of the found website's credentials, trimming the credential id", async () => {
+      mockDbService.findCredentialForWebsite.mockResolvedValue(foundCredential);
+      mockDbService.createActionForWebsite.mockResolvedValue(sampleLinkedAction);
+
+      const res = await request(createActionsApp())
+        .post(ACTIONS_PATH)
+        .send({
+          title: "Log in",
+          description: "Enter credentials and submit the form",
+          credentialId: `  ${foundCredential.id} `,
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual(sampleLinkedAction);
+      expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        foundCredential.id,
+      );
+      expect(mockDbService.createActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, {
+        title: "Log in",
+        description: "Enter credentials and submit the form",
+        credentialId: foundCredential.id,
+      });
+    });
+
+    it("creates an action that runs logged out when the credential id is null", async () => {
+      mockDbService.createActionForWebsite.mockResolvedValue(sampleAction);
+
+      const res = await request(createActionsApp())
+        .post(ACTIONS_PATH)
+        .send({ title: "Log in", description: "Enter credentials", credentialId: null });
+
+      expect(res.status).toBe(201);
+      expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
+      expect(mockDbService.createActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, {
+        title: "Log in",
+        description: "Enter credentials",
+        credentialId: null,
+      });
+    });
+
+    it("returns 400 and creates nothing when the credential is not an active credential of the found website", async () => {
+      mockDbService.findCredentialForWebsite.mockResolvedValue(null);
+
+      const res = await request(createActionsApp())
+        .post(ACTIONS_PATH)
+        .send({
+          title: "Log in",
+          description: "Enter credentials",
+          credentialId: "credential-of-another-website",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: CREDENTIAL_NOT_ON_WEBSITE_MESSAGE });
+      expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        "credential-of-another-website",
+      );
+      expect(mockDbService.createActionForWebsite).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a number", 42],
+      ["blank", "   "],
+      ["an object", { id: "credential-1" }],
+    ])(
+      "returns 400 and does not touch the database when the credential id is %s",
+      async (_label, credentialId) => {
+        const res = await request(createActionsApp())
+          .post(ACTIONS_PATH)
+          .send({ title: "Log in", description: "Enter credentials", credentialId });
+
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({ error: CREDENTIAL_ID_INVALID_MESSAGE });
+        expect(mockDbService.findWebsiteById).not.toHaveBeenCalled();
+        expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
+        expect(mockDbService.createActionForWebsite).not.toHaveBeenCalled();
+      },
+    );
+
+    it("returns 500 with the error message when the credential lookup fails", async () => {
+      mockDbService.findCredentialForWebsite.mockRejectedValue(new Error("credential lookup failed"));
+
+      const res = await request(createActionsApp())
+        .post(ACTIONS_PATH)
+        .send({ title: "Log in", description: "Enter credentials", credentialId: "credential-1" });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "credential lookup failed" });
+      expect(mockDbService.createActionForWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 400 with the validation message and does not touch the database for an invalid body", async () => {
@@ -220,8 +359,73 @@ describe("action routes", () => {
       expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         "action-1",
-        { title: "Log out", description: "Open the menu and log out" },
+        { title: "Log out", description: "Open the menu and log out", credentialId: null },
       );
+    });
+
+    it("links the action to one of the found website's credentials", async () => {
+      mockDbService.findCredentialForWebsite.mockResolvedValue(foundCredential);
+      mockDbService.updateActionForWebsite.mockResolvedValue(sampleLinkedAction);
+
+      const res = await request(createActionsApp())
+        .put(ACTION_PATH)
+        .send({ title: "Log in", description: "Enter credentials", credentialId: foundCredential.id });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(sampleLinkedAction);
+      expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        foundCredential.id,
+      );
+      expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        "action-1",
+        { title: "Log in", description: "Enter credentials", credentialId: foundCredential.id },
+      );
+    });
+
+    it("unlinks the credential when the replacement leaves the credential id out (a PUT replaces the whole action)", async () => {
+      mockDbService.updateActionForWebsite.mockResolvedValue(sampleAction);
+
+      const res = await request(createActionsApp())
+        .put(ACTION_PATH)
+        .send({ title: "Log in", description: "Enter credentials" });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(sampleAction);
+      expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
+      expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        "action-1",
+        { title: "Log in", description: "Enter credentials", credentialId: null },
+      );
+    });
+
+    it("returns 400 and updates nothing when the credential is not an active credential of the found website", async () => {
+      mockDbService.findCredentialForWebsite.mockResolvedValue(null);
+
+      const res = await request(createActionsApp())
+        .put(ACTION_PATH)
+        .send({ title: "Log in", description: "Enter credentials", credentialId: "deleted-credential" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: CREDENTIAL_NOT_ON_WEBSITE_MESSAGE });
+      expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        "deleted-credential",
+      );
+      expect(mockDbService.updateActionForWebsite).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 and does not touch the database when the credential id is not a string", async () => {
+      const res = await request(createActionsApp())
+        .put(ACTION_PATH)
+        .send({ title: "Log in", description: "Enter credentials", credentialId: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: CREDENTIAL_ID_INVALID_MESSAGE });
+      expect(mockDbService.findWebsiteById).not.toHaveBeenCalled();
+      expect(mockDbService.updateActionForWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 400 with the validation message and does not touch the database for an invalid body", async () => {

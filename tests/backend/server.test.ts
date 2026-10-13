@@ -35,6 +35,7 @@ const mockDbService = vi.hoisted(() => ({
   listActionScriptsForAction: vi.fn(),
   findActionScriptForAction: vi.fn(),
   createActionScriptForAction: vi.fn(),
+  createRefinedActionScriptForAction: vi.fn(),
   listActionScriptRunsForScript: vi.fn(),
   findActionScriptRunForScript: vi.fn(),
   createActionScriptRunForScript: vi.fn(),
@@ -53,6 +54,7 @@ const mockDbService = vi.hoisted(() => ({
   createCredentialForWebsite: vi.fn(),
   updateCredentialForWebsite: vi.fn(),
   softDeleteCredentialForWebsite: vi.fn(),
+  findLatestCrawledPagesForWebsite: vi.fn(),
 }));
 
 /** The Playwright service is replaced so loading the full app can never launch a browser. */
@@ -62,7 +64,8 @@ const mockPlaywrightService = vi.hoisted(() => ({
 
 /** Claude is replaced so loading the full app can never call the Anthropic API. */
 const mockScriptGenerationService = vi.hoisted(() => ({
-  convertActionToScript: vi.fn(),
+  convertActionToPlan: vi.fn(),
+  refineActionPlan: vi.fn(),
 }));
 
 /** The model catalog is replaced so loading the full app can never call the Models API. */
@@ -70,12 +73,13 @@ const mockScriptModelService = vi.hoisted(() => ({
   listScriptModels: vi.fn(),
   findScriptModel: vi.fn(),
   chooseDefaultScriptModel: vi.fn(),
+  chooseEffortForModel: vi.fn(),
 }));
 
-/** The script runner is replaced so loading the full app can never start node or a browser. */
-const mockScriptRunnerService = vi.hoisted(() => ({
+/** The plan runner is replaced so loading the full app can never launch a browser. */
+const mockActionPlanRunnerService = vi.hoisted(() => ({
   FAILURE_SCREENSHOT_FILE_NAME: "failure.png",
-  runPlaywrightScript: vi.fn(),
+  runActionPlan: vi.fn(),
 }));
 
 /** Crawling is replaced so loading the full app can never start a crawl or touch crawl runs at boot. */
@@ -88,7 +92,7 @@ vi.mock("../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../server/services/crawlRunService.js", () => mockCrawlRunService);
 vi.mock("../../server/services/playwrightService.js", () => mockPlaywrightService);
 vi.mock("../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
-vi.mock("../../server/services/scriptRunnerService.js", () => mockScriptRunnerService);
+vi.mock("../../server/services/actionPlanRunnerService.js", () => mockActionPlanRunnerService);
 vi.mock("../../server/services/scriptModelService.js", () => mockScriptModelService);
 
 import { app, startListening } from "../../server/server.js";
@@ -126,11 +130,13 @@ const sampleUseCase = {
 const sampleAction = {
   id: "action-1",
   websiteId: sampleWebsite.id,
+  credentialId: null,
   title: "Log in",
   description: "Enter credentials and submit",
   createdAt: "2026-01-03T00:00:00.000Z",
   updatedAt: "2026-01-03T00:00:00.000Z",
   deletedAt: null,
+  credential: null,
 };
 
 const sampleScreenshotRun = {
@@ -315,19 +321,25 @@ describe("server.ts", () => {
       id: "action-script-1",
       websiteId: sampleWebsite.id,
       actionId: sampleAction.id,
-      code: "import { chromium } from 'playwright';\n",
+      plan: {
+        name: "Log in",
+        startUrl: sampleWebsite.url,
+        steps: [{ action: "click", target: { role: "button", name: "Sign in" }, value: null }],
+      },
     };
     mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
     mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
     mockDbService.findActionScriptForAction.mockResolvedValue(sampleScript);
-    mockScriptRunnerService.runPlaywrightScript.mockResolvedValue({
+    mockActionPlanRunnerService.runActionPlan.mockResolvedValue({
       succeeded: true,
-      exitCode: 0,
-      exitSignal: null,
       timedOut: false,
+      errorMessage: null,
+      failedStepNumber: null,
       output: "",
       outputWasTruncated: false,
       failureScreenshotWasCaptured: false,
+      failingPageUrl: null,
+      failingPageAriaSnapshot: null,
       durationMs: 1200,
     });
     mockDbService.createActionScriptRunForScript.mockResolvedValue({ id: "run-1" });
@@ -337,13 +349,37 @@ describe("server.ts", () => {
     );
 
     expect(res.status).toBe(201);
-    const [, runDirectory] = mockScriptRunnerService.runPlaywrightScript.mock.calls[0] as [
-      string,
-      string,
-    ];
+    const [{ runDirectory, uploadsDirectory }] = mockActionPlanRunnerService.runActionPlan.mock
+      .calls[0] as [{ runDirectory: string; uploadsDirectory: string }];
     // bootEnv loaded ACTION_SCRIPT_DIR from .env, as it does for `npm run dev`.
     const configuredActionScriptDirectory = resolveActionScriptDirectory();
     expect(runDirectory.startsWith(configuredActionScriptDirectory + path.sep)).toBe(true);
+    expect(uploadsDirectory).toBe(path.join(configuredActionScriptDirectory, "uploads"));
+  });
+
+  it("wires the refine-a-failed-run route into the full app", async () => {
+    const sampleScript = { id: "action-script-1", websiteId: sampleWebsite.id, modelId: "claude-opus-5-5" };
+    const passingRun = { id: "run-1", succeeded: true, errorMessage: null };
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
+    mockDbService.findActionScriptForAction.mockResolvedValue(sampleScript);
+    mockDbService.findActionScriptRunForScript.mockResolvedValue(passingRun);
+
+    const res = await request(app)
+      .post(
+        `/api/websites/${sampleWebsite.id}/actions/${sampleAction.id}/scripts/${sampleScript.id}/runs/${passingRun.id}/refinements`,
+      )
+      .send({ note: "Try again" });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: "Only a failed run can be refined; this run passed" });
+    expect(mockDbService.findActionScriptRunForScript).toHaveBeenCalledWith(
+      sampleWebsite.id,
+      sampleAction.id,
+      sampleScript.id,
+      passingRun.id,
+    );
+    expect(mockScriptGenerationService.refineActionPlan).not.toHaveBeenCalled();
   });
 
   it("parses a JSON body before it reaches the website routes", async () => {

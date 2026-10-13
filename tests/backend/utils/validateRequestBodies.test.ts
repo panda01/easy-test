@@ -5,6 +5,10 @@ import {
   DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS,
   validateWebsiteInput,
   validateTitleDescriptionInput,
+  validateActionInput,
+  validateActionPlanEditInput,
+  validateActionPlanRefineInput,
+  MAX_REFINE_NOTE_LENGTH,
   validateCredentialInput,
   validateCrawlRunStartInput,
 } from "../../../server/utils/validateRequestBodies.js";
@@ -403,6 +407,203 @@ describe("validateTitleDescriptionInput", () => {
   });
 });
 
+describe("validateActionInput", () => {
+  const CREDENTIAL_ID_INVALID_MESSAGE =
+    "The credential id must be a non-blank string, or null to run logged out";
+
+  it.each(nonObjectBodies)("rejects a body that is $label", ({ body }) => {
+    expect(validateActionInput(body)).toEqual({
+      isValid: false,
+      errorMessage: NOT_A_JSON_OBJECT_MESSAGE,
+    });
+  });
+
+  it("checks the title exactly as validateTitleDescriptionInput does", () => {
+    expect(validateActionInput({ title: "  ", description: "Steps", credentialId: "c-1" })).toEqual({
+      isValid: false,
+      errorMessage: TITLE_REQUIRED_MESSAGE,
+    });
+  });
+
+  it("checks the description exactly as validateTitleDescriptionInput does", () => {
+    expect(validateActionInput({ title: "Log in", description: 7, credentialId: "c-1" })).toEqual({
+      isValid: false,
+      errorMessage: DESCRIPTION_REQUIRED_MESSAGE,
+    });
+  });
+
+  it("checks the title and description before the credential id", () => {
+    expect(validateActionInput({ title: "", description: "Steps", credentialId: 5 })).toEqual({
+      isValid: false,
+      errorMessage: TITLE_REQUIRED_MESSAGE,
+    });
+  });
+
+  it.each([
+    ["left out", undefined],
+    ["null", null],
+  ])("runs logged out (credentialId null) when the credential id is %s", (_label, credentialId) => {
+    expect(
+      validateActionInput({ title: " Log in ", description: " Enter credentials ", credentialId }),
+    ).toEqual({
+      isValid: true,
+      input: { title: "Log in", description: "Enter credentials", credentialId: null },
+    });
+  });
+
+  it("takes a trimmed credential id", () => {
+    expect(
+      validateActionInput({
+        title: "Log in",
+        description: "Enter credentials",
+        credentialId: "  credential-1  ",
+      }),
+    ).toEqual({
+      isValid: true,
+      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1" },
+    });
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["blank", "   "],
+    ["a number", 42],
+    ["a boolean", false],
+    ["an object", { id: "credential-1" }],
+    ["an array", ["credential-1"]],
+  ])("rejects a credential id that is %s", (_label, credentialId) => {
+    expect(
+      validateActionInput({ title: "Log in", description: "Enter credentials", credentialId }),
+    ).toEqual({
+      isValid: false,
+      errorMessage: CREDENTIAL_ID_INVALID_MESSAGE,
+    });
+  });
+
+  it("drops fields that are not part of an action", () => {
+    expect(
+      validateActionInput({
+        title: "Log in",
+        description: "Enter credentials",
+        credentialId: "credential-1",
+        websiteId: "someone-elses-website",
+        credential: { id: "credential-2", name: "Other" },
+      }),
+    ).toEqual({
+      isValid: true,
+      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1" },
+    });
+  });
+});
+
+describe("validateActionPlanEditInput", () => {
+  /** The origins a plan for an example.com action may open. */
+  const ALLOWED_ORIGINS = ["https://example.com", "https://auth.example.com"];
+
+  /** A valid plan: open the site, fill the email from the credential, click Sign in. */
+  const validPlan = {
+    name: "Log in",
+    startUrl: "https://example.com/",
+    steps: [
+      { action: "goto", target: null, value: "https://auth.example.com/login" },
+      { action: "fill", target: { label: "Email" }, value: "{{credential.username}}" },
+      { action: "click", target: { role: "button", name: "Sign in" }, value: null },
+    ],
+  };
+
+  it.each(nonObjectBodies)("rejects a body that is $label", ({ body }) => {
+    expect(validateActionPlanEditInput(body, ALLOWED_ORIGINS)).toEqual({
+      isValid: false,
+      errorMessage: NOT_A_JSON_OBJECT_MESSAGE,
+    });
+  });
+
+  it.each([
+    ["left out", {}],
+    ["null", { plan: null }],
+  ])("requires a plan (plan is %s)", (_label, body) => {
+    expect(validateActionPlanEditInput(body, ALLOWED_ORIGINS)).toEqual({
+      isValid: false,
+      errorMessage: "A plan is required",
+    });
+  });
+
+  it("returns a valid plan, typed, with nothing else from the body", () => {
+    const validation = validateActionPlanEditInput(
+      { plan: validPlan, modelId: "claude-opus-5-5" },
+      ALLOWED_ORIGINS,
+    );
+
+    expect(validation).toEqual({ isValid: true, input: { plan: validPlan } });
+  });
+
+  it("returns the plan's fields in written order, whatever order they were sent in", () => {
+    const shuffledPlan = {
+      steps: [{ value: null, target: { name: "Sign in", role: "button" }, action: "click" }],
+      startUrl: "https://example.com/",
+      name: "Log in",
+    };
+
+    const validation = validateActionPlanEditInput({ plan: shuffledPlan }, ALLOWED_ORIGINS);
+
+    expect(validation.isValid).toBe(true);
+    const plan = validation.isValid ? validation.input.plan : null;
+    expect(Object.keys(plan ?? {})).toEqual(["name", "startUrl", "steps"]);
+    expect(Object.keys(plan?.steps[0] ?? {})).toEqual(["action", "target", "value"]);
+  });
+
+  it("rejects a plan that is not shaped like a plan, saying where", () => {
+    const validation = validateActionPlanEditInput(
+      { plan: { ...validPlan, steps: [{ action: "evaluate", target: null, value: "1 + 1" }] } },
+      ALLOWED_ORIGINS,
+    );
+
+    expect(validation.isValid).toBe(false);
+    const errorMessage = validation.isValid ? "" : validation.errorMessage;
+    expect(errorMessage).toMatch(/^The plan does not have the expected shape - steps\.0\.action: /);
+  });
+
+  it("rejects a plan with a field no plan has", () => {
+    const validation = validateActionPlanEditInput(
+      { plan: { ...validPlan, script: "await page.evaluate(() => 1)" } },
+      ALLOWED_ORIGINS,
+    );
+
+    expect(validation.isValid).toBe(false);
+    const errorMessage = validation.isValid ? "" : validation.errorMessage;
+    expect(errorMessage).toMatch(/^The plan does not have the expected shape - plan: /);
+  });
+
+  it("rejects a plan that breaks the step rules, listing every problem", () => {
+    const planThatLeavesTheSite = {
+      name: "Log in",
+      startUrl: "https://example.com/",
+      steps: [
+        { action: "goto", target: null, value: "https://evil.example/steal" },
+        { action: "press", target: null, value: "F12" },
+      ],
+    };
+
+    expect(validateActionPlanEditInput({ plan: planThatLeavesTheSite }, ALLOWED_ORIGINS)).toEqual({
+      isValid: false,
+      errorMessage: [
+        "Step 1 (goto): must be on this website (https://example.com or https://auth.example.com), not https://evil.example",
+        "Step 2 (press): must be one of: Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown",
+      ].join("; "),
+    });
+  });
+
+  it("checks the plan against the origins it is given", () => {
+    const validation = validateActionPlanEditInput({ plan: validPlan }, ["https://example.com"]);
+
+    expect(validation).toEqual({
+      isValid: false,
+      errorMessage:
+        "Step 1 (goto): must be on this website (https://example.com), not https://auth.example.com",
+    });
+  });
+});
+
 describe("validateScriptModelChoiceInput", () => {
   it("accepts a model with an effort level, trimming both", () => {
     expect(validateScriptModelChoiceInput({ modelId: " claude-opus-5-5 ", effort: " high " })).toEqual({
@@ -451,6 +652,99 @@ describe("validateScriptModelChoiceInput", () => {
       isValid: false,
       errorMessage:
         "The effort level must be a non-blank string, or null for a model with no effort setting",
+    });
+  });
+});
+
+describe("validateActionPlanRefineInput", () => {
+  const NOTE_NOT_TEXT_MESSAGE = "The note must be text";
+  const NOTE_TOO_LONG_MESSAGE = "The note must be at most 2000 characters";
+
+  it("allows at most 2000 characters in a note", () => {
+    expect(MAX_REFINE_NOTE_LENGTH).toBe(2000);
+  });
+
+  it("refines without a note when no body was sent at all (undefined)", () => {
+    expect(validateActionPlanRefineInput(undefined)).toEqual({
+      isValid: true,
+      input: { note: null },
+    });
+  });
+
+  it.each([
+    ["an empty object", {}],
+    ["a null note", { note: null }],
+    ["an empty note", { note: "" }],
+    ["a note of only spaces and newlines", { note: "  \n\t  " }],
+  ])("refines without a note for %s", (_label, body) => {
+    expect(validateActionPlanRefineInput(body)).toEqual({
+      isValid: true,
+      input: { note: null },
+    });
+  });
+
+  it("takes the note trimmed", () => {
+    expect(
+      validateActionPlanRefineInput({ note: "  The Sign in button is now called Log in \n" }),
+    ).toEqual({
+      isValid: true,
+      input: { note: "The Sign in button is now called Log in" },
+    });
+  });
+
+  it("ignores fields other than the note", () => {
+    expect(validateActionPlanRefineInput({ note: "Try again", modelId: "claude-opus-5-5" })).toEqual({
+      isValid: true,
+      input: { note: "Try again" },
+    });
+  });
+
+  it("accepts a note of exactly 2000 characters", () => {
+    const longestNote = "n".repeat(MAX_REFINE_NOTE_LENGTH);
+
+    expect(validateActionPlanRefineInput({ note: longestNote })).toEqual({
+      isValid: true,
+      input: { note: longestNote },
+    });
+  });
+
+  it("measures the note after trimming, so spaces around it do not count", () => {
+    const longestNote = "n".repeat(MAX_REFINE_NOTE_LENGTH);
+
+    expect(validateActionPlanRefineInput({ note: `   ${longestNote}   ` })).toEqual({
+      isValid: true,
+      input: { note: longestNote },
+    });
+  });
+
+  it("rejects a note of 2001 characters", () => {
+    expect(validateActionPlanRefineInput({ note: "n".repeat(MAX_REFINE_NOTE_LENGTH + 1) })).toEqual({
+      isValid: false,
+      errorMessage: NOTE_TOO_LONG_MESSAGE,
+    });
+  });
+
+  it.each([
+    ["a number", 42],
+    ["a boolean", true],
+    ["an array", ["Try again"]],
+    ["an object", { text: "Try again" }],
+  ])("rejects a note that is %s", (_label, note) => {
+    expect(validateActionPlanRefineInput({ note })).toEqual({
+      isValid: false,
+      errorMessage: NOTE_NOT_TEXT_MESSAGE,
+    });
+  });
+
+  it.each([
+    ["a null body", null],
+    ["an array", []],
+    ["a string", "Try again"],
+    ["a number", 3],
+  ])("rejects a body that is %s", (_label, body) => {
+    expect(validateActionPlanRefineInput(body)).toEqual({
+      isValid: false,
+      errorMessage: NOT_A_JSON_OBJECT_MESSAGE,
     });
   });
 });

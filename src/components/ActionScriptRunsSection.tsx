@@ -39,13 +39,29 @@ export interface ActionScriptRunsSectionProps {
   runErrorMessage: string | null;
   /** Called when the user clicks "Run script". */
   onRunClick: () => void;
+  /** The credential the action logs in as before each run, or null when it runs logged out. */
+  credentialName: string | null;
+  /** True when the version was written by Claude (not saved from the step editor), so its failed runs can be refined. */
+  versionCanBeRefined: boolean;
+  /** True while a "Refine" request is in flight. */
+  isRefining: boolean;
+  /** Why the last "Refine" request failed, or null. */
+  refineErrorMessage: string | null;
+  /** Called with the failed run and the note for Claude (null when blank) when the user clicks "Refine". */
+  onRefine: (failedRun: ActionScriptRunRecord, note: string | null) => void;
 }
 
 /**
- * The "Runs" section for the selected script version: the "Run script"
- * button (it opens a browser window on this computer and works through the
- * steps), the selected run in full (the newest unless the user picked
+ * The "Runs" section for the selected plan version: the "Run script"
+ * button (it opens a browser window on this computer, logs in first when the
+ * action has a credential, and works through the steps), the selected run in
+ * full (the newest unless the user picked
  * another), and the run history to pick from.
+ *
+ * A failed run of a version Claude wrote can be refined from its details
+ * ("Refine", with an optional note); "Refine" is disabled while a run is in
+ * flight. The details are keyed by the run's id, so the note and whether a
+ * refine was tried start over for each run.
  * @param props - The runs, the request states, and the callbacks
  * @returns The rendered section
  */
@@ -61,7 +77,16 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     isRunning,
     runErrorMessage,
     onRunClick,
+    credentialName,
+    versionCanBeRefined,
+    isRefining,
+    refineErrorMessage,
+    onRefine,
   } = props;
+  const loginSentence =
+    credentialName === null
+      ? "runs logged out"
+      : `logs in as "${credentialName}"`;
 
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs.at(0) ?? null;
   const runFailedToStart = runErrorMessage !== null;
@@ -84,8 +109,8 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
         </Button>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Running opens a browser window on this computer and works through the steps. A run is
-        stopped after 5 minutes.
+        Running opens a browser window on this computer, {loginSentence}, and works through the
+        plan's steps. A run is stopped after 5 minutes.
       </Typography>
 
       {isRunning && <LinearProgress aria-label="Running script" sx={{ mb: 2 }} />}
@@ -102,7 +127,19 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
         <Typography color="text.secondary">This version has not been run yet.</Typography>
       )}
 
-      {selectedRun !== null && <ActionScriptRunDetails websiteId={websiteId} run={selectedRun} />}
+      {selectedRun !== null && (
+        <ActionScriptRunDetails
+          // Keyed by run, so picking another run clears the note and any refine error.
+          key={selectedRun.id}
+          websiteId={websiteId}
+          run={selectedRun}
+          versionCanBeRefined={versionCanBeRefined}
+          isRefining={isRefining}
+          isRunning={isRunning}
+          refineErrorMessage={refineErrorMessage}
+          onRefine={onRefine}
+        />
+      )}
 
       {thereAreRuns && (
         <>
