@@ -1,8 +1,8 @@
-import { type ChangeEvent, type ReactElement } from "react";
+import { type ReactElement } from "react";
 import Alert from "@mui/material/Alert";
+import Box from "@mui/material/Box";
 import MenuItem from "@mui/material/MenuItem";
-import Stack from "@mui/material/Stack";
-import TextField from "@mui/material/TextField";
+import Select, { type SelectChangeEvent } from "@mui/material/Select";
 import { type ScriptModelOption } from "../hooks/useScriptModels";
 
 /** The Effort select's value for a model with no effort setting. */
@@ -29,11 +29,13 @@ export interface ScriptModelPickerProps {
 }
 
 /**
- * The "Model" and "Effort" dropdowns next to "Convert to script". The model
- * list comes live from Anthropic, so it has every model and, for the chosen
- * one, exactly the effort levels it offers - or a single "Standard" entry
- * for a model with no effort setting. The helper text names the model id and
- * the fallback that answers when the model declines.
+ * The compact "Model" and "Effort" dropdowns above "Convert to new version",
+ * side by side as the mockup's versions column draws them. The model list
+ * comes live from Anthropic, so it has every model and, for the chosen one,
+ * exactly the effort levels it offers - or a single "Standard" entry for a
+ * model with no effort setting. Each dropdown is named for screen readers
+ * ("Model", "Effort"); the model's hover title names its id and the fallback
+ * that answers when the model declines.
  * @param props - The models, the current choice, the request state, and the change callbacks
  * @returns The rendered pickers (or why the model list could not load)
  */
@@ -61,13 +63,13 @@ export default function ScriptModelPicker(props: ScriptModelPickerProps): ReactE
     selectedModel?.fallbackModel === null || selectedModel === null
       ? "No fallback for this model"
       : `If it declines, ${selectedModel.fallbackModel.displayName} answers instead`;
-  const modelHelperText = selectedModel === null ? "Loading models…" : `${selectedModel.id} · ${fallbackText}`;
+  const modelTitle = selectedModel === null ? "Loading models…" : `${selectedModel.id} · ${fallbackText}`;
 
   /**
    * Reports the picked model.
    * @param event - The select's change event
    */
-  const handleModelChange = (event: ChangeEvent<HTMLInputElement>): void => {
+  const handleModelChange = (event: SelectChangeEvent): void => {
     onModelChange(event.target.value);
   };
 
@@ -75,48 +77,47 @@ export default function ScriptModelPicker(props: ScriptModelPickerProps): ReactE
    * Reports the picked effort level.
    * @param event - The select's change event
    */
-  const handleEffortChange = (event: ChangeEvent<HTMLInputElement>): void => {
+  const handleEffortChange = (event: SelectChangeEvent): void => {
     onEffortChange(event.target.value);
   };
 
   return (
-    <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ flexGrow: 1 }}>
-      <TextField
-        select
-        label="Model"
+    <Box sx={{ display: "flex", gap: "6px" }}>
+      <Select
         value={selectedModel?.id ?? ""}
         onChange={handleModelChange}
         disabled={pickersAreDisabled}
-        helperText={modelHelperText}
+        displayEmpty
+        renderValue={() => selectedModel?.displayName ?? "Loading models…"}
         size="small"
-        sx={{ minWidth: 240 }}
+        title={modelTitle}
+        inputProps={{ "aria-label": "Model" }}
+        sx={{ flex: 1, minWidth: 0, fontSize: 12.5 }}
       >
         {models.map((model) => (
           <MenuItem key={model.id} value={model.id}>
             {model.displayName}
           </MenuItem>
         ))}
-      </TextField>
-      <TextField
-        select
-        label="Effort"
+      </Select>
+      <Select
         value={modelHasNoEffortSetting ? STANDARD_EFFORT_VALUE : (selectedEffort ?? "")}
         onChange={handleEffortChange}
         disabled={pickersAreDisabled || modelHasNoEffortSetting}
-        helperText={modelHasNoEffortSetting ? "This model has no effort setting" : " "}
         size="small"
-        sx={{ minWidth: 160 }}
+        inputProps={{ "aria-label": "Effort" }}
+        sx={{ width: 96, flex: "none", fontSize: 12.5, textTransform: "capitalize" }}
       >
         {modelHasNoEffortSetting ? (
           <MenuItem value={STANDARD_EFFORT_VALUE}>Standard</MenuItem>
         ) : (
           (selectedModel?.effortLevels ?? []).map((effortLevel) => (
-            <MenuItem key={effortLevel} value={effortLevel}>
+            <MenuItem key={effortLevel} value={effortLevel} sx={{ textTransform: "capitalize" }}>
               {effortLevel}
             </MenuItem>
           ))
         )}
-      </TextField>
-    </Stack>
+      </Select>
+    </Box>
   );
 }

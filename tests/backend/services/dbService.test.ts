@@ -117,7 +117,7 @@ import {
   isUniqueConstraintViolation,
   isRecordNotFound,
   createWebsite,
-  listWebsites,
+  listWebsitesWithSummaries,
   findWebsiteByUrl,
   findWebsiteById,
   updateWebsite,
@@ -294,7 +294,7 @@ const LATEST_ACTION_SCRIPT_RUN_QUERY = {
   where: { deletedAt: null },
   orderBy: { createdAt: "desc" },
   take: 1,
-  select: { id: true, succeeded: true, createdAt: true },
+  select: { id: true, succeeded: true, failedStepNumber: true, timedOut: true, createdAt: true },
 };
 
 /** What every action script read (and create) includes: the refinement, and the newest run. */
@@ -303,14 +303,63 @@ const ACTION_SCRIPT_INCLUDE = {
   runs: LATEST_ACTION_SCRIPT_RUN_QUERY,
 };
 
-/** What the website's action list includes: the credential, and the newest version with its newest run. */
+/**
+ * What the website's action list includes: the credential, the newest
+ * version (with the action text it was generated from and its newest run),
+ * and the count of active versions.
+ */
 const ACTION_LIST_INCLUDE = {
   ...ACTION_CREDENTIAL_INCLUDE,
   scripts: {
     where: { deletedAt: null },
     orderBy: { createdAt: "desc" },
     take: 1,
-    select: { id: true, runs: LATEST_ACTION_SCRIPT_RUN_QUERY },
+    select: {
+      id: true,
+      actionTitle: true,
+      actionDescription: true,
+      credentialId: true,
+      runs: LATEST_ACTION_SCRIPT_RUN_QUERY,
+    },
+  },
+  _count: { select: { scripts: { where: { deletedAt: null } } } },
+};
+
+/**
+ * What the website list includes for each website's summary: its active
+ * actions with their newest version's newest run, its newest script run, and
+ * its newest crawl run.
+ */
+const WEBSITE_SUMMARY_INCLUDE = {
+  actions: {
+    where: { deletedAt: null },
+    select: {
+      scripts: {
+        where: { deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { runs: LATEST_ACTION_SCRIPT_RUN_QUERY },
+      },
+    },
+  },
+  actionScriptRuns: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: { createdAt: true },
+  },
+  crawlRuns: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: {
+      id: true,
+      status: true,
+      visitedPageCount: true,
+      pageLimit: true,
+      createdAt: true,
+      finishedAt: true,
+    },
   },
 };
 
@@ -318,6 +367,8 @@ const ACTION_LIST_INCLUDE = {
 const samplePassedLatestRun = {
   id: "action-script-run-2",
   succeeded: true,
+  failedStepNumber: null,
+  timedOut: false,
   createdAt: new Date("2026-01-07T00:00:00.000Z"),
 };
 
@@ -325,7 +376,16 @@ const samplePassedLatestRun = {
 const sampleFailedLatestRun = {
   id: "action-script-run-3",
   succeeded: false,
+  failedStepNumber: 2,
+  timedOut: false,
   createdAt: new Date("2026-01-08T00:00:00.000Z"),
+};
+
+/** The action text a listed newest version was generated from, as `ACTION_LIST_INCLUDE` selects it. */
+const sampleNewestScriptText = {
+  actionTitle: "Log in",
+  actionDescription: "Enter credentials and submit",
+  credentialId: null,
 };
 
 /**
@@ -627,16 +687,76 @@ describe("dbService", () => {
       ).rejects.toBe(uniqueConstraintError);
     });
 
-    it("listWebsites returns only active websites, ordered by createdAt descending", async () => {
-      mockWebsiteDelegate.findMany.mockResolvedValue([sampleWebsite]);
+    it("listWebsitesWithSummaries reads the active websites, newest first, with only the relations the summary needs", async () => {
+      mockWebsiteDelegate.findMany.mockResolvedValue([]);
 
-      const websites = await listWebsites();
+      const websites = await listWebsitesWithSummaries();
 
       expect(mockWebsiteDelegate.findMany).toHaveBeenCalledWith({
         where: { deletedAt: null },
         orderBy: { createdAt: "desc" },
+        include: WEBSITE_SUMMARY_INCLUDE,
       });
-      expect(websites).toEqual([sampleWebsite]);
+      expect(websites).toEqual([]);
+    });
+
+    it("listWebsitesWithSummaries counts each action by its newest version's latest run and answers the newest run and crawl, never the relation lists", async () => {
+      const latestCrawlRun = {
+        id: "crawl-run-1",
+        status: "finished",
+        visitedPageCount: 46,
+        pageLimit: 50,
+        createdAt: new Date("2026-01-09T00:00:00.000Z"),
+        finishedAt: new Date("2026-01-09T00:02:00.000Z"),
+      };
+      mockWebsiteDelegate.findMany.mockResolvedValue([
+        {
+          ...sampleWebsite,
+          actions: [
+            { scripts: [{ runs: [samplePassedLatestRun] }] },
+            { scripts: [{ runs: [samplePassedLatestRun] }] },
+            { scripts: [{ runs: [sampleFailedLatestRun] }] },
+            { scripts: [{ runs: [] }] },
+            { scripts: [] },
+          ],
+          actionScriptRuns: [{ createdAt: new Date("2026-01-10T00:00:00.000Z") }],
+          crawlRuns: [latestCrawlRun],
+        },
+      ]);
+
+      const [website] = await listWebsitesWithSummaries();
+
+      expect(website).toEqual({
+        ...sampleWebsite,
+        summary: {
+          actionCount: 5,
+          passedActionCount: 2,
+          failedActionCount: 1,
+          notRunActionCount: 2,
+          latestRunAt: new Date("2026-01-10T00:00:00.000Z"),
+          latestCrawlRun,
+        },
+      });
+      expect(website).not.toHaveProperty("actions");
+      expect(website).not.toHaveProperty("actionScriptRuns");
+      expect(website).not.toHaveProperty("crawlRuns");
+    });
+
+    it("listWebsitesWithSummaries answers zero counts and nulls for a website with no actions, runs, or crawls", async () => {
+      mockWebsiteDelegate.findMany.mockResolvedValue([
+        { ...sampleWebsite, actions: [], actionScriptRuns: [], crawlRuns: [] },
+      ]);
+
+      const [website] = await listWebsitesWithSummaries();
+
+      expect(website.summary).toEqual({
+        actionCount: 0,
+        passedActionCount: 0,
+        failedActionCount: 0,
+        notRunActionCount: 0,
+        latestRunAt: null,
+        latestCrawlRun: null,
+      });
     });
 
     it("findWebsiteByUrl looks up the active row with that url", async () => {
@@ -967,8 +1087,8 @@ describe("dbService", () => {
   describe("actions", () => {
     it("listActionsForWebsite returns the website's active actions, newest first, each with its credential's id and name", async () => {
       mockActionDelegate.findMany.mockResolvedValue([
-        { ...sampleLinkedAction, scripts: [] },
-        { ...sampleAction, scripts: [] },
+        { ...sampleLinkedAction, scripts: [], _count: { scripts: 0 } },
+        { ...sampleAction, scripts: [], _count: { scripts: 0 } },
       ]);
 
       const actions = await listActionsForWebsite("cuid-1");
@@ -984,24 +1104,40 @@ describe("dbService", () => {
       ]);
     });
 
-    it("listActionsForWebsite answers each action's newest version and its latest run as newestScript, never as scripts", async () => {
+    it("listActionsForWebsite answers each action's newest version - numbered by its active version count, with the text it was generated from - and its latest run as newestScript, never as scripts", async () => {
       mockActionDelegate.findMany.mockResolvedValue([
-        { ...sampleAction, id: "action-passing", scripts: [{ id: "script-a", runs: [samplePassedLatestRun] }] },
-        { ...sampleAction, id: "action-failing", scripts: [{ id: "script-b", runs: [sampleFailedLatestRun] }] },
-        { ...sampleAction, id: "action-not-run", scripts: [{ id: "script-c", runs: [] }] },
-        { ...sampleAction, id: "action-without-versions", scripts: [] },
+        {
+          ...sampleAction,
+          id: "action-passing",
+          scripts: [{ id: "script-a", ...sampleNewestScriptText, runs: [samplePassedLatestRun] }],
+          _count: { scripts: 6 },
+        },
+        {
+          ...sampleAction,
+          id: "action-failing",
+          scripts: [{ id: "script-b", ...sampleNewestScriptText, runs: [sampleFailedLatestRun] }],
+          _count: { scripts: 2 },
+        },
+        {
+          ...sampleAction,
+          id: "action-not-run",
+          scripts: [{ id: "script-c", ...sampleNewestScriptText, runs: [] }],
+          _count: { scripts: 1 },
+        },
+        { ...sampleAction, id: "action-without-versions", scripts: [], _count: { scripts: 0 } },
       ]);
 
       const actions = await listActionsForWebsite("cuid-1");
 
       expect(actions.map((action) => action.newestScript)).toEqual([
-        { id: "script-a", latestRun: samplePassedLatestRun },
-        { id: "script-b", latestRun: sampleFailedLatestRun },
-        { id: "script-c", latestRun: null },
+        { id: "script-a", versionNumber: 6, ...sampleNewestScriptText, latestRun: samplePassedLatestRun },
+        { id: "script-b", versionNumber: 2, ...sampleNewestScriptText, latestRun: sampleFailedLatestRun },
+        { id: "script-c", versionNumber: 1, ...sampleNewestScriptText, latestRun: null },
         null,
       ]);
       for (const action of actions) {
         expect(action).not.toHaveProperty("scripts");
+        expect(action).not.toHaveProperty("_count");
       }
     });
 

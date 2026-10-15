@@ -416,8 +416,20 @@ describe("Action script routes", () => {
     });
 
     it("answers each version with its latestRun - passed, failed, or null when not run - and no runs list", async () => {
-      const passedLatestRun = { id: "run-passed", succeeded: true, createdAt: "2026-01-04T00:00:00.000Z" };
-      const failedLatestRun = { id: "run-failed", succeeded: false, createdAt: "2026-01-03T00:00:00.000Z" };
+      const passedLatestRun = {
+        id: "run-passed",
+        succeeded: true,
+        failedStepNumber: null,
+        timedOut: false,
+        createdAt: "2026-01-04T00:00:00.000Z",
+      };
+      const failedLatestRun = {
+        id: "run-failed",
+        succeeded: false,
+        failedStepNumber: 3,
+        timedOut: false,
+        createdAt: "2026-01-03T00:00:00.000Z",
+      };
       mockDbService.listActionScriptsForAction.mockResolvedValue([
         { ...foundScript, id: "script-3", latestRun: null },
         { ...foundScript, id: "script-2", latestRun: failedLatestRun },

@@ -32,6 +32,7 @@ function renderSection(overrides: Partial<ScreenshotRunsSectionProps> = {}): Ren
     onSelectRun: vi.fn(),
     isTakingScreenshot: false,
     takeScreenshotErrorMessage: null,
+    onTakeScreenshotClick: vi.fn(),
     ...overrides,
   };
   return render(<ScreenshotRunsSection {...props} />);
@@ -39,20 +40,33 @@ function renderSection(overrides: Partial<ScreenshotRunsSectionProps> = {}): Ren
 
 /**
  * Finds the run history list.
- * @returns The list element named "Run history"
+ * @returns The list element named "History"
  */
 function getRunHistory(): HTMLElement {
-  return screen.getByRole("list", { name: "Run history" });
+  return screen.getByRole("list", { name: "History" });
 }
 
 describe("ScreenshotRunsSection", () => {
-  it("is a section named by its Screenshots heading", () => {
+  it("has no heading of its own: its tab names it", () => {
     renderSection();
 
-    const section = screen.getByRole("region", { name: "Screenshots" });
-    expect(
-      within(section).getByRole("heading", { level: 2, name: "Screenshots" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 2 })).not.toBeInTheDocument();
+  });
+
+  it("asks the page to take a screenshot when Take screenshot is clicked", async () => {
+    const user = userEvent.setup();
+    const handleTakeScreenshotClick = vi.fn();
+    renderSection({ onTakeScreenshotClick: handleTakeScreenshotClick });
+
+    await user.click(screen.getByRole("button", { name: "Take screenshot" }));
+
+    expect(handleTakeScreenshotClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the button, and says so, while a screenshot is being taken", () => {
+    renderSection({ isTakingScreenshot: true });
+
+    expect(screen.getByRole("button", { name: "Taking screenshot…" })).toBeDisabled();
   });
 
   it("says when screenshots are taken, from the website's timing settings", () => {
@@ -93,7 +107,7 @@ describe("ScreenshotRunsSection", () => {
     renderSection({ runs: [] });
 
     expect(screen.getByText("No screenshots yet.")).toBeInTheDocument();
-    expect(screen.queryByRole("list", { name: "Run history" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "History" })).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
@@ -123,12 +137,15 @@ describe("ScreenshotRunsSection", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Failed · HTTP 404");
   });
 
-  it("lists every run newest first, marking the shown run as current", () => {
+  it("lists every run newest first, with when it was taken, marking the shown run as current", () => {
     renderSection({ selectedRunId: "run-1" });
 
     const historyItems = within(getRunHistory()).getAllByRole("button");
     expect(historyItems).toHaveLength(2);
     expect(historyItems[0]).toHaveTextContent("Failed · HTTP 404");
+    expect(
+      within(historyItems[0]).getByTitle(new Date(newestRun.createdAt).toLocaleString()),
+    ).toBeInTheDocument();
     expect(historyItems[0]).not.toHaveAttribute("aria-current");
     expect(historyItems[1]).toHaveTextContent("Succeeded · HTTP 200");
     expect(historyItems[1]).toHaveAttribute("aria-current", "true");

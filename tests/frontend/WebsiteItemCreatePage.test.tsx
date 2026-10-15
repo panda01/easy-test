@@ -21,7 +21,8 @@ import {
   type StubbedRouteTable,
 } from "./support/frontendTestHelpers";
 
-const LIST_PATH = "/websites";
+/** The website list: the dashboard, on the home page. */
+const LIST_PATH = "/";
 const WEBSITE_PATH = "/websites/website-1";
 const WEBSITE_API_URL = "/api/websites/website-1";
 const CREDENTIALS_API_URL = `${WEBSITE_API_URL}/credentials`;
@@ -132,6 +133,15 @@ describe.each(ITEM_KIND_TEST_CASES)(
         { label: `New ${singularLabel}`, href: null },
       ]);
       expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    });
+
+    it("puts a plus on the Create button", async () => {
+      stubLoadedWebsite();
+
+      renderWebsiteItemCreatePage(openedFromWebsite);
+
+      const createButton = await screen.findByRole("button", { name: submitLabel });
+      expect(within(createButton).getByTestId("AddIcon")).toBeInTheDocument();
     });
 
     it("shows the server's not-found text and no form for an unknown website", async () => {

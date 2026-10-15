@@ -3,10 +3,22 @@ import { type JsonResourceState, useJsonResource } from "./useJsonResource";
 import { websiteItemApiUrl, websiteItemsApiUrl } from "../utils/routePaths";
 import { type WebsiteItemKind } from "../utils/websiteItemKinds";
 
-/** An action's newest script version as the action list returns it: its id and its newest run. */
+/**
+ * An action's newest script version as the action list returns it: its id,
+ * its version number, the action text it was generated from (to tell whether
+ * it is out of date), and its newest run.
+ */
 export interface NewestActionScriptRecord {
   /** The newest version's cuid. */
   id: string;
+  /** Its version number: how many versions the action has, counting the oldest as 1. */
+  versionNumber: number;
+  /** The action's title when the version was generated. */
+  actionTitle: string;
+  /** The action's description when the version was generated. */
+  actionDescription: string;
+  /** The credential the action ran as when the version was generated, or null for logged out. */
+  credentialId: string | null;
   /** That version's newest run, or null when it has not been run yet. */
   latestRun: LatestActionScriptRunRecord | null;
 }

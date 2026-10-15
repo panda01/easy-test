@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, within, type RenderResult } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import CrawlSiteMap, { type CrawlSiteMapProps } from "../../src/components/CrawlSiteMap";
+import { statusColors } from "../../src/theme/nocturneTheme";
 import { buildCrawledPageSummaryRecord } from "./support/frontendTestHelpers";
 
 const homePage = buildCrawledPageSummaryRecord({
@@ -46,6 +47,7 @@ function renderSiteMap(overrides: Partial<CrawlSiteMapProps> = {}): RenderResult
     pages: [homePage, aboutPage, blogPage, missingPage],
     selectedPageId: null,
     onSelectPage: vi.fn(),
+    isPhoneLayout: false,
     ...overrides,
   };
   return render(<CrawlSiteMap {...props} />);
@@ -58,11 +60,60 @@ describe("CrawlSiteMap", () => {
     const siteMap = screen.getByRole("list", { name: "Site map" });
     const rows = within(siteMap).getAllByRole("button");
     expect(rows.map((row) => row.textContent)).toEqual([
-      "/Succeeded · HTTP 200 · Home",
-      "/aboutSucceeded · HTTP 200",
-      "/about/missingFailed · HTTP 404",
-      "/blogSucceeded · HTTP 200 · Blog",
+      "/",
+      "/about",
+      "/about/missingHTTP 404",
+      "/blog",
     ]);
+  });
+
+  it("puts a green dot before a page that loaded and a red one before a page that failed", () => {
+    renderSiteMap();
+
+    const homeDot = screen.getByRole("button", { name: "/" }).querySelector('[aria-hidden="true"]');
+    const missingDot = screen
+      .getByRole("button", { name: /^\/about\/missing/ })
+      .querySelector('[aria-hidden="true"]');
+    expect(homeDot).toHaveStyle({ backgroundColor: statusColors.passed });
+    expect(missingDot).toHaveStyle({ backgroundColor: statusColors.failed });
+  });
+
+  it("notes a redirect: where a page recorded where it landed was requested, or where one recorded where it was requested landed", () => {
+    const calendarPage = buildCrawledPageSummaryRecord({
+      id: "calendar",
+      url: "https://example.com/calendar",
+      requestedUrl: "https://example.com/",
+      finalUrl: "https://example.com/calendar",
+      wasRedirected: true,
+    });
+    const oldAccountPage = buildCrawledPageSummaryRecord({
+      id: "old-account",
+      parentPageId: "calendar",
+      url: "https://example.com/old-account",
+      requestedUrl: "https://example.com/old-account",
+      finalUrl: "https://example.com/account",
+      wasRedirected: true,
+      visitOrder: 1,
+      depth: 1,
+    });
+    renderSiteMap({ pages: [calendarPage, oldAccountPage] });
+
+    expect(screen.getByRole("button", { name: /^\/calendar/ })).toHaveTextContent("/calendarfrom /");
+    expect(screen.getByRole("button", { name: /^\/old-account/ })).toHaveTextContent(
+      "/old-account→ /account",
+    );
+  });
+
+  it("notes a failed page that never answered", () => {
+    const unreachablePage = buildCrawledPageSummaryRecord({
+      id: "unreachable",
+      url: "https://example.com/down",
+      succeeded: false,
+      httpStatus: null,
+    });
+    renderSiteMap({ pages: [unreachablePage] });
+
+    expect(screen.getByRole("button", { name: /^\/down/ })).toHaveTextContent("/downNo response");
   });
 
   it("names the button that led to a page found by a click", () => {
@@ -78,7 +129,7 @@ describe("CrawlSiteMap", () => {
     renderSiteMap({ pages: [homePage, blogPage, yogaPage] });
 
     expect(screen.getByRole("button", { name: /^\/sessions\/yoga/ })).toHaveTextContent(
-      "/sessions/yogaSucceeded · HTTP 200 · Yoga · via “Open Yoga”",
+      "/sessions/yogavia “Open Yoga”",
     );
     expect(screen.getByRole("button", { name: /^\/blog/ })).not.toHaveTextContent("via");
   });
@@ -99,9 +150,7 @@ describe("CrawlSiteMap", () => {
     renderSiteMap({ selectedPageId: "blog" });
 
     expect(screen.getByRole("button", { name: /^\/blog/ })).toHaveAttribute("aria-current", "true");
-    expect(screen.getByRole("button", { name: /^\/about Succeeded/ })).not.toHaveAttribute(
-      "aria-current",
-    );
+    expect(screen.getByRole("button", { name: "/about" })).not.toHaveAttribute("aria-current");
   });
 
   it("calls onSelectPage with the picked page's id", async () => {
@@ -119,5 +168,19 @@ describe("CrawlSiteMap", () => {
 
     expect(screen.getByText("No pages yet.")).toBeInTheDocument();
     expect(screen.queryByRole("list")).not.toBeInTheDocument();
+  });
+
+  it("draws taller rows straight on the page ground in the phone layout, and a panel on desktop", () => {
+    const { container, unmount } = renderSiteMap({ isPhoneLayout: true });
+
+    const phoneRows = within(screen.getByRole("list", { name: "Site map" })).getAllByRole("button");
+    expect(phoneRows[0]).toHaveStyle({ minHeight: "44px" });
+    expect(container.querySelector("section")).not.toHaveStyle({ padding: "10px" });
+    unmount();
+
+    renderSiteMap({ isPhoneLayout: false });
+    const desktopRows = within(screen.getByRole("list", { name: "Site map" })).getAllByRole("button");
+    expect(desktopRows[0]).toHaveStyle({ minHeight: "34px" });
+    expect(screen.getByRole("list", { name: "Site map" })).toHaveStyle({ maxHeight: "640px" });
   });
 });

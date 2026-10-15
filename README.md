@@ -2,29 +2,39 @@
 
 Development scaffold: Express API + React/Vite frontend + Prisma/PostgreSQL.
 
-The homepage says Hello World and displays the live result of `GET /api/health`,
-which doubles as the end-to-end proof that the Vite `/api` proxy and the Express
-server are both up.
+The UI follows the **Easy Test Mockups** design on the **Nocturne** design
+system: dark only, Inter, an accent blurple used for outlines rather than
+fills, and one status language everywhere (passed, failed, not run, out of
+date, running). The theme lives in `src/theme/nocturneTheme.ts`, and every
+icon comes from `src/components/icons.tsx` (one path import per MUI icon).
+Each core screen has a desktop and a phone layout (below 900 px; the action
+page goes to one column below 1200 px).
 
-`/websites` manages the websites to test. Each website has its own page, with
+The homepage is the **websites dashboard**: every website with its actions'
+passed / failed / not run counts and its last crawl (`GET /api/websites`
+answers each website with a `summary`). `/websites` redirects there.
+`GET /api/health` is the end-to-end check that the Vite `/api` proxy and the
+Express server are both up.
+
+The dashboard manages the websites to test. Each website has its own page, with
 its **use cases** (scenarios to test) and **actions** (reusable steps such as
 "Log in"), and each of those has its own page too. All three support create,
 view, edit, and (soft) delete; see `server/prisma/README.md` and
 `src/pages/README.md`.
 
-A website's page also has a **Take screenshot** button. The server's
+A website's page also has a **Take screenshot** button (Screenshots tab). The server's
 Playwright controller launches a headless Chromium **on this machine**, visits
 the website's URL in a 1280x720 viewport, saves a PNG, and records the run:
 succeeded (HTTP < 400) or failed (HTTP 400+ with a screenshot, or a DNS error /
 refused connection / timeout with none). Every run is kept and listed under
-"Run history". Before each screenshot it waits for the page's network
+"History". Before each screenshot it waits for the page's network
 requests to finish and for it to paint, using two per-website settings on the
 website form: a network idle cap (default 5000 ms) and a minimum wait
 (default 1 ms). The browser can reach anything this machine can — localhost and
 LAN addresses included — and an invalid TLS certificate counts as a failed
 visit. See `server/controllers/README.md` and `server/services/README.md`.
 
-A website's page also has a **Crawls** section with a **Crawl website**
+A website's page also has a **Crawls** tab with a **Crawl website**
 button. The server crawls the website in the **background** with a headless
 Chromium on this machine: it starts at the website's URL and follows every
 `<a href>` to another page on the same origin - **links only**, it never
@@ -35,13 +45,15 @@ snapshot** (`page.locator("body").ariaSnapshot()`), the HTTP outcome, the
 title, its same-site links, and the page whose link first led to it, so the
 pages form a **tree** (`CrawledPage.parentPageId`). Clicking the button opens
 the crawl's own page, which re-fetches every 2 seconds while it runs and
-shows the "Site map" tree beside the selected page's snapshot. One crawl per
+shows the "Site map" tree beside the selected page's snapshot; the website
+page's Crawls tab also shows a running crawl's live progress, with a "Watch"
+link to that page. One crawl per
 website runs at a time; a dev server restart ends a running crawl as
 "interrupted". See `server/services/README.md` and `src/pages/README.md`.
 
 A website can also have **Credentials** (name, description, username,
 password, login page URL, and optional login form CSS selectors). Picking one
-in the Crawls section's **Crawl as** dropdown makes the crawler **log in
+in the Crawls tab's **Crawl as** dropdown makes the crawler **log in
 first** - it finds the login form's fields itself unless the credential names
 selectors - and record nothing until the login works; the run is then marked
 `isLoggedIn` with that credential, and logout links are never followed. A
@@ -56,12 +68,13 @@ minimum wait - so a login is never judged while it still says "Signing in…".
 A website can also have a **login page URL** (blank = it doesn't require
 login). Its credentials inherit it unless they set their own, and a website
 without one learns it from the first crawl that logs in with a credential's
-own URL. The Credentials section and "Crawl as" only show when the website or
+own URL. The Credentials tab and "Crawl as" only show when the website or
 one of its credentials has a login URL.
 
-A crawl can also **click buttons**, picked in the Crawls section's
-**Buttons** dropdown: "Links only (no buttons)" (the default), "Buttons,
-except risky ones", or "Only “Open” buttons". A click only counts when it
+A crawl can also **click buttons**: the crawl API takes a `buttonMode` -
+`linksOnly` (the default), `allButRisky`, or `openOnly`. The website page
+starts every crawl with the default (links only); the redesign has no picker
+for it. A click only counts when it
 lands on another page of the same site, which is then crawled like a link
 and shown as "via “Open Yoga”". Risky buttons - create, delete, update, log
 out, pay, confirm, and similar (the full list is in
@@ -76,7 +89,7 @@ on its create / edit form): every run of it then **logs in first** with the
 crawler's own login routine. Deleting the credential unlinks it.
 
 An action's page has **Model** and **Effort** dropdowns and a **Convert to
-script** button. The dropdowns list every Claude model Anthropic's Models API
+new version** button. The dropdowns list every Claude model Anthropic's Models API
 offers (live, so new models appear on their own) and exactly the effort levels
 the chosen one supports ("Standard" for models without an effort setting);
 they start on Claude Opus 5.5 at high. The server picks the crawled pages
@@ -98,8 +111,8 @@ summary, assumptions, steps, the pages Claude was shown, and the plan JSON.
 **Edit steps** opens a step editor - drag steps (mouse or keyboard) or use the
 up/down buttons, add, change, or delete steps - and **Save as new version**
 saves the result as a new version ("Edited from Version K"); every version
-is **immutable**. **Run script** runs the selected version **inside the
-server**, opening a **visible browser window on this machine**: it logs in
+is **immutable**. **Run again** ("Run" before the first run) runs the shown
+version **inside the server**, opening a **visible browser window on this machine**: it logs in
 first when the action has a credential, opens the start URL, and walks the
 steps through a fixed `switch` of allowed Playwright calls - the plan is
 never turned into code, so nothing outside the list can run. `fill` types
@@ -109,7 +122,7 @@ time only, never stored, logged, or sent to Claude. A run records pass/fail
 ("Failed at step N" and why), who it logged in as, the step log, and a
 failure screenshot, plus the URL and aria snapshot of the page it failed on,
 and is stopped after **5 minutes**. A **failed** run of a version Claude
-wrote shows a **Refine** button with an optional **Note for Claude**: it
+wrote shows **Refine with Claude**, with an optional note: it
 sends the run's error, failed step, step log, failure screenshot, and
 failing-page snapshot, with the version's plan, summary, assumptions, the
 same crawled pages, and the note, to **the same model and effort** that wrote
@@ -119,7 +132,7 @@ them). Each refinement is recorded as a link between the source version, the
 failed run, and the new version, with the note, the call's token usage, and
 whether the screenshot was sent. A version generated
 from a title, description, or credential the action no longer has is marked
-**Out of date**, and **Compare versions** shows any two versions side by
+**Out of date**, and **Compare** shows any two versions side by
 side: the title, description, and plan JSON, with changed lines and words
 highlighted. Without `ANTHROPIC_API_KEY` the server still boots, and the
 model list and conversion answer 503.
@@ -249,7 +262,7 @@ that is already set. `.env.example` documents every key.
 | `DATABASE_URL` | PostgreSQL connection string. |
 | `SCREENSHOT_DIR` | Where screenshot PNGs are written and served from. Required; default `screenshots` (gitignored). A relative path resolves against the project root; `~` is not expanded. |
 | `ACTION_SCRIPT_DIR` | Where each plan run's folder (`failure.png` when it fails) is written, and where `uploadFile` steps pick files from (its `uploads/` folder). Required; default `action-scripts` (gitignored). Must be **inside the project**, or the server refuses to start. |
-| `ANTHROPIC_API_KEY` | **Secret** - put it in `.env.local` only. Used by "Convert to script". Optional for boot: without it, conversion answers 503 with an explanation. |
+| `ANTHROPIC_API_KEY` | **Secret** - put it in `.env.local` only. Used by "Convert to new version" and Refine. Optional for boot: without it, conversion answers 503 with an explanation. |
 
 ## Database
 

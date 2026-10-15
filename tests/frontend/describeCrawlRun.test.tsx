@@ -1,13 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
+  CRAWL_TIME_LIMIT_MS,
+  crawlRunHistorySeverity,
+  crawlRunLoginFailed,
   crawlRunLoginSeverity,
   crawlRunSeverity,
-  describeCrawlButtonMode,
+  describeCrawlRunHistoryLabel,
   describeCrawlRunLogin,
   describeCrawlRunProgress,
   describeCrawlRunStatus,
-  describeCrawledPagePath,
-  formatCrawlButtonModeSuffix,
+  describeRedirectFact,
+  describeSiteMapNote,
   formatCrawledPagePath,
   identifyCrawledUrl,
 } from "../../src/utils/describeCrawlRun";
@@ -44,10 +47,10 @@ describe("describeCrawlRunProgress", () => {
         pageLimit: 50,
         waitingUrlCount: 30,
       }),
-    ).toBe("Visited 12 of up to 50 pages · 30 links waiting");
+    ).toBe("12 of up to 50 pages · 30 waiting");
   });
 
-  it("uses the singular for one waiting link", () => {
+  it("writes one waiting link the same short way", () => {
     expect(
       describeCrawlRunProgress({
         status: "running",
@@ -55,7 +58,7 @@ describe("describeCrawlRunProgress", () => {
         pageLimit: 50,
         waitingUrlCount: 1,
       }),
-    ).toBe("Visited 1 of up to 50 pages · 1 link waiting");
+    ).toBe("1 of up to 50 pages · 1 waiting");
   });
 });
 
@@ -69,26 +72,6 @@ describe("crawlRunSeverity", () => {
     { status: "interrupted", severity: "error" },
   ])("colours a $status crawl as $severity", ({ status, severity }) => {
     expect(crawlRunSeverity(status)).toBe(severity);
-  });
-});
-
-describe("describeCrawlButtonMode / formatCrawlButtonModeSuffix", () => {
-  it.each([
-    { buttonMode: "linksOnly", text: "links only", suffix: "" },
-    {
-      buttonMode: "allButRisky",
-      text: "clicked buttons except risky ones",
-      suffix: " · clicked buttons except risky ones",
-    },
-    {
-      buttonMode: "openOnly",
-      text: "clicked only “Open” buttons",
-      suffix: " · clicked only “Open” buttons",
-    },
-    { buttonMode: "somethingNew", text: "somethingNew", suffix: " · somethingNew" },
-  ])("words the $buttonMode mode as '$text'", ({ buttonMode, text, suffix }) => {
-    expect(describeCrawlButtonMode(buttonMode)).toBe(text);
-    expect(formatCrawlButtonModeSuffix(buttonMode)).toBe(suffix);
   });
 });
 
@@ -110,42 +93,86 @@ describe("describeCrawlRunLogin / crawlRunLoginSeverity", () => {
     {
       label: "a crawl without a credential",
       run: { status: "finished", isLoggedIn: false, credential: null },
-      text: "Crawled logged out (no credential)",
+      text: "Logged out",
       severity: "info",
     },
     {
       label: "a crawl that logged in",
       run: { status: "finished", isLoggedIn: true, credential: adminCredential },
-      text: 'Logged in as "Admin"',
+      text: "Logged in as “Admin”",
       severity: "success",
     },
     {
       label: "a running crawl that has logged in",
       run: { status: "running", isLoggedIn: true, credential: adminCredential },
-      text: 'Logged in as "Admin"',
+      text: "Logged in as “Admin”",
       severity: "success",
     },
     {
       label: "a running crawl still logging in",
       run: { status: "running", isLoggedIn: false, credential: adminCredential },
-      text: 'Logging in as "Admin"…',
+      text: "Logging in as “Admin”…",
       severity: "info",
     },
     {
       label: "a crawl whose login failed",
       run: { status: "failed", isLoggedIn: false, credential: adminCredential },
-      text: 'Not logged in - the login as "Admin" did not succeed',
+      text: "Not logged in — login as “Admin” failed",
       severity: "error",
     },
     {
       label: "a crawl interrupted while logging in",
       run: { status: "interrupted", isLoggedIn: false, credential: adminCredential },
-      text: 'Not logged in - the login as "Admin" did not succeed',
+      text: "Not logged in — login as “Admin” failed",
       severity: "error",
     },
   ])("words and colours $label", ({ run, text, severity }) => {
     expect(describeCrawlRunLogin(run)).toBe(text);
     expect(crawlRunLoginSeverity(run)).toBe(severity);
+    expect(crawlRunLoginFailed(run)).toBe(severity === "error");
+  });
+});
+
+describe("describeCrawlRunHistoryLabel / crawlRunHistorySeverity", () => {
+  const adminCredential = { name: "Admin" };
+
+  it("words and colours a crawl by how it went when its login did not fail", () => {
+    const run = {
+      status: "stoppedAtPageLimit",
+      visitedPageCount: 50,
+      pageLimit: 50,
+      isLoggedIn: true,
+      credential: adminCredential,
+    };
+
+    expect(describeCrawlRunHistoryLabel(run)).toBe("Stopped at the 50-page limit · 50 pages");
+    expect(crawlRunHistorySeverity(run)).toBe("warning");
+  });
+
+  it("words and colours a crawl whose login failed by the failed login", () => {
+    const run = {
+      status: "failed",
+      visitedPageCount: 0,
+      pageLimit: 50,
+      isLoggedIn: false,
+      credential: adminCredential,
+    };
+
+    expect(describeCrawlRunHistoryLabel(run)).toBe("Not logged in — login as “Admin” failed");
+    expect(crawlRunHistorySeverity(run)).toBe("error");
+  });
+
+  it("colours a logged-out finished crawl as a success", () => {
+    const run = { status: "finished", visitedPageCount: 46, pageLimit: 50, isLoggedIn: false, credential: null };
+
+    expect(describeCrawlRunHistoryLabel(run)).toBe("Finished · 46 pages");
+    expect(crawlRunHistorySeverity(run)).toBe("success");
+  });
+});
+
+describe("CRAWL_TIME_LIMIT_MS", () => {
+  it("is the server's 10-minute crawl limit", () => {
+    expect(CRAWL_TIME_LIMIT_MS).toBe(10 * 60 * 1000);
   });
 });
 
@@ -162,7 +189,10 @@ describe("identifyCrawledUrl", () => {
   });
 });
 
-describe("describeCrawledPagePath", () => {
+/** The outcome fields of a page that loaded, for `describeSiteMapNote`. */
+const loadedPageOutcome = { succeeded: true, httpStatus: 200, foundByButtonText: null };
+
+describe("describeRedirectFact / describeSiteMapNote", () => {
   it.each([
     {
       label: "a page that was not redirected",
@@ -172,7 +202,8 @@ describe("describeCrawledPagePath", () => {
         finalUrl: "https://example.com/schools?tab=all",
         wasRedirected: false,
       },
-      expected: "/schools",
+      fact: null,
+      note: "",
     },
     {
       label: "a page recorded where its redirect landed",
@@ -182,7 +213,8 @@ describe("describeCrawledPagePath", () => {
         finalUrl: "https://example.com/calendar",
         wasRedirected: true,
       },
-      expected: "/calendar (from /)",
+      fact: "Redirected from /",
+      note: "from /",
     },
     {
       label: "a page that redirected onto a page already in the crawl",
@@ -192,7 +224,8 @@ describe("describeCrawledPagePath", () => {
         finalUrl: "https://example.com/account",
         wasRedirected: true,
       },
-      expected: "/old-account → /account",
+      fact: "Redirected to /account",
+      note: "→ /account",
     },
     {
       label: "a page that was redirected off the site",
@@ -202,7 +235,8 @@ describe("describeCrawledPagePath", () => {
         finalUrl: "https://accounts.example.org/login?next=%2Fdashboard",
         wasRedirected: true,
       },
-      expected: "https://accounts.example.org/login (from https://example.com/dashboard)",
+      fact: "Redirected from https://example.com/dashboard",
+      note: "from https://example.com/dashboard",
     },
     {
       label: "an already-recorded landing page on another site",
@@ -212,7 +246,8 @@ describe("describeCrawledPagePath", () => {
         finalUrl: "https://accounts.example.org/login",
         wasRedirected: true,
       },
-      expected: "/sso → https://accounts.example.org/login",
+      fact: "Redirected to https://accounts.example.org/login",
+      note: "→ https://accounts.example.org/login",
     },
     {
       label: "a redirected page whose URLs do not parse",
@@ -222,9 +257,36 @@ describe("describeCrawledPagePath", () => {
         finalUrl: "not a url",
         wasRedirected: true,
       },
-      expected: "not a url (from also not a url)",
+      fact: "Redirected from also not a url",
+      note: "from also not a url",
     },
-  ])("labels $label", ({ page, expected }) => {
-    expect(describeCrawledPagePath(page)).toBe(expected);
+  ])("words the redirect of $label", ({ page, fact, note }) => {
+    expect(describeRedirectFact(page)).toBe(fact);
+    expect(describeSiteMapNote({ ...page, ...loadedPageOutcome })).toBe(note);
+  });
+
+  const plainPage = {
+    url: "https://example.com/sessions/open-yoga",
+    requestedUrl: "https://example.com/sessions/open-yoga",
+    finalUrl: "https://example.com/sessions/open-yoga",
+    wasRedirected: false,
+  };
+
+  it("notes the button that led to a page", () => {
+    expect(describeSiteMapNote({ ...plainPage, ...loadedPageOutcome, foundByButtonText: "Open Yoga" })).toBe(
+      "via “Open Yoga”",
+    );
+  });
+
+  it("notes a failed page's HTTP status before anything else", () => {
+    expect(
+      describeSiteMapNote({ ...plainPage, succeeded: false, httpStatus: 404, foundByButtonText: "Open Yoga" }),
+    ).toBe("HTTP 404");
+  });
+
+  it("notes a failed page that never answered", () => {
+    expect(describeSiteMapNote({ ...plainPage, succeeded: false, httpStatus: null, foundByButtonText: null })).toBe(
+      "No response",
+    );
   });
 });

@@ -3,16 +3,13 @@ import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import LinearProgress from "@mui/material/LinearProgress";
-import List from "@mui/material/List";
-import ListItemButton from "@mui/material/ListItemButton";
-import ListItemText from "@mui/material/ListItemText";
-import Paper from "@mui/material/Paper";
-import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import ActionScriptRunDetails from "./ActionScriptRunDetails";
+import ActionScriptRunHistory from "./ActionScriptRunHistory";
+import { PlayArrowIcon } from "./icons";
 import LoadStatusNotice from "./LoadStatusNotice";
 import { type ActionScriptRunRecord } from "../hooks/useActionScriptRuns";
-import { describeActionScriptRunOutcome } from "../utils/describeActionScriptRun";
+import { nocturneTokens } from "../theme/nocturneTheme";
 
 const HEADING_ID = "action-script-runs-section-heading";
 const HISTORY_HEADING_ID = "action-script-run-history-heading";
@@ -29,41 +26,46 @@ export interface ActionScriptRunsSectionProps {
   isLoading: boolean;
   /** Why the run list could not be fetched, or null. */
   errorMessage: string | null;
-  /** The run the user picked; null (or an unknown id) shows the newest run. */
-  selectedRunId: string | null;
+  /** The run shown in full (the page picks it: the newest unless the user picked another), or null when there are no runs. */
+  selectedRun: ActionScriptRunRecord | null;
   /** Called with a run's id when the user picks it from the history. */
   onSelectRun: (actionScriptRunId: string) => void;
-  /** True while a "Run script" request is in flight. */
+  /** True while a "Run" request is in flight. */
   isRunning: boolean;
-  /** Why the last "Run script" request failed, or null. */
+  /** Why the last "Run" request failed, or null. */
   runErrorMessage: string | null;
-  /** Called when the user clicks "Run script". */
+  /** Called when the user clicks "Run" / "Run again". */
   onRunClick: () => void;
-  /** The credential the action logs in as before each run, or null when it runs logged out. */
-  credentialName: string | null;
   /** True when the version was written by Claude (not saved from the step editor), so its failed runs can be refined. */
   versionCanBeRefined: boolean;
   /** True while a "Refine" request is in flight. */
   isRefining: boolean;
   /** Why the last "Refine" request failed, or null. */
   refineErrorMessage: string | null;
-  /** Called with the failed run and the note for Claude (null when blank) when the user clicks "Refine". */
+  /** Called with the failed run and the note for Claude (null when blank) when the user clicks Refine. */
   onRefine: (failedRun: ActionScriptRunRecord, note: string | null) => void;
+  /** The number the next version will get, for "Refine into Version 6". */
+  nextVersionNumber: number;
+  /** True for the phone card (2c): the run's details with "Run again" and "Refine" side by side, and no history (the page lists it below the steps). */
+  isPhoneLayout: boolean;
 }
 
 /**
- * The "Runs" section for the selected plan version: the "Run script"
- * button (it opens a browser window on this computer, logs in first when the
- * action has a credential, and works through the steps), the selected run in
- * full (the newest unless the user picked
- * another), and the run history to pick from.
+ * The run panel of an action's page for the selected version, as the
+ * mockups draw it:
+ * - desktop (the right-hand column): "Latest run" with "Run again" (it opens
+ *   a browser window on this computer, logs in first when the action has a
+ *   credential, and works through the steps; a run is stopped after 5
+ *   minutes), the shown run in full (see `ActionScriptRunDetails`), and
+ *   "Runs of version N" to pick another run from;
+ * - phone (the card above the steps): the shown run with "Run again" and
+ *   "Refine" side by side.
  *
- * A failed run of a version Claude wrote can be refined from its details
- * ("Refine", with an optional note); "Refine" is disabled while a run is in
- * flight. The details are keyed by the run's id, so the note and whether a
- * refine was tried start over for each run.
- * @param props - The runs, the request states, and the callbacks
- * @returns The rendered section
+ * The heading says "Latest run" while the newest run is shown, and "Run"
+ * once the user picks an older one. The details are keyed by the run's id,
+ * so the note and whether a refine was tried start over for each run.
+ * @param props - The runs, the shown run, the request states, the callbacks, and the layout
+ * @returns The rendered panel
  */
 export default function ActionScriptRunsSection(props: ActionScriptRunsSectionProps): ReactElement {
   const {
@@ -72,60 +74,85 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     runs,
     isLoading,
     errorMessage,
-    selectedRunId,
+    selectedRun,
     onSelectRun,
     isRunning,
     runErrorMessage,
     onRunClick,
-    credentialName,
     versionCanBeRefined,
     isRefining,
     refineErrorMessage,
     onRefine,
+    nextVersionNumber,
+    isPhoneLayout,
   } = props;
-  const loginSentence =
-    credentialName === null
-      ? "runs logged out"
-      : `logs in as "${credentialName}"`;
 
-  const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs.at(0) ?? null;
   const runFailedToStart = runErrorMessage !== null;
   const runListLoadedWithoutError = !isLoading && errorMessage === null;
   const thereAreNoRuns = runs.length === 0;
   const thereAreRuns = !thereAreNoRuns;
+  const newestRunIsShown = selectedRun !== null && selectedRun.id === runs.at(0)?.id;
+
+  let runButtonText = "Run again";
+  if (isRunning) {
+    runButtonText = "Running…";
+  } else if (thereAreNoRuns) {
+    runButtonText = "Run";
+  }
+  const runButton = (
+    <Button
+      onClick={onRunClick}
+      disabled={isRunning}
+      variant="outlined"
+      // On the phone card Refine is the primary action beside it, as in the mockup.
+      color={isPhoneLayout ? "secondary" : "primary"}
+      startIcon={isPhoneLayout ? undefined : <PlayArrowIcon />}
+      sx={{ minHeight: isPhoneLayout ? 44 : 36, flex: "none" }}
+    >
+      {runButtonText}
+    </Button>
+  );
+
+  const runStatusNotices = (
+    <>
+      {isRunning && <LinearProgress aria-label="Running script" />}
+      {runFailedToStart && <Alert severity="error">Could not run the script: {runErrorMessage}</Alert>}
+      <LoadStatusNotice isLoading={isLoading} errorMessage={errorMessage} loadingLabel="Loading runs" />
+      {runListLoadedWithoutError && thereAreNoRuns && (
+        <Typography color="text.secondary" sx={{ fontSize: 13.5 }}>
+          This version has not been run yet.
+        </Typography>
+      )}
+    </>
+  );
 
   return (
-    <Box component="section" aria-labelledby={HEADING_ID} sx={{ mt: 5 }}>
-      <Stack
-        direction={{ xs: "column", sm: "row" }}
-        spacing={2}
-        sx={{ justifyContent: "space-between", alignItems: { sm: "center" }, mb: 1 }}
-      >
-        <Typography id={HEADING_ID} variant="h5" component="h2">
-          Runs of version {versionNumber}
-        </Typography>
-        <Button onClick={onRunClick} disabled={isRunning} variant="contained">
-          {isRunning ? "Running…" : "Run script"}
-        </Button>
-      </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Running opens a browser window on this computer, {loginSentence}, and works through the
-        plan's steps. A run is stopped after 5 minutes.
-      </Typography>
-
-      {isRunning && <LinearProgress aria-label="Running script" sx={{ mb: 2 }} />}
-
-      {runFailedToStart && (
-        <Alert severity="error" sx={{ mb: 2 }}>
-          Could not run the script: {runErrorMessage}
-        </Alert>
+    <Box
+      component="section"
+      aria-labelledby={isPhoneLayout ? undefined : HEADING_ID}
+      aria-label={isPhoneLayout ? "Latest run" : undefined}
+      sx={{
+        backgroundColor: nocturneTokens.surface,
+        borderRadius: `${String(nocturneTokens.radius.large)}px`,
+        padding: isPhoneLayout ? "14px" : "18px",
+        display: "flex",
+        flexDirection: "column",
+        gap: isPhoneLayout ? "12px" : 2,
+        minWidth: 0,
+      }}
+    >
+      {!isPhoneLayout && (
+        <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <Typography id={HEADING_ID} variant="h5" component="h2" sx={{ m: 0, mr: "auto" }}>
+            {newestRunIsShown || selectedRun === null ? "Latest run" : "Run"}
+          </Typography>
+          {runButton}
+        </Box>
       )}
 
-      <LoadStatusNotice isLoading={isLoading} errorMessage={errorMessage} loadingLabel="Loading runs" />
+      {runStatusNotices}
 
-      {runListLoadedWithoutError && thereAreNoRuns && (
-        <Typography color="text.secondary">This version has not been run yet.</Typography>
-      )}
+      {isPhoneLayout && thereAreNoRuns && runButton}
 
       {selectedRun !== null && (
         <ActionScriptRunDetails
@@ -138,46 +165,36 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
           isRunning={isRunning}
           refineErrorMessage={refineErrorMessage}
           onRefine={onRefine}
+          refinedVersionNumber={nextVersionNumber}
+          isCompact={isPhoneLayout}
+          runAgainButton={runButton}
         />
       )}
 
-      {thereAreRuns && (
-        <>
-          <Typography
+      {thereAreRuns && !isPhoneLayout && (
+        <Box>
+          <Box
             id={HISTORY_HEADING_ID}
-            variant="subtitle1"
             component="h3"
-            sx={{ mt: 3, mb: 1 }}
+            sx={{
+              m: 0,
+              mb: "4px",
+              fontSize: 11,
+              fontWeight: 400,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              color: nocturneTokens.neutral[500],
+            }}
           >
-            Run history
-          </Typography>
-          <Paper variant="outlined" sx={{ maxHeight: 320, overflow: "auto" }}>
-            <List disablePadding aria-labelledby={HISTORY_HEADING_ID}>
-              {runs.map((run) => {
-                const runIsSelected = run.id === selectedRun?.id;
-                return (
-                  <ListItemButton
-                    key={run.id}
-                    selected={runIsSelected}
-                    aria-current={runIsSelected ? "true" : undefined}
-                    onClick={() => {
-                      onSelectRun(run.id);
-                    }}
-                    divider
-                  >
-                    <ListItemText
-                      primary={describeActionScriptRunOutcome(run)}
-                      secondary={new Date(run.createdAt).toLocaleString()}
-                      slotProps={{
-                        primary: { sx: { color: run.succeeded ? "success.main" : "error.main" } },
-                      }}
-                    />
-                  </ListItemButton>
-                );
-              })}
-            </List>
-          </Paper>
-        </>
+            Runs of version {versionNumber}
+          </Box>
+          <ActionScriptRunHistory
+            runs={runs}
+            selectedRunId={selectedRun?.id ?? null}
+            onSelectRun={onSelectRun}
+            label={`Runs of version ${String(versionNumber)}`}
+          />
+        </Box>
       )}
     </Box>
   );

@@ -27,8 +27,15 @@ import {
   type ScriptModelOption,
 } from "../../../src/hooks/useScriptModels";
 import { type ScreenshotRunRecord } from "../../../src/hooks/useScreenshotRuns";
-import { type WebsiteItemRecord } from "../../../src/hooks/useWebsiteItems";
-import { type WebsiteRecord } from "../../../src/hooks/useWebsites";
+import {
+  type NewestActionScriptRecord,
+  type WebsiteItemRecord,
+} from "../../../src/hooks/useWebsiteItems";
+import {
+  type WebsiteRecord,
+  type WebsiteSummaryRecord,
+  type WebsiteWithSummaryRecord,
+} from "../../../src/hooks/useWebsites";
 import {
   ACTION_KIND,
   USE_CASE_KIND,
@@ -153,6 +160,43 @@ export function countRequests(fetchStub: FetchStub, method: string, url: string)
   return matchingCalls.length;
 }
 
+/**
+ * Makes `window.matchMedia` (which jsdom lacks) answer as a window `widthPx`
+ * wide would, so `useIsNarrowerThan` - MUI's `useMediaQuery` - picks the
+ * phone or the desktop layout. Only `min-width` / `max-width` queries are
+ * read, which is all the theme's breakpoints produce. Without this stand-in
+ * the hook reports false: the desktop layout.
+ * @param widthPx - The window width to answer for, e.g. 390 for a phone
+ * @returns A function that removes the stand-in again
+ */
+export function stubWindowWidth(widthPx: number): () => void {
+  /**
+   * Answers one media query for the stubbed width.
+   * @param query - The media query, e.g. "(max-width:899.95px)"
+   * @returns A media query list that never changes
+   */
+  const matchMediaStub = (query: string): MediaQueryList => {
+    const maxWidthMatch = /max-width:\s*([\d.]+)px/.exec(query);
+    const minWidthMatch = /min-width:\s*([\d.]+)px/.exec(query);
+    const fitsMaxWidth = maxWidthMatch === null || widthPx <= Number(maxWidthMatch[1]);
+    const fitsMinWidth = minWidthMatch === null || widthPx >= Number(minWidthMatch[1]);
+    return {
+      matches: fitsMaxWidth && fitsMinWidth,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(() => false),
+    };
+  };
+  Object.defineProperty(window, "matchMedia", { configurable: true, writable: true, value: matchMediaStub });
+  return () => {
+    Reflect.deleteProperty(window, "matchMedia");
+  };
+}
+
 /** A promise plus the functions that settle it, for holding a request in flight. */
 export interface Deferred<TValue> {
   /** The pending promise. */
@@ -211,6 +255,61 @@ export function buildWebsiteRecord(overrides: Partial<WebsiteRecord> = {}): Webs
     createdAt: "2026-01-02T03:04:05.000Z",
     updatedAt: "2026-01-03T03:04:05.000Z",
     deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a website's dashboard summary as the website LIST returns it: by
+ * default no actions, no runs, and never crawled.
+ * @param overrides - Fields to replace in the default summary
+ * @returns A complete website summary record
+ */
+export function buildWebsiteSummaryRecord(
+  overrides: Partial<WebsiteSummaryRecord> = {},
+): WebsiteSummaryRecord {
+  return {
+    actionCount: 0,
+    passedActionCount: 0,
+    failedActionCount: 0,
+    notRunActionCount: 0,
+    latestRunAt: null,
+    latestCrawlRun: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a website as the website LIST returns it: `buildWebsiteRecord` plus
+ * its dashboard summary.
+ * @param overrides - Fields to replace in the default website
+ * @param summaryOverrides - Fields to replace in the default summary
+ * @returns A complete website-with-summary record
+ */
+export function buildWebsiteWithSummaryRecord(
+  overrides: Partial<WebsiteRecord> = {},
+  summaryOverrides: Partial<WebsiteSummaryRecord> = {},
+): WebsiteWithSummaryRecord {
+  return { ...buildWebsiteRecord(overrides), summary: buildWebsiteSummaryRecord(summaryOverrides) };
+}
+
+/**
+ * Builds an action's newest version as the action LIST returns it: by
+ * default version 1, generated from the default action's text (so it is not
+ * out of date), and not run yet.
+ * @param overrides - Fields to replace in the default newest version
+ * @returns A complete newest-version record
+ */
+export function buildNewestActionScriptRecord(
+  overrides: Partial<NewestActionScriptRecord> = {},
+): NewestActionScriptRecord {
+  return {
+    id: "script-1",
+    versionNumber: 1,
+    actionTitle: "Log in",
+    actionDescription: "Sign in with a valid account",
+    credentialId: null,
+    latestRun: null,
     ...overrides,
   };
 }

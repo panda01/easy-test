@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import WebsiteForm, { type WebsiteFormProps } from "../../src/components/WebsiteForm";
 import { type WebsiteRequestBody } from "../../src/hooks/useWebsites";
@@ -262,5 +262,19 @@ describe("WebsiteForm", () => {
 
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("puts a plus on the submit button when told to, as the create page does", () => {
+    renderWebsiteForm({ submitButtonShowsPlus: true });
+
+    const submitButton = screen.getByRole("button", { name: "Create website" });
+    expect(within(submitButton).getByTestId("AddIcon")).toBeInTheDocument();
+  });
+
+  it("leaves the plus off the submit button by default, as the edit page's Save changes has it", () => {
+    renderWebsiteForm({ submitLabel: "Save changes" });
+
+    const submitButton = screen.getByRole("button", { name: "Save changes" });
+    expect(within(submitButton).queryByTestId("AddIcon")).not.toBeInTheDocument();
   });
 });

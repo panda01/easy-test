@@ -22,6 +22,40 @@ export interface WebsiteRecord {
   deletedAt: string | null;
 }
 
+/** The parts of a website's newest crawl run the dashboard shows. */
+export interface WebsiteLatestCrawlRunRecord {
+  id: string;
+  /** Where the crawl is: still running, or how it ended (see `CrawlRunStatus`). */
+  status: string;
+  /** Pages recorded so far. */
+  visitedPageCount: number;
+  /** The most pages the crawl may visit. */
+  pageLimit: number;
+  createdAt: string;
+  /** When the crawl ended; null while running. */
+  finishedAt: string | null;
+}
+
+/**
+ * What the website list says about each website for the dashboard: how many
+ * of its actions pass, fail, or have not been run (by each action's newest
+ * version's latest run), when any of its scripts last ran, and its newest
+ * crawl.
+ */
+export interface WebsiteSummaryRecord {
+  actionCount: number;
+  passedActionCount: number;
+  failedActionCount: number;
+  notRunActionCount: number;
+  /** When any of the website's scripts last ran, or null when none has. */
+  latestRunAt: string | null;
+  /** The newest crawl, or null when the website has never been crawled. */
+  latestCrawlRun: WebsiteLatestCrawlRunRecord | null;
+}
+
+/** A website as the website LIST returns it: the website plus its dashboard summary. */
+export type WebsiteWithSummaryRecord = WebsiteRecord & { summary: WebsiteSummaryRecord };
+
 /** The body the client sends to create or replace a website. */
 export interface WebsiteRequestBody {
   url: string;
@@ -36,14 +70,15 @@ export interface WebsiteRequestBody {
 }
 
 /**
- * Fetches every active website (`GET /api/websites`), newest first.
+ * Fetches every active website with its dashboard summary
+ * (`GET /api/websites`), newest first.
  * @returns The loading / error / data state of the website list
  */
-export function useWebsites(): JsonResourceState<WebsiteRecord[]> {
+export function useWebsites(): JsonResourceState<WebsiteWithSummaryRecord[]> {
   const websitesResource = useJsonResource(WEBSITES_API_URL);
   // The API is the contract for this shape; see useJsonResource for why the
   // generic hook returns unknown.
-  return websitesResource as JsonResourceState<WebsiteRecord[]>;
+  return websitesResource as JsonResourceState<WebsiteWithSummaryRecord[]>;
 }
 
 /**

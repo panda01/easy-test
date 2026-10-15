@@ -53,7 +53,13 @@ describe("useActionScripts", () => {
   });
 
   it("makes a run recorded on this visit its version's latestRun, without refetching, leaving other versions alone", async () => {
-    const serverLatestRun = { id: "run-1", succeeded: true, createdAt: "2026-04-03T00:00:00.000Z" };
+    const serverLatestRun = {
+      id: "run-1",
+      succeeded: true,
+      failedStepNumber: null,
+      timedOut: false,
+      createdAt: "2026-04-03T00:00:00.000Z",
+    };
     const fetchStub = stubFetchRoutes({
       [`GET ${SCRIPTS_API_URL}`]: {
         status: 200,
@@ -74,13 +80,20 @@ describe("useActionScripts", () => {
           id: "run-2",
           actionScriptId: "script-2",
           succeeded: false,
+          failedStepNumber: 3,
           createdAt: "2026-04-04T00:00:00.000Z",
         }),
       );
     });
 
     expect(result.current.scripts.map((script) => script.latestRun)).toEqual([
-      { id: "run-2", succeeded: false, createdAt: "2026-04-04T00:00:00.000Z" },
+      {
+        id: "run-2",
+        succeeded: false,
+        failedStepNumber: 3,
+        timedOut: false,
+        createdAt: "2026-04-04T00:00:00.000Z",
+      },
       serverLatestRun,
     ]);
 
@@ -89,7 +102,9 @@ describe("useActionScripts", () => {
         buildActionScriptRunRecord({
           id: "run-3",
           actionScriptId: "script-2",
-          succeeded: true,
+          succeeded: false,
+          timedOut: true,
+          failedStepNumber: 4,
           createdAt: "2026-04-05T00:00:00.000Z",
         }),
       );
@@ -97,7 +112,9 @@ describe("useActionScripts", () => {
 
     expect(result.current.scripts[0].latestRun).toEqual({
       id: "run-3",
-      succeeded: true,
+      succeeded: false,
+      failedStepNumber: 4,
+      timedOut: true,
       createdAt: "2026-04-05T00:00:00.000Z",
     });
     expect(countRequests(fetchStub, "GET", SCRIPTS_API_URL)).toBe(1);

@@ -9,33 +9,11 @@ import {
   buildCredentialRecord,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
+  buildWebsiteWithSummaryRecord,
   countRequests,
   stubFetchRoutes,
   type FetchStub,
 } from "./support/frontendTestHelpers";
-
-describe("App", () => {
-  beforeEach(() => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ status: "ok", uptime: 42.7 }),
-    } as unknown as Response);
-    window.history.pushState({}, "", "/");
-  });
-
-  it("routes / to the homepage", async () => {
-    render(<App />);
-    expect(screen.getByRole("heading", { name: "Hello World" })).toBeInTheDocument();
-    expect(await screen.findByText("ok")).toBeInTheDocument();
-  });
-
-  it("requests the health endpoint through the relative /api path", async () => {
-    render(<App />);
-    await screen.findByText("ok");
-    expect(globalThis.fetch).toHaveBeenCalledWith("/api/health");
-  });
-});
 
 /**
  * Stubs every GET the app's pages make for one website ("Example") that has
@@ -46,8 +24,7 @@ describe("App", () => {
  */
 function stubEveryPageRequest(): FetchStub {
   return stubFetchRoutes({
-    "GET /api/health": { status: 200, body: { status: "ok", uptime: 1 } },
-    "GET /api/websites": { status: 200, body: [buildWebsiteRecord()] },
+    "GET /api/websites": { status: 200, body: [buildWebsiteWithSummaryRecord()] },
     "GET /api/websites/website-1": { status: 200, body: buildWebsiteRecord() },
     "GET /api/websites/website-1/use-cases": {
       status: 200,
@@ -89,8 +66,30 @@ describe("App routes", () => {
     window.history.pushState({}, "", "/");
   });
 
+  it("routes / to the websites dashboard, through the relative /api path", async () => {
+    const fetchStub = stubEveryPageRequest();
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Websites" })).toBeInTheDocument();
+    expect(await screen.findByRole("list", { name: "Websites" })).toHaveTextContent("Example");
+    expect(countRequests(fetchStub, "GET", "/api/websites")).toBe(1);
+  });
+
+  it("redirects the old /websites list URL to the dashboard, replacing it in history", async () => {
+    stubEveryPageRequest();
+    window.history.pushState({}, "", "/websites");
+    const historyLengthBeforeRender = window.history.length;
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Websites" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/");
+    expect(window.history.length).toBe(historyLengthBeforeRender);
+  });
+
   it.each([
-    { path: "/websites", heading: "Websites" },
+    { path: "/", heading: "Websites" },
     { path: "/websites/new", heading: "New website" },
     { path: "/websites/website-1", heading: "Example" },
     { path: "/websites/website-1/edit", heading: "Edit website" },
@@ -100,7 +99,7 @@ describe("App routes", () => {
     { path: "/websites/website-1/actions/new", heading: "New action" },
     { path: "/websites/website-1/actions/action-1", heading: "Submit credentials" },
     { path: "/websites/website-1/actions/action-1/edit", heading: "Edit action" },
-    { path: "/websites/website-1/crawl-runs/crawl-run-1", heading: "Site crawl" },
+    { path: "/websites/website-1/crawl-runs/crawl-run-1", heading: "Crawl" },
     { path: "/websites/website-1/credentials/new", heading: "New credential" },
     { path: "/websites/website-1/credentials/credential-1/edit", heading: "Edit credential" },
   ])("routes $path to the page headed '$heading'", async ({ path, heading }) => {
@@ -111,10 +110,8 @@ describe("App routes", () => {
 
     expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
     const appHeader = screen.getByRole("banner");
-    expect(within(appHeader).getByRole("link", { name: "Websites" })).toHaveAttribute(
-      "href",
-      "/websites",
-    );
+    expect(within(appHeader).getByRole("link", { name: "Easy Test" })).toHaveAttribute("href", "/");
+    expect(within(appHeader).getByRole("link", { name: "Websites" })).toHaveAttribute("href", "/");
   });
 
   it("matches /websites/new to the create form, not to a website with the id 'new'", async () => {
@@ -127,30 +124,32 @@ describe("App routes", () => {
     expect(countRequests(fetchStub, "GET", "/api/websites/new")).toBe(0);
   });
 
-  it("navigates from the homepage to the website list through the header's Websites link", async () => {
+  it("navigates from a website's page to the dashboard through the header's Websites link", async () => {
     const user = userEvent.setup();
     stubEveryPageRequest();
+    window.history.pushState({}, "", "/websites/website-1");
     render(<App />);
-    await screen.findByText("ok");
+    await screen.findByRole("heading", { level: 1, name: "Example" });
 
     await user.click(within(screen.getByRole("banner")).getByRole("link", { name: "Websites" }));
 
     expect(
       await screen.findByRole("heading", { level: 1, name: "Websites" }),
     ).toBeInTheDocument();
-    expect(window.location.pathname).toBe("/websites");
+    expect(window.location.pathname).toBe("/");
   });
 
-  it("navigates home through the header's app name", async () => {
+  it("navigates home through the header's Easy Test name", async () => {
     const user = userEvent.setup();
     stubEveryPageRequest();
-    window.history.pushState({}, "", "/websites");
+    window.history.pushState({}, "", "/websites/new");
     render(<App />);
-    await screen.findByRole("heading", { level: 1, name: "Websites" });
+    await screen.findByRole("heading", { level: 1, name: "New website" });
 
-    await user.click(within(screen.getByRole("banner")).getByRole("link", { name: "easy-test" }));
+    await user.click(within(screen.getByRole("banner")).getByRole("link", { name: "Easy Test" }));
 
-    expect(await screen.findByRole("heading", { name: "Hello World" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Websites" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/");
   });
 
   it("mounts a fresh item page when Back moves from an action to a use case (keyed routes)", async () => {

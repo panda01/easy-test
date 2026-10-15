@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   describeScriptRunStatus,
+  describeScriptRunStatusBriefly,
   findScriptRunStatus,
 } from "../../src/utils/describeScriptRunStatus";
 
@@ -23,5 +24,13 @@ describe("describeScriptRunStatus", () => {
     expect(describeScriptRunStatus("passed")).toBe("Latest run passed");
     expect(describeScriptRunStatus("failed")).toBe("Latest run failed");
     expect(describeScriptRunStatus("notRun")).toBe("Not run yet");
+  });
+});
+
+describe("describeScriptRunStatusBriefly", () => {
+  it("names each status in a word or two, for the phone's version dropdown", () => {
+    expect(describeScriptRunStatusBriefly("passed")).toBe("Passed");
+    expect(describeScriptRunStatusBriefly("failed")).toBe("Failed");
+    expect(describeScriptRunStatusBriefly("notRun")).toBe("Not run");
   });
 });

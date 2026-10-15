@@ -5,22 +5,23 @@ than inline in a component.
 
 | Hook | Returns |
 |---|---|
-| `useHealth` | `{ health, isLoading, errorMessage }` from `GET /api/health` |
 | `useJsonResource` | `{ data, isLoading, errorMessage }` for any `GET` url; `data` is `unknown`. A `null` url stays idle (no request, not loading) |
-| `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website; `WebsiteRecord.loginUrl` is null when the website doesn't require login |
-| `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them; the action LIST also carries each action's `newestScript` (a `NewestActionScriptRecord`: the newest version's id and its `latestRun`, or null when it has no versions) |
+| `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website; `WebsiteRecord.loginUrl` is null when the website doesn't require login. The LIST answers `WebsiteWithSummaryRecord`s: each website plus its dashboard `summary` (`WebsiteSummaryRecord`: passed / failed / not run action counts, `latestRunAt`, and `latestCrawlRun`) |
+| `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them; the action LIST also carries each action's `newestScript` (a `NewestActionScriptRecord`: the newest version's id, its `versionNumber`, the `actionTitle` / `actionDescription` / `credentialId` it was generated from, and its `latestRun`; or null when it has no versions) |
 | `useScreenshotRuns` | `{ runs, isLoading, errorMessage, addTakenRun }` for a website's screenshot runs; see below |
 | `useRecordListWithAdditions` | `{ records, isLoading, errorMessage, addRecord }`: the generic "fetched list plus rows a POST just created" behind the two hooks below |
-| `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript, recordFinishedRun }` for an action's saved plan versions (each with its `plan`, see `../utils/actionPlanSteps.ts`; its `refinement`: an `ActionScriptRefinementRecord` - the note, token usage, `screenshotWasSent`, and the failed run's `RefinedActionScriptRunSummary` - or null when it was not refined; and its `latestRun`: a `LatestActionScriptRunRecord` - `{ id, succeeded, createdAt }` of its newest run - or null when it has not been run). `recordFinishedRun(run)` makes a run a "Run script" POST just recorded its version's `latestRun` for the rest of the visit, so the version's status icon updates without refetching |
+| `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript, recordFinishedRun }` for an action's saved plan versions (each with its `plan`, see `../utils/actionPlanSteps.ts`; its `refinement`: an `ActionScriptRefinementRecord` - the note, token usage, `screenshotWasSent`, and the failed run's `RefinedActionScriptRunSummary` - or null when it was not refined; and its `latestRun`: a `LatestActionScriptRunRecord` - `{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run - or null when it has not been run). `recordFinishedRun(run)` makes a run a "Run script" POST just recorded its version's `latestRun` for the rest of the visit, so the version's status icon updates without refetching |
 | `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun }` for one version's runs (each with `failingPageUrl` and `failingPageAriaSnapshot`, null when it passed or none was captured); a `null` script id fetches nothing |
 | `useScriptModels` | Typed `useJsonResource` wrapper for `GET /api/script-models`: the live model list, each model's effort levels and fallback, and the default choice |
-| `useCrawlRuns` | Typed `useJsonResource` wrapper for a website's crawl runs (newest first, no pages); exports `CrawlRunRecord` (with `credentialId`, `isLoggedIn`, `credential: { id, name }`, and `buttonMode`) and `CrawlButtonModeRecord` |
+| `useCrawlRuns` | A website's crawl runs (newest first, no pages), polled every 2 s (`usePolledJsonResource`) while one of them is `running`, so the website page's progress card counts pages live; exports `CrawlRunRecord` (with `credentialId`, `isLoggedIn`, `credential: { id, name }`, and `buttonMode`) and `CrawlButtonModeRecord` |
 | `useCredentials` / `useCredential` | Typed wrappers for a website's credentials / one of them; export `CredentialRecord` (no password - only `hasPassword: true`) and `CredentialRequestBody` |
 | `usePolledJsonResource` | `useJsonResource` plus `pollErrorMessage`, GETting the url again every interval while a `keepPolling(data)` check says so; see below |
 | `useCrawlRunProgress` | One crawl run with its page summaries, polled every 2 s while it is `running` (`CRAWL_RUN_POLL_INTERVAL_MS`); exports `CrawlRunWithPagesRecord`, `CrawledPageSummaryRecord` |
 | `useCrawledPage` | One crawled page in full (aria snapshot and links); a `null` page id fetches nothing |
 | `useWebsiteItemDeletion` | The delete dialog's state and handlers shared by the use case and action pages: DELETE, then a history-aware return to the website |
 | `useJsonMutation` | `{ sendJsonRequest, isSubmitting, errorMessage }` for `POST`/`PUT`/`DELETE` |
+| `useNow` | The current time, re-rendering every second while `isTicking` (a running crawl's stopwatch); still otherwise |
+| `useIsNarrowerThan` | Whether the window is narrower than a theme breakpoint (`"md"` for the phone layouts, `"lg"` for the action page's single column); read synchronously, false where `matchMedia` is missing (the unit tests: desktop) |
 | `useRequiredRouteParam` | A `:param` the matched route is guaranteed to have, as `string` |
 | `useReturnNavigation` / `useReturnToHereState` | History-aware exits from forms and deleted pages; see `../pages/README.md` |
 

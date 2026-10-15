@@ -14,7 +14,6 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import AddIcon from "@mui/icons-material/Add";
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
@@ -25,6 +24,7 @@ import ListItemText from "@mui/material/ListItemText";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import ActionPlanStepFields from "./ActionPlanStepFields";
+import { AddIcon } from "./icons";
 import {
   MAX_PLAN_STEPS,
   type ActionPlan,

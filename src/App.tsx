@@ -1,5 +1,5 @@
 import { type ReactElement } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
 import AppHeader from "./components/AppHeader";
 import ActionDetailPage from "./pages/ActionDetailPage";
 import ActionScriptComparePage from "./pages/ActionScriptComparePage";
@@ -13,12 +13,12 @@ import WebsiteDetailPage from "./pages/WebsiteDetailPage";
 import WebsiteEditPage from "./pages/WebsiteEditPage";
 import WebsiteItemCreatePage from "./pages/WebsiteItemCreatePage";
 import WebsiteItemEditPage from "./pages/WebsiteItemEditPage";
-import WebsiteListPage from "./pages/WebsiteListPage";
 import { ACTION_KIND, USE_CASE_KIND } from "./utils/websiteItemKinds";
 
 /**
  * Application shell: the router, the header shown on every page, and the
- * route table.
+ * route table. The home page is the websites dashboard, so `/websites`
+ * redirects to it.
  *
  * Every screen - including each create and edit form - is its own URL, so the
  * browser's Back and Forward buttons move between screens, and each page
@@ -42,7 +42,8 @@ export default function App(): ReactElement {
       <Routes>
         <Route path="/" element={<HomePage />} />
 
-        <Route path="/websites" element={<WebsiteListPage />} />
+        {/* The dashboard at "/" is the website list; the old list URL lands there. */}
+        <Route path="/websites" element={<Navigate to="/" replace />} />
         <Route path="/websites/new" element={<WebsiteCreatePage />} />
         <Route path="/websites/:websiteId" element={<WebsiteDetailPage />} />
         <Route path="/websites/:websiteId/edit" element={<WebsiteEditPage />} />

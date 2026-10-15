@@ -1,10 +1,6 @@
 import { type ChangeEvent, type ReactElement } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
-import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
-import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
-import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
@@ -12,6 +8,12 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import {
+  ArrowDownwardIcon,
+  ArrowUpwardIcon,
+  DeleteOutlineIcon,
+  DragIndicatorIcon,
+} from "./icons";
 import {
   ARIA_ROLES,
   CREDENTIAL_PLACEHOLDERS,

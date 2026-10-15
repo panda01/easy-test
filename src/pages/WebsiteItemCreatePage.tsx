@@ -30,6 +30,8 @@ const EMPTY_ITEM_VALUES: WebsiteItemRequestBody = { title: "", description: "" }
  * unknown website shows "Website not found" instead of a form that cannot be
  * saved. On save it REPLACES its own history entry with the new item's page;
  * Cancel returns to the website history-aware (see `useReturnNavigation`).
+ * Its "Create use case" / "Create action" button carries a plus, like every
+ * button that creates something.
  * @param props - Which kind of item to create
  * @returns The rendered create page
  */
@@ -108,6 +110,7 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
           key={`${itemKind.kindId}-${website.id}`}
           initialValues={EMPTY_ITEM_VALUES}
           submitLabel={`Create ${itemKind.singularLabel}`}
+          submitButtonShowsPlus
           isSubmitting={isSubmitting}
           errorMessage={errorMessage}
           onSubmit={handleSubmit}

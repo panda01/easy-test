@@ -38,7 +38,8 @@ const ENCODED_UNSAFE_ID = "a%2Fb%20c%3Fd%23e";
 
 describe("routePaths: page paths", () => {
   it("exposes the website list and create-form paths", () => {
-    expect(WEBSITE_LIST_PATH).toBe("/websites");
+    // The website list is the dashboard on the home page; `/websites` redirects there.
+    expect(WEBSITE_LIST_PATH).toBe("/");
     expect(NEW_WEBSITE_PATH).toBe("/websites/new");
   });
 

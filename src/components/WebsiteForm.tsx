@@ -5,6 +5,7 @@ import Button from "@mui/material/Button";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
+import { AddIcon } from "./icons";
 import { type WebsiteRequestBody } from "../hooks/useWebsites";
 
 /** Props for `WebsiteForm`. */
@@ -16,6 +17,12 @@ export interface WebsiteFormProps {
   initialValues: WebsiteRequestBody;
   /** The submit button's text, e.g. "Create website". */
   submitLabel: string;
+  /**
+   * True to put a plus before the submit button's text, as every button that
+   * creates something has (the create pages); false or omitted for an edit
+   * page's "Save changes".
+   */
+  submitButtonShowsPlus?: boolean;
   /** True while the save request is in flight; disables submit. */
   isSubmitting: boolean;
   /** Why the last save failed (shown above the buttons), or null. */
@@ -43,11 +50,22 @@ export interface WebsiteFormProps {
  * while editing and sent as numbers. The server still validates everything
  * (URL formats, the 0-30000 range, whole numbers, and the cap not being lower
  * than the minimum) and its message is shown via `errorMessage`.
- * @param props - Initial values, labels, request state, and callbacks
+ *
+ * On the create page the submit button carries a plus
+ * (`submitButtonShowsPlus`), like every button that creates something.
+ * @param props - Initial values, labels (and whether submit shows a plus), request state, and callbacks
  * @returns The website form
  */
 export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
-  const { initialValues, submitLabel, isSubmitting, errorMessage, onSubmit, onCancel } = props;
+  const {
+    initialValues,
+    submitLabel,
+    submitButtonShowsPlus = false,
+    isSubmitting,
+    errorMessage,
+    onSubmit,
+    onCancel,
+  } = props;
   const [url, setUrl] = useState(initialValues.url);
   const [name, setName] = useState(initialValues.name);
   const [description, setDescription] = useState(initialValues.description);
@@ -195,7 +213,12 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
         />
         {saveFailed && <Alert severity="error">{errorMessage}</Alert>}
         <Stack direction="row" spacing={1}>
-          <Button type="submit" variant="contained" disabled={submitIsBlocked}>
+          <Button
+            type="submit"
+            variant="contained"
+            disabled={submitIsBlocked}
+            startIcon={submitButtonShowsPlus ? <AddIcon /> : undefined}
+          >
             {submitLabel}
           </Button>
           <Button onClick={onCancel}>Cancel</Button>

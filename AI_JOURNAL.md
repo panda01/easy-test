@@ -4,6 +4,186 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-15 11:22 EDT — Centered fixed-width pages, crawl History filtered by "Crawl as", a plus on every create button
+
+**Intent:**
+- Center the home page, and any page whose content has a fixed width, as the user asked.
+- On the website page, filter the Crawls tab's History by the "Crawl as" dropdown.
+- Put a plus ("+") on every button that creates something new.
+
+### Decisions
+- **Made by the user** (answered in Plannotator, plans v1–v5, then approved):
+  - The header stays full width; only page content is centered.
+  - The running crawl's progress card always shows, whoever it runs as, so the disabled "Crawl website" button stays explained.
+  - Crawls made as a since-deleted credential stay hidden while the picker is shown, since they match no option.
+  - When nothing matches the pick, History says "No logged-out crawls yet." or "No crawls as “<name>” yet."
+  - The create forms' submit buttons ("Create website", "Create credential", "Create use case", "Create action") also get the plus. The run-starting buttons ("Crawl website", "Take screenshot") do not.
+- **Made by me** (from the plan):
+  - Center `PageContainer` with `mx: "auto"`. Only a capped frame (the dashboard's 1080 px) moves; the full-width pages look the same. The nine `<Container>` pages were already centered.
+  - The filter is client side only; there is no server or schema change.
+  - With the picker hidden there is nothing to filter by, so History lists every ended run.
+  - The edit forms keep their plus-less "Save changes" through a new opt-in prop, `submitButtonShowsPlus`.
+  - "New action" now shows its plus on a phone too ("anywhere").
+
+### Files changed
+| File | What changed |
+|---|---|
+| `src/components/PageContainer.tsx` | **Changed:** `PageContainer` adds `mx: "auto"` to its `sx`, so a frame capped by `maxWidth` is centered. JSDoc rewritten (no longer "left-aligned"). |
+| `src/components/CrawlRunsSection.tsx` | **New:** private `describeNoCrawlsForPick(pickedCredentialIdOrNullForLoggedOut, credentials)`, which returns "No logged-out crawls yet.", "No crawls as “X” yet." or "No crawls as the picked credential yet.". **New derived values in `CrawlRunsSection`:** `pickedCredentialIdOrNullForLoggedOut`, `historyIsFilteredByCrawlAs`, `endedRunsShownInHistory`, `thereAreEndedRunsShownInHistory`, `theFilterHidesEveryEndedRun`, `noMatchingCrawlsText`. **Changed:** History renders `endedRunsShownInHistory`, with the empty-filter line in its place when the filter hides every ended run. JSDoc on the component and on the `crawlAsPickerIsShown` / `selectedCredentialId` props updated. |
+| `src/components/WebsiteItemListSection.tsx` | **Changed:** the `newItemButton` `startIcon` is always `<AddIcon />` (it used to be actions-only and desktop-only). JSDoc updated. |
+| `src/components/CredentialsSection.tsx` | **Changed:** imports `AddIcon`; the "New credential" button gets `startIcon={<AddIcon />}`. JSDoc updated. |
+| `src/components/WebsiteForm.tsx`, `src/components/CredentialForm.tsx`, `src/components/TitleDescriptionForm.tsx` | **New prop:** `submitButtonShowsPlus?: boolean` (default `false`) on `WebsiteFormProps`, `CredentialFormProps` and `TitleDescriptionFormProps`. **Changed:** each imports `AddIcon`; the submit `Button` gets `startIcon={submitButtonShowsPlus ? <AddIcon /> : undefined}`. JSDoc updated. |
+| `src/pages/WebsiteCreatePage.tsx`, `src/pages/CredentialCreatePage.tsx`, `src/pages/WebsiteItemCreatePage.tsx` | **Changed:** each passes `submitButtonShowsPlus` to its form. JSDoc notes the plus. |
+| `src/components/README.md` | The `PageContainer` row says a capped frame is centered. |
+| `tests/frontend/sharedRedesignComponents.test.tsx` | **New spec:** `PageContainer` centers a capped frame (`marginLeft` / `marginRight` `auto`). |
+| `tests/frontend/CrawlRunsSection.test.tsx` | **New `describe("History filtered by Crawl as")`** (9 specs): Logged out lists only logged-out runs; a credential lists only its runs; a hidden picker lists every run; a deleted credential's run stays hidden; the two empty-filter lines and the fallback line; nothing about the pick while the only crawl is still running; the running card still shows for another person's crawl. **Changed:** "words a history row…" now renders with `crawlAsPickerIsShown: false`, so it can mix credentials. |
+| `tests/frontend/WebsiteDetailPage.test.tsx` | **New spec:** picking a credential in Crawl as narrows the History, and an unmatched pick shows "No crawls as “Editor” yet.". **Changed:** the credentials spec also checks the plus on "New credential". |
+| `tests/frontend/WebsiteItemListSection.test.tsx` | **New `it.each`:** the plus on the New button, on desktop and on a phone, for both kinds. |
+| `tests/frontend/WebsiteForm.test.tsx`, `tests/frontend/CredentialForm.test.tsx`, `tests/frontend/TitleDescriptionForm.test.tsx` | **New specs:** a plus with `submitButtonShowsPlus`, and none by default ("Save changes"). `within` is imported where it was missing. |
+| `tests/frontend/WebsiteCreatePage.test.tsx`, `tests/frontend/CredentialCreatePage.test.tsx`, `tests/frontend/WebsiteItemCreatePage.test.tsx` | **New spec:** a plus on the "Create …" button, checked for both item kinds. `within` is imported where it was missing. |
+
+### Verification
+- `npm run lint` is clean.
+- `npm run test`: 108 files and 2351 tests pass.
+- `npm run test:coverage`: 99.45 % statements, 98.6 % branches, 100 % functions and 99.75 % lines, all above the thresholds.
+  - The first coverage run had 11 timeouts (5 s) in typing-heavy form tests while the full suite ran in parallel. Two later full runs passed cleanly.
+- Playwright, against the dev server that was already running (Vite on 5180, API on 3010; I did not start or stop it):
+  - **Home at 1600 px:** the 1080 px frame has 260 px on each side.
+  - **Home at 390 px:** the 18 px gutters are unchanged and nothing scrolls sideways.
+  - **Website, action and crawl run pages:** they still fill the window.
+  - **Forge Gym, "Logged out":** History shows only the one logged-out crawl.
+  - **Forge Gym, "Gym teacher":** History shows exactly that credential's 6 crawls.
+  - **Login fixture, "Logged out":** "No logged-out crawls yet." shows.
+  - **Plus icons:** "New action", "New use case" and "New credential" have the plus at 1600 px and at 390 px. "New website" and "Add step" still have it.
+  - **Create forms:** all four "Create …" buttons have the plus. The "Save changes" buttons on the website, credential, use case and action edit pages do not.
+  - **Not checked live:** starting a crawl, which would crawl the real external site. The existing spec "crawls logged in as the credential picked in Crawl as" covers the POST.
+  - Screenshots are in `claude_tmp/verify/`.
+
+---
+
+## 2026-10-13 21:25 EDT — Redesign: the "Easy Test Mockups" screens on the Nocturne design system
+
+**Intent:**
+- Implement the Claude Design project **Easy Test Mockups** (`Easy Test Mockups.dc.html`, Nocturne design system), as the user asked:
+  - Home becomes a dashboard of every website (1a / 2a).
+  - The website page leads with its actions and moves crawls, screenshots, and credentials into a tabbed side panel (1b / 2b).
+  - The action page shows versions, steps, and the latest run side by side (1c / 2c).
+  - The crawl run page shows live progress beside its site map (1d / 2d).
+  - Each screen has a desktop and a phone (390 px) layout.
+- Import MUI icons through one separate file, so the whole icon library is never imported, as the user asked.
+
+### Decisions
+- **Made by the user** (answered in Plannotator, plan v1–v3, then approved):
+  - **Q1:** extend `GET /api/websites` with a per-website `summary`.
+  - **Q2:** drop what the mockups don't draw, along with its tests:
+    - Home's Hello World and API-health readout;
+    - the website description and its created time;
+    - the crawl "Buttons" picker and the button-mode suffix;
+    - the version's "Generated from" and "Refined from" blocks;
+    - the "Out of date" explanation alert (the tag stays);
+    - the run's "Ran … · logged in as …" line;
+    - the action's created/updated line;
+    - the Scripts, Crawls, and Runs intro paragraphs;
+    - the crawl page's "Loaded", "Ended up at", and depth facts.
+
+    Error states and the contents of the Screenshots and Credentials tabs were kept.
+  - **Q3:** Inter from a Google Fonts `<link>`.
+  - **Q4:** `/websites` redirects to `/` (`WEBSITE_LIST_PATH` is now `/`).
+  - **Q5:** no mobile crawl-page detail sheet for now: the details stay below the map.
+  - **Q6:** every MUI icon, including the existing ones, goes through `src/components/icons.tsx`.
+  - **Q7:** hide the mockup details that have no data:
+    - the "visiting…" / "waiting" site map rows;
+    - "Use case · 3 actions";
+    - "from the crawl of Oct 13";
+    - the screenshot size.
+  - **Q8:** screens outside the mockups get the theme only.
+- **Defaults stated in the approved plan:**
+  - **Breakpoints:** the phone layouts apply below `md` (900 px), and the action page goes single-column below `lg` (1200 px).
+  - **Status colors:** the mockup's OKLCH colors were converted to hex once.
+  - **"Not run" icon:** a dashed-circle `createSvgIcon`.
+  - **Buttons:** the theme turns `contained` buttons into Nocturne's accent outline.
+  - **Database:** no schema change, so no `prisma db push` / `generate`.
+- **Added during the work, beyond the plan:**
+  - `useCrawlRuns` now polls every 2 s while a crawl runs. Without it, the website page's running-crawl card would tick its timer while its page counts stayed frozen.
+  - `MuiTypography.gutterBottom` is fixed at 16 px. Nocturne's smaller headings left the theme-only form pages' first floating label touching the title.
+  - The desktop site map scrolls inside its panel (at most 640 px), as the old one did.
+  - `countOutputLines` ignores a final newline. A test agent found that a two-line log read "3 lines".
+- **Removed as dead code** once nothing used it, with its tests:
+  - server: `listWebsites`;
+  - client: `describeCrawledPagePath`, `describeCrawlButtonMode`, `formatCrawlButtonModeSuffix`, `describeChangedActionFields`, and `useHealth`;
+  - `WebsiteListPage` (Q4).
+
+### Files changed
+| File | Change |
+|---|---|
+| `index.html` | Title "Easy Test"; Google Fonts preconnect and the Inter stylesheet link. |
+| `src/main.tsx` | Uses `nocturneTheme` (the inline GitHub-style theme is gone). |
+| `src/index.css` | Nocturne background and text before React mounts. |
+| `src/theme/nocturneTheme.ts` | **New.** `nocturneTokens`, `statusColors`, `runStatusColors`, `crawlSeverityColors`, `MONOSPACE_FONT_FAMILY`, and `nocturneTheme` (palette, Inter typography, and overrides for Button, Typography gutter, OutlinedInput, Paper, Chip, Tabs, Alert, LinearProgress, Link, ListItemButton, Dialog, Menu, Tooltip, and focus ring). |
+| `src/components/icons.tsx` | **New.** Per-path re-exports of `AddIcon`, `ArrowDownwardIcon`, `ArrowUpwardIcon`, `CheckIcon`, `CheckCircleOutlineIcon`, `ChevronLeftIcon`, `ChevronRightIcon`, `DeleteOutlineIcon`, `DragIndicatorIcon`, `HighlightOffIcon`, `MoreHorizIcon`, and `PlayArrowIcon`, plus `NotRunIcon`. |
+| `src/components/StatusDot.tsx`, `StatusTag.tsx`, `ActionStatusBar.tsx`, `DisclosureRow.tsx`, `CrawlProgressCard.tsx`, `PageContainer.tsx`, `MoreActionsMenu.tsx`, `ActionScriptRunHistory.tsx`, `ActionScriptRunOutput.tsx` (`countOutputLines`, `describeOutputLineCount`) | **New** shared pieces. |
+| `src/components/AppHeader.tsx` | Check-mark logo and "Easy Test"; "Websites" goes to `/`, with `aria-current` on the dashboard. |
+| `src/components/PageBreadcrumbs.tsx` | "/" separators; on a phone, one "‹ Parent" back link (`findParentCrumb`). |
+| `src/components/ScriptRunStatusIcon.tsx` | Outline check, X, and dashed circle in the status colors; new `size` prop. |
+| `src/components/WebsiteItemListSection.tsx` | Actions as a status table (`ActionRow`, `newestVersionIsOutOfDate`) with the counts line; use cases as cards; `isPhoneLayout` prop. |
+| `src/components/CrawlRunsSection.tsx` | The Crawls tab: Crawl as + Crawl website, the "One crawl at a time" hint, the progress card with Watch, and History rows. Buttons picker removed (`DEFAULT_CRAWL_BUTTON_MODE`, `CRAWL_BUTTON_MODE_OPTIONS` gone); `now` prop. |
+| `src/components/ScreenshotRunsSection.tsx` | The Screenshots tab, with "Take screenshot" (`onTakeScreenshotClick`) and History rows. |
+| `src/components/CredentialsSection.tsx` | The Credentials tab body, with no heading. |
+| `src/components/ActionScriptsSection.tsx` | Versions column: rows with origin lines, Compare, and the compact model picker with "Convert to new version"; the phone Version dropdown. Version details moved out. |
+| `src/components/ActionScriptDetails.tsx` | Steps column: caption, summary, steps marked by `highlightedRun`, and the Assumptions / Pages / Plan JSON rows; phone "Steps" with `leadingDisclosures`. `RefinedFromDetails` and the Generated-from block were removed. |
+| `src/components/ActionPlanSteps.tsx` | Muted verbs (`describePlanStepParts`) and run marking (`findStepRunState`, `firstLineOf`); `highlightedRun` and `isCompact` props. |
+| `src/components/ActionScriptRunsSection.tsx` | The Latest run panel and the phone card; `selectedRun`, `nextVersionNumber`, and `isPhoneLayout` props (`credentialName` removed). |
+| `src/components/ActionScriptRunDetails.tsx` | Status banner, screenshot and URL, "Refine with Claude" with a counter and "Refine into Version N", and the Output log row; `refinedVersionNumber`, `isCompact`, and `runAgainButton` props. |
+| `src/components/ScriptModelPicker.tsx` | Compact side-by-side selects (aria-labelled); the model id and fallback moved into the hover title. |
+| `src/components/CrawlSiteMap.tsx` | Rows with a dot, the path, and a note (`describeSiteMapNote`); a scrolling surface panel on desktop and 44 px rows on a phone. |
+| `src/components/CrawledPageDetails.tsx` | Path heading, facts row, Links and Buttons cards (`CrawledUrlCard`), and the snapshot line count (`describeSnapshotLineCount`). |
+| `src/components/CodeBlock.tsx` | Nocturne's dark code ground. |
+| `src/components/ActionPlanEditor.tsx`, `ActionPlanStepFields.tsx` | Icons now come from `icons.tsx`. |
+| `src/pages/HomePage.tsx` | The dashboard (`WebsiteDashboardRow`). |
+| `src/pages/WebsiteDetailPage.tsx` | Header, actions and use cases, and the tabbed side panel (`?tab=`, `chooseOpenTab`, `formatLoginPage`); phone tabs and the ⋯ menu; the crawl POST sends `{ credentialId }` only. |
+| `src/pages/ActionDetailPage.tsx` | Three columns or one; `?version=` (`findShownVersionIndex`, `showVersionNumber`, `addAndShowCreatedScript`); `ActionHeader`; `findVersionNumberOfScriptId`. |
+| `src/pages/CrawlRunPage.tsx` | Login tag, the running and ended status lines ("m:ss of 10:00 max", "Updated just now"), and the phone progress card. |
+| `src/pages/WebsiteListPage.tsx` | **Deleted** (Q4). |
+| `src/App.tsx` | `/websites` becomes `<Navigate to="/" replace />`. |
+| `src/hooks/useNow.ts`, `useIsNarrowerThan.ts` | **New.** |
+| `src/hooks/useCrawlRuns.ts` | Polls while a crawl runs (`aListedCrawlIsRunning`); returns `PolledJsonResourceState`. |
+| `src/hooks/useWebsites.ts` | `WebsiteLatestCrawlRunRecord`, `WebsiteSummaryRecord`, `WebsiteWithSummaryRecord`; `useWebsites` returns them. |
+| `src/hooks/useWebsiteItems.ts`, `useActionScripts.ts` | New `NewestActionScriptRecord` and `LatestActionScriptRunRecord` fields; `recordFinishedRun` copies them. |
+| `src/hooks/useHealth.ts` | **Deleted** (Q2). |
+| `src/utils/formatRelativeTime.ts` | **New:** `formatRelativeTime`, `formatDayAndTime`, `formatFullDateTime`, `formatElapsed`. |
+| `src/utils/describeActionStatus.ts` | **New:** `describeLatestRunLabel`, `countActionStatuses`, `describeActionStatusCounts`, `describeActionCount`. |
+| `src/utils/describeWebsiteSummary.ts` | **New:** `describeLatestCrawl`, `describeDashboardTotals`. |
+| `src/utils/describeCrawlRun.ts` | New wording in `describeCrawlRunProgress` and `describeCrawlRunLogin`. Added `crawlRunLoginFailed`, `describeCrawlRunHistoryLabel`, `crawlRunHistorySeverity`, `CRAWL_TIME_LIMIT_MS`, `describeSiteMapNote`, and `describeRedirectFact`. Removed `describeCrawlButtonMode`, `formatCrawlButtonModeSuffix`, and `describeCrawledPagePath`. |
+| `src/utils/actionPlanSteps.ts` | `describePlanStepParts` (`PlanStepParts`); `describePlanStep` is built on it. |
+| `src/utils/describeScriptModel.ts` | `findScriptModelName`, `describeScriptModelBriefly`, `shortenScriptModelName`. |
+| `src/utils/describeScriptRunStatus.ts` | `describeScriptRunStatusBriefly`. |
+| `src/utils/describeScriptStaleness.ts` | `describeChangedActionFields` removed. |
+| `src/utils/routePaths.ts` | `WEBSITE_LIST_PATH` is `/`. |
+| `server/services/dbService.ts` | `LATEST_ACTION_SCRIPT_RUN_QUERY` also selects `failedStepNumber` and `timedOut`. `ACTION_LIST_INCLUDE` adds the version's text and an active-version `_count`. `NewestActionScriptSummary` gains `versionNumber`, `actionTitle`, `actionDescription`, and `credentialId`. New `WebsiteLatestCrawlRun`, `WebsiteSummary`, `WebsiteWithSummary`, `WEBSITE_SUMMARY_INCLUDE`, `toWebsiteWithSummary`, and `listWebsitesWithSummaries`. `listWebsites` removed. |
+| `server/controllers/websites.ts` | `GET /api/websites` answers with summaries (JSDoc updated). |
+| Tests | Backend: `dbService`, `websites`, `actions`, `actionScripts`, `server`. Frontend: every spec of a changed component, page, hook, or util was updated. **New:** `formatRelativeTime`, `describeActionStatus`, `describeWebsiteSummary`, `useNow`, `useIsNarrowerThan`, `nocturneTheme`, `sharedRedesignComponents`. `WebsiteListPage.test.tsx` was deleted. Helpers: `stubWindowWidth`, `buildWebsiteSummaryRecord`, `buildWebsiteWithSummaryRecord`, `buildNewestActionScriptRecord`; `websiteItemDetailPageCases` uses `/`. Every test removal maps to a Q2 or Q4 feature. |
+| `README.md`, `src/README.md`, `src/components/README.md`, `src/hooks/README.md`, `src/pages/README.md`, `server/controllers/README.md`, `server/services/README.md`, `tests/README.md` | Describe the redesign, the new API fields, the icons file, and `stubWindowWidth`. |
+| `AI_JOURNAL.md` | This entry. |
+
+### Verification
+- **Manual verification** (Playwright, plus the `manual-verifier` agent) at 1280 / 1440 / 1000 / 390 px against the mockups. Screenshots are in `claude_tmp/redesign/` and `claude_tmp/redesign/verify/`.
+  - No console errors and no 4xx/5xx responses.
+  - A live crawl of "easy-test dev" grew in place; a logged-in crawl of the local login fixture ran as Admin.
+  - `?tab=`, `?version=`, and `?page=` survive a reload.
+  - The ⋯ menus and the redirect worked.
+  - A real run against the fixture recorded "Failed at step 3" with the step highlighted.
+  - One real Refine created Version 4 and landed on `?version=4`.
+  - The theme-only form and compare pages were checked too.
+  - **Not checked:** the red "login failed" tag, a failed crawl's error text, and Convert.
+- **Lint:** `npm run lint` is clean. `npm run tsc:client` and `npm run tsc` are clean. Note: `npm run tsc` also emits into `dist-server/`, because `tsconfig.server.json` has no `noEmit`. The local pm2 `easy-test` process was not restarted.
+- **Tests:** `npx vitest run --coverage --maxWorkers=4` (the CI runner's 4 vCPUs) passes 108/108 files and 2326/2326 tests. Coverage: statements 99.45, branches 98.59, functions 100, lines 99.75.
+  - Plain `npm run test:coverage` on this machine (12 CPUs, load average 18–25 from another project's test run) still times out 4 typing-heavy form specs (`ActionPlanEditor`, `CredentialForm`, `CredentialCreatePage`). That flake predates this work: the baseline run before any change failed 6 of the same kind, and each spec passes alone.
+- **Build:** a production build (`vite build` into `claude_tmp/`, since deleted) succeeds at 726 KB, up from 685 KB. The over-500 KB warning was already there before.
+- **Cleanup:** I stopped the dev servers I started on 5180 / 3010 and my leftover `tsx watch` (PID 15369). The two older `tsx watch` processes from other sessions were left alone.
+- **Local DB:** the verification added one screenshot run, two crawl runs, one action run, and Version 4 of "Open account settings"; a throwaway website was created and deleted.
+
+---
+
 ## 2026-10-13 15:25 EDT — pm2 restart limit: `min_uptime: "30s"` so a crash loop actually stops
 
 **Intent:**

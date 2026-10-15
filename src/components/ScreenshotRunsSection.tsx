@@ -1,18 +1,18 @@
 import { type ReactElement } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
+import ButtonBase from "@mui/material/ButtonBase";
 import LinearProgress from "@mui/material/LinearProgress";
-import List from "@mui/material/List";
-import ListItemButton from "@mui/material/ListItemButton";
-import ListItemText from "@mui/material/ListItemText";
-import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import LoadStatusNotice from "./LoadStatusNotice";
 import ScreenshotRunDetails from "./ScreenshotRunDetails";
+import StatusDot from "./StatusDot";
 import { type ScreenshotRunRecord } from "../hooks/useScreenshotRuns";
+import { nocturneTokens, statusColors } from "../theme/nocturneTheme";
 import { describeScreenshotRunOutcome } from "../utils/describeScreenshotRun";
+import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeTime";
 
-const HEADING_ID = "screenshot-runs-section-heading";
 const HISTORY_HEADING_ID = "screenshot-run-history-heading";
 
 /** Props for `ScreenshotRunsSection`. */
@@ -37,18 +37,22 @@ export interface ScreenshotRunsSectionProps {
   isTakingScreenshot: boolean;
   /** Why the last "Take screenshot" request failed, or null. */
   takeScreenshotErrorMessage: string | null;
+  /** Called when the user clicks "Take screenshot". */
+  onTakeScreenshotClick: () => void;
 }
 
 /**
- * The "Screenshots" section of a website's detail page: a line saying when
- * screenshots are taken (the website's timing settings), the outcome and
- * image of the selected screenshot run (the newest one unless the user picked
- * another), and the history of every run to pick from.
+ * The "Screenshots" tab of a website's page: the "Take screenshot" button
+ * (disabled, with a progress bar, while one is being taken), a line saying
+ * when screenshots are taken (the website's timing settings), the outcome
+ * and image of the selected screenshot run (the newest one unless the user
+ * picked another), and the "History" of every run to pick from.
  *
  * A run's outcome is shown as a `role="status"` alert - it is a result, not an
  * error the user must act on - while request failures stay `role="alert"`.
- * @param props - The timing settings, the runs, the request states, and the selection callback
- * @returns The rendered section
+ * The tab names the section, so it has no heading of its own.
+ * @param props - The timing settings, the runs, the request states, and the callbacks
+ * @returns The rendered tab content
  */
 export default function ScreenshotRunsSection(props: ScreenshotRunsSectionProps): ReactElement {
   const {
@@ -62,6 +66,7 @@ export default function ScreenshotRunsSection(props: ScreenshotRunsSectionProps)
     onSelectRun,
     isTakingScreenshot,
     takeScreenshotErrorMessage,
+    onTakeScreenshotClick,
   } = props;
 
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs.at(0) ?? null;
@@ -70,25 +75,26 @@ export default function ScreenshotRunsSection(props: ScreenshotRunsSectionProps)
   const thereAreNoRuns = runs.length === 0;
   const thereAreRuns = !thereAreNoRuns;
   const networkIdleWaitIsDisabled = networkIdleTimeoutMs === 0;
+  const now = new Date();
   const timingSettingsText = networkIdleWaitIsDisabled
     ? `Before each screenshot: doesn't wait for network requests; takes it at least ${String(screenshotMinimumWaitMs)} ms after the page loads.`
     : `Before each screenshot: waits up to ${String(networkIdleTimeoutMs)} ms for network requests to finish, then for the page to paint, and at least ${String(screenshotMinimumWaitMs)} ms after the page loads. If the network is still busy after ${String(networkIdleTimeoutMs)} ms, the screenshot is taken right away.`;
 
   return (
-    <Box component="section" aria-labelledby={HEADING_ID} sx={{ mt: 5 }}>
-      <Typography id={HEADING_ID} variant="h5" component="h2" sx={{ mb: 1 }}>
-        Screenshots
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+      <Box>
+        <Button onClick={onTakeScreenshotClick} disabled={isTakingScreenshot} variant="outlined">
+          {isTakingScreenshot ? "Taking screenshot…" : "Take screenshot"}
+        </Button>
+      </Box>
+      <Typography sx={{ fontSize: 12, color: nocturneTokens.neutral[400] }}>
         {timingSettingsText}
       </Typography>
 
-      {isTakingScreenshot && <LinearProgress aria-label="Taking screenshot" sx={{ mb: 2 }} />}
+      {isTakingScreenshot && <LinearProgress aria-label="Taking screenshot" />}
 
       {takeScreenshotFailed && (
-        <Alert severity="error" sx={{ mb: 2 }}>
-          Could not take a screenshot: {takeScreenshotErrorMessage}
-        </Alert>
+        <Alert severity="error">Could not take a screenshot: {takeScreenshotErrorMessage}</Alert>
       )}
 
       <LoadStatusNotice
@@ -98,48 +104,72 @@ export default function ScreenshotRunsSection(props: ScreenshotRunsSectionProps)
       />
 
       {runListLoadedWithoutError && thereAreNoRuns && (
-        <Typography color="text.secondary">No screenshots yet.</Typography>
+        <Typography color="text.secondary" sx={{ fontSize: 13.5 }}>
+          No screenshots yet.
+        </Typography>
       )}
 
       {selectedRun !== null && <ScreenshotRunDetails websiteId={websiteId} run={selectedRun} />}
 
       {thereAreRuns && (
-        <>
-          <Typography
+        <Box>
+          <Box
             id={HISTORY_HEADING_ID}
-            variant="subtitle1"
             component="h3"
-            sx={{ mt: 3, mb: 1 }}
+            sx={{
+              m: 0,
+              mb: "6px",
+              fontSize: 11,
+              fontWeight: 400,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              color: nocturneTokens.neutral[500],
+            }}
           >
-            Run history
-          </Typography>
-          <Paper variant="outlined" sx={{ maxHeight: 320, overflow: "auto" }}>
-            <List disablePadding aria-labelledby={HISTORY_HEADING_ID}>
-              {runs.map((run) => {
-                const runIsSelected = run.id === selectedRun?.id;
-                return (
-                  <ListItemButton
-                    key={run.id}
-                    selected={runIsSelected}
+            History
+          </Box>
+          <Box component="ul" aria-labelledby={HISTORY_HEADING_ID} sx={{ m: 0, p: 0 }}>
+            {runs.map((run) => {
+              const runIsSelected = run.id === selectedRun?.id;
+              return (
+                <Box component="li" key={run.id} sx={{ listStyle: "none" }}>
+                  <ButtonBase
                     aria-current={runIsSelected ? "true" : undefined}
                     onClick={() => {
                       onSelectRun(run.id);
                     }}
-                    divider
+                    sx={{
+                      width: "100%",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
+                      py: "9px",
+                      px: "6px",
+                      fontSize: 13,
+                      fontFamily: "inherit",
+                      textAlign: "left",
+                      borderRadius: `${String(nocturneTokens.radius.small)}px`,
+                      borderBottom: `1px solid ${nocturneTokens.rowRule}`,
+                      backgroundColor: runIsSelected ? nocturneTokens.accentRamp[900] : "transparent",
+                    }}
                   >
-                    <ListItemText
-                      primary={describeScreenshotRunOutcome(run)}
-                      secondary={new Date(run.createdAt).toLocaleString()}
-                      slotProps={{
-                        primary: { sx: { color: run.succeeded ? "success.main" : "error.main" } },
-                      }}
-                    />
-                  </ListItemButton>
-                );
-              })}
-            </List>
-          </Paper>
-        </>
+                    <StatusDot color={run.succeeded ? statusColors.passed : statusColors.failed} />
+                    <Box component="span" sx={{ mr: "auto" }}>
+                      {describeScreenshotRunOutcome(run)}
+                    </Box>
+                    <Box
+                      component="span"
+                      title={formatFullDateTime(run.createdAt)}
+                      sx={{ color: nocturneTokens.neutral[400], whiteSpace: "nowrap" }}
+                    >
+                      {formatRelativeTime(run.createdAt, now)}
+                    </Box>
+                  </ButtonBase>
+                </Box>
+              );
+            })}
+          </Box>
+        </Box>
       )}
     </Box>
   );

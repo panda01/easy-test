@@ -24,7 +24,8 @@ import {
  * not a spec (it does not end in `.test.tsx`).
  */
 
-const LIST_PATH = "/websites";
+/** The website list: the dashboard, on the home page. */
+const LIST_PATH = "/";
 const WEBSITE_PATH = "/websites/website-1";
 const WEBSITE_API_URL = "/api/websites/website-1";
 

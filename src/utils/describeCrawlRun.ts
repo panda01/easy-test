@@ -68,14 +68,13 @@ export function describeCrawlRunStatus(run: CrawlRunStatusFields): string {
 }
 
 /**
- * Words a running crawl's progress, e.g. "Visited 12 of up to 50 pages · 30
- * links waiting".
+ * Words a running crawl's progress, e.g. "12 of up to 50 pages · 8 waiting"
+ * (the waiting count is the links queued but not yet visited).
  * @param run - The run's counters and page limit
  * @returns The progress line
  */
 export function describeCrawlRunProgress(run: CrawlRunProgressFields): string {
-  const waitingText = formatCount(run.waitingUrlCount, "link", "links");
-  return `Visited ${String(run.visitedPageCount)} of up to ${String(run.pageLimit)} pages · ${waitingText} waiting`;
+  return `${String(run.visitedPageCount)} of up to ${String(run.pageLimit)} pages · ${String(run.waitingUrlCount)} waiting`;
 }
 
 /**
@@ -100,29 +99,64 @@ export function crawlRunSeverity(status: string): CrawlRunSeverity {
 }
 
 /**
- * Words who a crawl viewed the site as:
- * - no credential: "Crawled logged out (no credential)";
- * - logged in: `Logged in as "Admin"` - every page of the run was viewed
+ * Tells whether a crawl ended without logging in with its credential: the
+ * login failed, or the crawl was cut off while logging in. A logged-out crawl
+ * (no credential) and one still running never count.
+ * @param run - The run's status, login state, and credential
+ * @returns True when the crawl had a credential, has ended, and never logged in
+ */
+export function crawlRunLoginFailed(run: CrawlRunLoginFields): boolean {
+  const crawlHasACredential = run.credential !== null;
+  const crawlHasEnded = run.status !== "running";
+  return crawlHasACredential && crawlHasEnded && !run.isLoggedIn;
+}
+
+/**
+ * Words who a crawl viewed the site as, for the crawl's login tag:
+ * - no credential: "Logged out";
+ * - logged in: `Logged in as “Admin”` - every page of the run was viewed
  *   logged in, because the crawler records nothing before it logs in;
- * - still running and not logged in yet: `Logging in as "Admin"…`;
+ * - still running and not logged in yet: `Logging in as “Admin”…`;
  * - ended without logging in (the login failed, or the crawl was cut off
- *   while logging in): `Not logged in - the login as "Admin" did not succeed`.
+ *   while logging in): `Not logged in — login as “Admin” failed`.
  * @param run - The run's status, login state, and credential
  * @returns The login line
  */
 export function describeCrawlRunLogin(run: CrawlRunLoginFields): string {
   const { credential } = run;
   if (credential === null) {
-    return "Crawled logged out (no credential)";
+    return "Logged out";
   }
   if (run.isLoggedIn) {
-    return `Logged in as "${credential.name}"`;
+    return `Logged in as “${credential.name}”`;
   }
-  const crawlIsRunning = run.status === "running";
-  if (crawlIsRunning) {
-    return `Logging in as "${credential.name}"…`;
+  if (crawlRunLoginFailed(run)) {
+    return `Not logged in — login as “${credential.name}” failed`;
   }
-  return `Not logged in - the login as "${credential.name}" did not succeed`;
+  return `Logging in as “${credential.name}”…`;
+}
+
+/**
+ * Words a crawl for its row in a website's crawl history: how it went
+ * (`describeCrawlRunStatus`), or - for a crawl that never logged in with its
+ * credential, so recorded nothing - the login failure instead.
+ * @param run - The run's status, page counts, login state, and credential
+ * @returns e.g. "Finished · 46 pages" or `Not logged in — login as “Admin” failed`
+ */
+export function describeCrawlRunHistoryLabel(
+  run: CrawlRunStatusFields & CrawlRunLoginFields,
+): string {
+  return crawlRunLoginFailed(run) ? describeCrawlRunLogin(run) : describeCrawlRunStatus(run);
+}
+
+/**
+ * Picks how a crawl's history row is coloured: as its status is
+ * (`crawlRunSeverity`), except that a crawl whose login failed is an error.
+ * @param run - The run's status, login state, and credential
+ * @returns The matching severity
+ */
+export function crawlRunHistorySeverity(run: CrawlRunLoginFields): CrawlRunSeverity {
+  return crawlRunLoginFailed(run) ? "error" : crawlRunSeverity(run.status);
 }
 
 /**
@@ -142,41 +176,6 @@ export function crawlRunLoginSeverity(run: CrawlRunLoginFields): CrawlRunSeverit
     return "info";
   }
   return "error";
-}
-
-/**
- * Words which buttons a crawl clicked, by its button mode:
- * - `linksOnly`: "links only" (it clicked no buttons);
- * - `allButRisky`: "clicked buttons except risky ones";
- * - `openOnly`: "clicked only “Open” buttons".
- *
- * A mode this client does not know yet is shown as it is.
- * @param buttonMode - The run's button mode
- * @returns The mode in words
- */
-export function describeCrawlButtonMode(buttonMode: string): string {
-  switch (buttonMode) {
-    case "linksOnly":
-      return "links only";
-    case "allButRisky":
-      return "clicked buttons except risky ones";
-    case "openOnly":
-      return "clicked only “Open” buttons";
-    default:
-      return buttonMode;
-  }
-}
-
-/**
- * Builds the ending a crawl's lines add for its button mode: nothing for a
- * crawl that only followed links (the default, which needs no mention), else
- * " · " and the mode in words, e.g. " · clicked buttons except risky ones".
- * @param buttonMode - The run's button mode
- * @returns The suffix to append, or an empty string
- */
-export function formatCrawlButtonModeSuffix(buttonMode: string): string {
-  const crawlOnlyFollowedLinks = buttonMode === "linksOnly";
-  return crawlOnlyFollowedLinks ? "" : ` · ${describeCrawlButtonMode(buttonMode)}`;
 }
 
 /**
@@ -227,7 +226,7 @@ function formatRedirectEnd(url: string, otherEndUrl: string): string {
   }
 }
 
-/** The parts of a crawled page its site map label is built from. */
+/** The parts of a crawled page its redirect is described from. */
 export interface CrawledPageLabelFields {
   /** The identity the page is recorded under. */
   url: string;
@@ -240,25 +239,60 @@ export interface CrawledPageLabelFields {
 }
 
 /**
- * Labels a crawled page in the site map and its details, showing a redirect:
- * - not redirected: its path, e.g. "/schools";
- * - redirected, recorded where it landed: "/calendar (from /)";
- * - redirected onto a page already in the crawl (so recorded under the URL it
- *   was requested at): "/home → /calendar".
- * @param page - The page's recorded, requested, and final URLs, and whether it redirected
- * @returns The label
+ * The longest a crawl may run, in milliseconds (10 minutes), for the crawl
+ * page's "2:14 of 10:00 max". Mirrors `CRAWL_TIME_LIMIT_MS` in
+ * `server/services/crawlerService.ts`; the client never imports server code.
  */
-export function describeCrawledPagePath(page: CrawledPageLabelFields): string {
+export const CRAWL_TIME_LIMIT_MS = 600_000;
+
+/** The parts of a crawled page its site map note is built from. */
+export interface SiteMapNoteFields extends CrawledPageLabelFields {
+  /** True only when the page answered below HTTP 400 and was read. */
+  succeeded: boolean;
+  /** The page's HTTP status, or null when there was no response. */
+  httpStatus: number | null;
+  /** The text of the button whose click first led here, or null when a link (or the start URL) did. */
+  foundByButtonText: string | null;
+}
+
+/**
+ * Words the short note a site map row shows after the page's path, checked
+ * in this order:
+ * - a failed page: its status ("HTTP 404"), or "No response";
+ * - a redirect recorded where it landed: where it was requested ("from /");
+ * - a redirect onto a page already recorded: where it landed ("→ /calendar");
+ * - a page a button led to: the button ("via “Open Yoga”");
+ * - otherwise nothing.
+ * @param page - The page's URLs, redirect flag, outcome, and button text
+ * @returns The note, or an empty string
+ */
+export function describeSiteMapNote(page: SiteMapNoteFields): string {
+  if (!page.succeeded) {
+    return page.httpStatus === null ? "No response" : `HTTP ${String(page.httpStatus)}`;
+  }
+  if (page.wasRedirected) {
+    const pageIsRecordedWhereItLanded = identifyCrawledUrl(page.finalUrl) === page.url;
+    return pageIsRecordedWhereItLanded
+      ? `from ${formatRedirectEnd(identifyCrawledUrl(page.requestedUrl), page.url)}`
+      : `→ ${formatRedirectEnd(identifyCrawledUrl(page.finalUrl), page.url)}`;
+  }
+  const aButtonLedHere = page.foundByButtonText !== null;
+  return aButtonLedHere ? `via “${page.foundByButtonText ?? ""}”` : "";
+}
+
+/**
+ * Words a crawled page's redirect for its details, or nothing when it was
+ * not redirected: "Redirected from /" for a page recorded where it landed,
+ * "Redirected to /calendar" for one recorded where it was requested.
+ * @param page - The page's recorded, requested, and final URLs, and whether it redirected
+ * @returns The redirect fact, or null when there was no redirect
+ */
+export function describeRedirectFact(page: CrawledPageLabelFields): string | null {
   if (!page.wasRedirected) {
-    return formatCrawledPagePath(page.url);
+    return null;
   }
   const pageIsRecordedWhereItLanded = identifyCrawledUrl(page.finalUrl) === page.url;
-  if (pageIsRecordedWhereItLanded) {
-    const landedPath = formatRedirectEnd(page.url, page.requestedUrl);
-    const requestedPath = formatRedirectEnd(identifyCrawledUrl(page.requestedUrl), page.url);
-    return `${landedPath} (from ${requestedPath})`;
-  }
-  const requestedPath = formatCrawledPagePath(page.url);
-  const landedPath = formatRedirectEnd(identifyCrawledUrl(page.finalUrl), page.url);
-  return `${requestedPath} → ${landedPath}`;
+  return pageIsRecordedWhereItLanded
+    ? `Redirected from ${formatRedirectEnd(identifyCrawledUrl(page.requestedUrl), page.url)}`
+    : `Redirected to ${formatRedirectEnd(identifyCrawledUrl(page.finalUrl), page.url)}`;
 }

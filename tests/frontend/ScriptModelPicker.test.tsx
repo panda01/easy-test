@@ -27,6 +27,16 @@ function renderPicker(overrides: Partial<ScriptModelPickerProps> = {}): RenderRe
 }
 
 describe("ScriptModelPicker", () => {
+  it("shows the chosen model's display name and effort level in the closed dropdowns, side by side", () => {
+    renderPicker();
+
+    const modelSelect = screen.getByRole("combobox", { name: /^Model/ });
+    const effortSelect = screen.getByRole("combobox", { name: /^Effort/ });
+    expect(modelSelect).toHaveTextContent(/^Claude Opus 5\.5$/);
+    expect(effortSelect).toHaveTextContent(/^high$/);
+    expect(screen.queryByText(/claude-opus-5-5/)).not.toBeInTheDocument();
+  });
+
   it("lists every model and reports the one picked", async () => {
     const user = userEvent.setup();
     const onModelChange = vi.fn();
@@ -57,15 +67,15 @@ describe("ScriptModelPicker", () => {
     expect(onEffortChange).toHaveBeenCalledWith("max");
   });
 
-  it("names the model id and its fallback, or says there is none", () => {
+  it("names the model id and its fallback in the model dropdown's hover title, or says there is none", () => {
     const { unmount } = renderPicker();
     expect(
-      screen.getByText("claude-opus-5-5 · If it declines, Claude Opus 4.8 answers instead"),
+      screen.getByTitle("claude-opus-5-5 · If it declines, Claude Opus 4.8 answers instead"),
     ).toBeInTheDocument();
     unmount();
 
     renderPicker({ selectedModelId: "claude-opus-4-6" });
-    expect(screen.getByText("claude-opus-4-6 · No fallback for this model")).toBeInTheDocument();
+    expect(screen.getByTitle("claude-opus-4-6 · No fallback for this model")).toBeInTheDocument();
   });
 
   it("shows a disabled Standard level for a model with no effort setting", () => {
@@ -74,7 +84,6 @@ describe("ScriptModelPicker", () => {
     const effortSelect = screen.getByRole("combobox", { name: /^Effort/ });
     expect(effortSelect).toHaveTextContent("Standard");
     expect(effortSelect).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByText("This model has no effort setting")).toBeInTheDocument();
   });
 
   it("is disabled while the list loads or a conversion runs", () => {

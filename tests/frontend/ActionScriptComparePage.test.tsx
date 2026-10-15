@@ -263,7 +263,7 @@ describe("ActionScriptComparePage", () => {
     await screen.findByRole("heading", { level: 1, name: "Compare plan versions" });
     await waitFor(() => {
       expect(readBreadcrumbTrail()).toEqual([
-        { label: "Websites", href: "/websites" },
+        { label: "Websites", href: "/" },
         { label: "Example", href: "/websites/website-1" },
         { label: "Log in to the shop", href: "/websites/website-1/actions/item-1" },
         { label: "Compare versions", href: null },

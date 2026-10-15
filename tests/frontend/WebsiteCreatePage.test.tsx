@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { act, screen, type RenderResult } from "@testing-library/react";
+import { act, screen, within, type RenderResult } from "@testing-library/react";
 import { userEvent, type UserEvent } from "@testing-library/user-event";
 import { Route } from "react-router-dom";
 import WebsiteCreatePage from "../../src/pages/WebsiteCreatePage";
@@ -15,7 +15,8 @@ import {
   type RouterStart,
 } from "./support/frontendTestHelpers";
 
-const LIST_PATH = "/websites";
+/** The website list: the dashboard, on the home page. */
+const LIST_PATH = "/";
 const CREATE_PATH = "/websites/new";
 
 /** History as it is after clicking "New website" on the list. */
@@ -66,6 +67,14 @@ describe("WebsiteCreatePage", () => {
     expect(screen.getByRole("spinbutton", { name: "Network idle cap (ms)" })).toHaveValue(5000);
     expect(screen.getByRole("spinbutton", { name: "Minimum wait (ms)" })).toHaveValue(1);
     expect(screen.getByRole("button", { name: "Create website" })).toBeDisabled();
+  });
+
+  it("puts a plus on the Create website button", () => {
+    stubFetchRoutes({});
+    renderWebsiteCreatePage(OPENED_FROM_LIST);
+
+    const createButton = screen.getByRole("button", { name: "Create website" });
+    expect(within(createButton).getByTestId("AddIcon")).toBeInTheDocument();
   });
 
   it("keeps submit disabled while URL or name is whitespace-only", async () => {

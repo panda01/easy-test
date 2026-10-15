@@ -41,3 +41,20 @@ export function describeScriptRunStatus(status: ScriptRunStatus): string {
       return "Not run yet";
   }
 }
+
+/**
+ * Names a run status in one word or two, for the phone's version dropdown
+ * ("Version 5 · Failed · 24 min ago").
+ * @param status - The run status
+ * @returns "Passed", "Failed", or "Not run"
+ */
+export function describeScriptRunStatusBriefly(status: ScriptRunStatus): string {
+  switch (status) {
+    case "passed":
+      return "Passed";
+    case "failed":
+      return "Failed";
+    case "notRun":
+      return "Not run";
+  }
+}

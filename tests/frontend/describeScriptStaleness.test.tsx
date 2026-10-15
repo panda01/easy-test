@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  describeChangedActionFields,
   findChangedActionFields,
 } from "../../src/utils/describeScriptStaleness";
 
@@ -65,27 +64,5 @@ describe("findChangedActionFields", () => {
     expect(
       findChangedActionFields(snapshot, { title: "log in", description: "Sign in", credentialId: null }),
     ).toEqual(["title"]);
-  });
-});
-
-describe("describeChangedActionFields", () => {
-  it("names a single field as it is", () => {
-    expect(describeChangedActionFields(["title"])).toBe("title");
-    expect(describeChangedActionFields(["credential"])).toBe("credential");
-  });
-
-  it("joins two fields with 'and'", () => {
-    expect(describeChangedActionFields(["title", "description"])).toBe("title and description");
-    expect(describeChangedActionFields(["description", "credential"])).toBe("description and credential");
-  });
-
-  it("joins three fields with commas and a final 'and'", () => {
-    expect(describeChangedActionFields(["title", "description", "credential"])).toBe(
-      "title, description and credential",
-    );
-  });
-
-  it("names nothing for an empty list", () => {
-    expect(describeChangedActionFields([])).toBe("");
   });
 });

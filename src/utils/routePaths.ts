@@ -11,8 +11,11 @@ import { ACTION_KIND, type WebsiteItemKind } from "./websiteItemKinds";
 
 // === Page paths ===
 
-/** The website list page. */
-export const WEBSITE_LIST_PATH = "/websites";
+/**
+ * The website list: the dashboard, which is the home page. The old
+ * `/websites` URL redirects here (see `App.tsx`).
+ */
+export const WEBSITE_LIST_PATH = "/";
 
 /** The create-website form page. */
 export const NEW_WEBSITE_PATH = "/websites/new";

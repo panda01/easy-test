@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { screen, type RenderResult } from "@testing-library/react";
+import { screen, within, type RenderResult } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { Route } from "react-router-dom";
 import CredentialCreatePage from "../../src/pages/CredentialCreatePage";
@@ -92,10 +92,19 @@ describe("CredentialCreatePage", () => {
       "Leave blank to use the website's login page (https://example.com/login)",
     );
     expect(readBreadcrumbTrail()).toEqual([
-      { label: "Websites", href: "/websites" },
+      { label: "Websites", href: "/" },
       { label: "Example", href: DETAIL_PATH },
       { label: "New credential", href: null },
     ]);
+  });
+
+  it("puts a plus on the Create credential button", async () => {
+    stubLoadedWebsite();
+
+    renderCredentialCreatePage(OPENED_FROM_DETAIL);
+
+    const createButton = await screen.findByRole("button", { name: "Create credential" });
+    expect(within(createButton).getByTestId("AddIcon")).toBeInTheDocument();
   });
 
   it("POSTs the new credential and goes back to the website's page", async () => {

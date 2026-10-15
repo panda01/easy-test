@@ -1,6 +1,6 @@
 import { type Express } from "express";
 import {
-  listWebsites,
+  listWebsitesWithSummaries,
   findWebsiteById,
   createWebsite,
   updateWebsite,
@@ -27,13 +27,20 @@ const DUPLICATE_URL_MESSAGE = "Another website already uses this URL";
  */
 export function registerWebsiteRoutes(app: Express): void {
   /**
-   * Lists every active website, newest first.
+   * Lists every active website, newest first, each with the summary the
+   * dashboard shows: `summary: { actionCount, passedActionCount,
+   * failedActionCount, notRunActionCount, latestRunAt, latestCrawlRun }`. An
+   * action counts as passed, failed, or not run by its newest version's
+   * latest run; `latestRunAt` is when any of the website's scripts last ran
+   * (null when none has); `latestCrawlRun` is the newest crawl's `{ id,
+   * status, visitedPageCount, pageLimit, createdAt, finishedAt }`, or null
+   * when the website has never been crawled.
    * @route GET /api/websites
-   * @returns 200 with an array of websites; 500 with `{ error }` when the query fails
+   * @returns 200 with an array of websites, each with its `summary`; 500 with `{ error }` when the query fails
    */
   app.get("/api/websites", async (_req, res) => {
     try {
-      const websites = await listWebsites();
+      const websites = await listWebsitesWithSummaries();
       res.json(websites);
     } catch (error: unknown) {
       res.status(500).json({ error: describeError(error) });

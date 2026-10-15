@@ -110,11 +110,30 @@ describe("action routes", () => {
       expect(mockDbService.listActionsForWebsite).toHaveBeenCalledWith(foundWebsite.id);
     });
 
-    it("answers each action with its newestScript - the newest version and its latest run, or null without versions", async () => {
-      const passedLatestRun = { id: "run-1", succeeded: true, createdAt: "2026-01-05T00:00:00.000Z" };
+    it("answers each action with its newestScript - the newest version's number, the text it was generated from, and its latest run, or null without versions", async () => {
+      const passedLatestRun = {
+        id: "run-1",
+        succeeded: true,
+        failedStepNumber: null,
+        timedOut: false,
+        createdAt: "2026-01-05T00:00:00.000Z",
+      };
+      const generatedFromText = {
+        actionTitle: sampleAction.title,
+        actionDescription: sampleAction.description,
+        credentialId: null,
+      };
       const actionsWithNewestScripts = [
-        { ...sampleAction, id: "action-passing", newestScript: { id: "script-a", latestRun: passedLatestRun } },
-        { ...sampleAction, id: "action-not-run", newestScript: { id: "script-b", latestRun: null } },
+        {
+          ...sampleAction,
+          id: "action-passing",
+          newestScript: { id: "script-a", versionNumber: 3, ...generatedFromText, latestRun: passedLatestRun },
+        },
+        {
+          ...sampleAction,
+          id: "action-not-run",
+          newestScript: { id: "script-b", versionNumber: 1, ...generatedFromText, latestRun: null },
+        },
         { ...sampleAction, id: "action-without-versions", newestScript: null },
       ];
       mockDbService.listActionsForWebsite.mockResolvedValue(actionsWithNewestScripts);

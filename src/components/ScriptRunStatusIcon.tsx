@@ -1,45 +1,49 @@
 import { type ReactElement } from "react";
-import CancelIcon from "@mui/icons-material/Cancel";
-import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import ErrorIcon from "@mui/icons-material/Error";
-import { amber } from "@mui/material/colors";
+import { type SxProps, type Theme } from "@mui/material/styles";
+import { CheckCircleOutlineIcon, HighlightOffIcon, NotRunIcon } from "./icons";
+import { statusColors } from "../theme/nocturneTheme";
 import {
   type LatestRunOutcome,
   describeScriptRunStatus,
   findScriptRunStatus,
 } from "../utils/describeScriptRunStatus";
 
-/**
- * The yellow of the "not run yet" icon. The theme's `warning` color is orange
- * in dark mode, so the icon takes MUI's amber instead.
- */
-const NOT_RUN_YET_COLOR = amber[400];
-
 /** Props for `ScriptRunStatusIcon`. */
 export interface ScriptRunStatusIconProps {
   /** The version's newest run, or null when it has not been run (or there is no version yet). */
   latestRun: LatestRunOutcome | null;
+  /** The icon's size in px; the mockups use 18 in lists and 15 in the version list. */
+  size?: number;
 }
 
 /**
- * Shows whether a script version works, judged by its most recent run: a
- * green check when it passed, a red X when it failed, and a yellow
- * exclamation when there are no runs yet. The icon's accessible name (also
- * its hover title) says the same in words.
- * @param props - The version's newest run, or null
+ * Shows whether a script version works, judged by its most recent run, in
+ * the redesign's one status language: a green outlined check when it passed,
+ * a red outlined X when it failed, and a grey dashed circle when there are no
+ * runs yet. The icon's accessible name (also its hover title) says the same
+ * in words.
+ * @param props - The version's newest run, or null, and the icon's size
  * @returns The status icon
  */
 export default function ScriptRunStatusIcon(props: ScriptRunStatusIconProps): ReactElement {
-  const { latestRun } = props;
+  const { latestRun, size = 18 } = props;
   const status = findScriptRunStatus(latestRun);
   const statusText = describeScriptRunStatus(status);
+  const iconSx: SxProps<Theme> = { fontSize: size, display: "block" };
 
   switch (status) {
     case "passed":
-      return <CheckCircleIcon color="success" titleAccess={statusText} />;
+      return (
+        <CheckCircleOutlineIcon
+          titleAccess={statusText}
+          sx={{ ...iconSx, color: statusColors.passed }}
+        />
+      );
     case "failed":
-      return <CancelIcon color="error" titleAccess={statusText} />;
+      return (
+        <HighlightOffIcon titleAccess={statusText} sx={{ ...iconSx, color: statusColors.failed }} />
+      );
     case "notRun":
-      return <ErrorIcon sx={{ color: NOT_RUN_YET_COLOR }} titleAccess={statusText} />;
+      return <NotRunIcon titleAccess={statusText} sx={{ ...iconSx, color: statusColors.notRun }} />;
   }
 }

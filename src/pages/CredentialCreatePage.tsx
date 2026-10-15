@@ -35,7 +35,9 @@ const NEW_CREDENTIAL_VALUES: CredentialRequestBody = {
  * requires the credential to have its own), then mounts the form with every
  * field blank. Save and Cancel both
  * return to the website's page history-aware (see `useReturnNavigation`):
- * credentials are listed there, and have no page of their own to open.
+ * credentials are listed there, and have no page of their own to open. Its
+ * "Create credential" button carries a plus, like every button that creates
+ * something.
  * @returns The rendered create-credential page
  */
 export default function CredentialCreatePage(): ReactElement {
@@ -99,6 +101,7 @@ export default function CredentialCreatePage(): ReactElement {
           websiteLoginUrl={website.loginUrl}
           passwordIsSaved={false}
           submitLabel="Create credential"
+          submitButtonShowsPlus
           isSubmitting={isSubmitting}
           errorMessage={errorMessage}
           onSubmit={handleSubmit}

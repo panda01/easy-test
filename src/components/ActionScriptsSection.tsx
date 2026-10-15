@@ -3,27 +3,26 @@ import { Link as RouterLink } from "react-router-dom";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import Chip from "@mui/material/Chip";
+import ButtonBase from "@mui/material/ButtonBase";
 import LinearProgress from "@mui/material/LinearProgress";
-import List from "@mui/material/List";
-import ListItemButton from "@mui/material/ListItemButton";
-import ListItemIcon from "@mui/material/ListItemIcon";
-import ListItemText from "@mui/material/ListItemText";
-import Paper from "@mui/material/Paper";
-import Stack from "@mui/material/Stack";
+import Link from "@mui/material/Link";
+import MenuItem from "@mui/material/MenuItem";
+import Select, { type SelectChangeEvent } from "@mui/material/Select";
 import Typography from "@mui/material/Typography";
-import ActionScriptDetails from "./ActionScriptDetails";
 import LoadStatusNotice from "./LoadStatusNotice";
 import ScriptModelPicker, { type ScriptModelPickerProps } from "./ScriptModelPicker";
 import ScriptRunStatusIcon from "./ScriptRunStatusIcon";
+import StatusTag from "./StatusTag";
 import { type ActionScriptRecord } from "../hooks/useActionScripts";
 import { type ReturnState } from "../hooks/useReturnNavigation";
-import { type ActionPlan } from "../utils/actionPlanSteps";
-import { describeScriptModel } from "../utils/describeScriptModel";
+import { nocturneTokens } from "../theme/nocturneTheme";
+import { findScriptModelName, shortenScriptModelName } from "../utils/describeScriptModel";
+import { describeScriptRunStatusBriefly, findScriptRunStatus } from "../utils/describeScriptRunStatus";
 import { type CurrentActionText, findChangedActionFields } from "../utils/describeScriptStaleness";
+import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeTime";
 
-const HEADING_ID = "action-scripts-section-heading";
-const VERSIONS_HEADING_ID = "action-script-versions-heading";
+const HEADING_ID = "action-script-versions-heading";
+const VERSION_SELECT_LABEL_ID = "action-script-version-select-label";
 
 /** Props for `ActionScriptsSection`. */
 export interface ActionScriptsSectionProps {
@@ -33,15 +32,15 @@ export interface ActionScriptsSectionProps {
   isLoading: boolean;
   /** Why the script list could not be fetched, or null. */
   errorMessage: string | null;
-  /** The version the user picked; null (or an unknown id) shows the newest. */
+  /** The version shown (the page picks it from `?version=`), or null when there are none. */
   selectedScriptId: string | null;
-  /** Called with a script's id when the user picks it from the versions list. */
+  /** Called with a script's id when the user picks it. */
   onSelectScript: (actionScriptId: string) => void;
-  /** True while a "Convert to script" request is in flight. */
+  /** True while a "Convert to new version" request is in flight. */
   isConverting: boolean;
-  /** Why the last "Convert to script" request failed, or null. */
+  /** Why the last conversion request failed, or null. */
   convertErrorMessage: string | null;
-  /** Called when the user clicks "Convert to script". */
+  /** Called when the user clicks "Convert to new version". */
   onConvertClick: () => void;
   /** False until a model (and effort level) is chosen, i.e. while the model list loads or after it failed. */
   canConvert: boolean;
@@ -49,32 +48,29 @@ export interface ActionScriptsSectionProps {
   modelPicker: ScriptModelPickerProps;
   /** The action as it is now, to mark versions generated from older text as out of date. */
   currentAction: CurrentActionText;
-  /** Where "Compare versions" goes (see `actionScriptComparePath`). */
+  /** Where "Compare" goes (see `actionScriptComparePath`). */
   comparePath: string;
-  /** History state for the "Compare versions" link, so that page can return here. */
+  /** History state for the "Compare" link, so that page can return here. */
   compareLinkState: ReturnState;
-  /** True while an edited plan is being saved as a new version. */
-  isSavingEdit: boolean;
-  /** Why the last save of an edited plan failed, or null. */
-  saveEditErrorMessage: string | null;
-  /** Called with the version that was edited and the edited plan, to save it as a new version. */
-  onSaveEdit: (sourceScript: ActionScriptRecord, plan: ActionPlan) => void;
+  /** True for the phone layout (2c): a "Version" dropdown instead of the list. */
+  isPhoneLayout: boolean;
 }
 
 /**
- * The "Scripts" section of an action's page: the Model and Effort dropdowns
- * and the "Convert to script" button (Claude turns the action into a JSON
- * step plan with the chosen model; each conversion is saved as a new
- * version), a "Compare versions" link once there are two, the list of
- * versions to pick from - each with its run status icon (its latest run
- * passed, failed, or it has not been run yet), its model and effort, the
- * version it was refined from (with the model and effort that refined it), or
- * the version it was edited from, and an "Out of date" chip when the action's
- * title, description, or credential has changed since - and the selected version in
- * full (the newest unless the user picked another), whose steps can be
- * edited and saved as yet another version.
- * @param props - The scripts, the model choice, the request states, and the callbacks
- * @returns The rendered section
+ * The versions column of an action's page, as the mockups draw it:
+ * - desktop: "Versions" with a "Compare" link once there are two, then one
+ *   row per version - its run status icon (its latest run passed, failed, or
+ *   it has not been run), "Version N", an "Out of date" tag when the action's
+ *   title, description, or credential has changed since, and where it came
+ *   from ("Refined from v4 · Opus 5.5 · 24 min ago") - with the shown one
+ *   highlighted;
+ * - phone: a "Version" dropdown ("Version 5 · Failed · 24 min ago").
+ *
+ * Under it sit the Model and Effort dropdowns and "Convert to new version":
+ * Claude turns the action into a JSON step plan with the chosen model, saved
+ * as a new version.
+ * @param props - The scripts, the model choice, the request states, the callbacks, and the layout
+ * @returns The rendered column
  */
 export default function ActionScriptsSection(props: ActionScriptsSectionProps): ReactElement {
   const {
@@ -91,16 +87,10 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
     currentAction,
     comparePath,
     compareLinkState,
-    isSavingEdit,
-    saveEditErrorMessage,
-    onSaveEdit,
+    isPhoneLayout,
   } = props;
 
-  const selectedScriptIndex = Math.max(
-    scripts.findIndex((script) => script.id === selectedScriptId),
-    0,
-  );
-  const selectedScript = scripts.at(selectedScriptIndex) ?? null;
+  const now = new Date();
   const convertFailed = convertErrorMessage !== null;
   const scriptListLoadedWithoutError = !isLoading && errorMessage === null;
   const thereAreNoScripts = scripts.length === 0;
@@ -116,184 +106,206 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
   const versionNumberAt = (scriptIndex: number): number => scripts.length - scriptIndex;
 
   /**
-   * Finds the version number of a listed version by its id - the version
-   * another one was edited or refined from.
+   * Names the version another one came from, the short way the list does.
    * @param scriptId - The source version's id, or null when there is no source
-   * @returns Its version number, or null when there is no source or it is no longer listed
-   */
-  const versionNumberOfScriptId = (scriptId: string | null): number | null => {
-    const thereIsNoSourceVersion = scriptId === null;
-    if (thereIsNoSourceVersion) return null;
-    const sourceIndex = scripts.findIndex((listedScript) => listedScript.id === scriptId);
-    const sourceIsNoLongerListed = sourceIndex === -1;
-    return sourceIsNoLongerListed ? null : versionNumberAt(sourceIndex);
-  };
-
-  /**
-   * Names the version another one came from, for the versions list.
-   * @param scriptId - The source version's id, or null
-   * @returns "Version 2", or "an earlier version" when it is not listed
+   * @returns "v2", or "an earlier version" when it is not listed
    */
   const describeSourceVersionOf = (scriptId: string | null): string => {
-    const sourceVersionNumber = versionNumberOfScriptId(scriptId);
-    return sourceVersionNumber === null ? "an earlier version" : `Version ${String(sourceVersionNumber)}`;
+    const sourceIndex = scripts.findIndex((listedScript) => listedScript.id === scriptId);
+    const sourceIsListed = scriptId !== null && sourceIndex !== -1;
+    return sourceIsListed ? `v${String(versionNumberAt(sourceIndex))}` : "an earlier version";
   };
 
   /**
    * Describes where a listed version came from, checked in this order: the
    * version it was edited from; the version it was refined from and the
-   * model and effort that refined it; or the model and effort that
-   * generated it.
+   * model that refined it; or the model and effort that generated it - each
+   * ending with how long ago.
    * @param script - A listed version
-   * @returns e.g. "Claude Opus 5.5 (claude-opus-5-5) · high effort", "Edited from Version 2", or "Refined from Version 1 · Claude Opus 5.5 (claude-opus-5-5) · high effort"
+   * @returns e.g. "Opus 5.5 · high · 2 h ago", "Edited from v3 · 1 h ago", or "Refined from v4 · Opus 5.5 · 24 min ago"
    */
   const describeVersionSource = (script: ActionScriptRecord): string => {
+    const whenText = formatRelativeTime(script.createdAt, now);
     const versionWasEdited = script.editedFromActionScriptId !== null;
     if (versionWasEdited) {
-      return `Edited from ${describeSourceVersionOf(script.editedFromActionScriptId)}`;
+      return `Edited from ${describeSourceVersionOf(script.editedFromActionScriptId)} · ${whenText}`;
     }
     const modelText =
       script.modelId === null
         ? "unknown model"
-        : describeScriptModel(script.modelId, script.effort, modelPicker.models);
+        : shortenScriptModelName(findScriptModelName(script.modelId, modelPicker.models));
     const { refinement } = script;
     const versionWasRefined = refinement !== null;
     if (versionWasRefined) {
-      return `Refined from ${describeSourceVersionOf(refinement.sourceActionScriptId)} · ${modelText}`;
+      return `Refined from ${describeSourceVersionOf(refinement.sourceActionScriptId)} · ${modelText} · ${whenText}`;
     }
-    return modelText;
+    const effortText = script.effort === null ? "" : ` · ${script.effort}`;
+    return `${modelText}${effortText} · ${whenText}`;
   };
 
   /**
-   * Hands an edited plan to the page together with the version it was edited from.
-   * @param plan - The edited plan
+   * Tells whether a version was generated from different action text than
+   * the action has now.
+   * @param script - A listed version
+   * @returns True when it is out of date
    */
-  const handleSaveEdit = (plan: ActionPlan): void => {
-    if (selectedScript === null) return;
-    onSaveEdit(selectedScript, plan);
+  const versionIsOutOfDate = (script: ActionScriptRecord): boolean =>
+    findChangedActionFields(script, currentAction).length > 0;
+
+  /**
+   * Hands the version picked in the phone dropdown to the page.
+   * @param event - The dropdown's change event
+   */
+  const handleVersionSelectChange = (event: SelectChangeEvent): void => {
+    onSelectScript(event.target.value);
   };
 
-  return (
-    <Box component="section" aria-labelledby={HEADING_ID} sx={{ mt: 5 }}>
-      <Stack
-        direction={{ xs: "column", sm: "row" }}
-        spacing={2}
-        sx={{ justifyContent: "space-between", alignItems: { sm: "center" }, mb: 1 }}
+  const convertControls = (
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 1,
+        ...(isPhoneLayout
+          ? {}
+          : { mt: 2, pt: "14px", borderTop: `1px solid ${nocturneTokens.divider}` }),
+      }}
+    >
+      <ScriptModelPicker {...modelPicker} />
+      <Button
+        onClick={onConvertClick}
+        disabled={convertIsBlocked}
+        variant="outlined"
+        color="secondary"
+        fullWidth
+        sx={{ minHeight: isPhoneLayout ? 44 : 36 }}
       >
-        <Typography id={HEADING_ID} variant="h5" component="h2">
-          Scripts
-        </Typography>
-        {thereAreVersionsToCompare && (
-          <Button component={RouterLink} to={comparePath} state={compareLinkState} variant="outlined">
-            Compare versions
-          </Button>
-        )}
-      </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Claude turns this action into a JSON step plan that only does what a user could do with a
-        mouse and keyboard, using the crawled pages most relevant to it. Each conversion is saved
-        as a new version, and so is each edit: a saved version never changes.
-      </Typography>
-
-      <Stack
-        direction={{ xs: "column", md: "row" }}
-        spacing={2}
-        sx={{ alignItems: { md: "flex-start" }, mb: 2 }}
-      >
-        <ScriptModelPicker {...modelPicker} />
-        <Button
-          onClick={onConvertClick}
-          disabled={convertIsBlocked}
-          variant="contained"
-          sx={{ flexShrink: 0 }}
-        >
-          {isConverting ? "Converting…" : "Convert to script"}
-        </Button>
-      </Stack>
-
+        {isConverting ? "Converting…" : "Convert to new version"}
+      </Button>
       {isConverting && (
-        <>
+        <Box>
           <LinearProgress aria-label="Converting to script" />
-          <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 2 }}>
+          <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 0.5 }}>
             This can take a few minutes.
           </Typography>
-        </>
+        </Box>
       )}
+      {convertFailed && <Alert severity="error">Could not convert: {convertErrorMessage}</Alert>}
+    </Box>
+  );
 
-      {convertFailed && (
-        <Alert severity="error" sx={{ mb: 2 }}>
-          Could not convert: {convertErrorMessage}
-        </Alert>
-      )}
-
-      <LoadStatusNotice
-        isLoading={isLoading}
-        errorMessage={errorMessage}
-        loadingLabel="Loading scripts"
-      />
-
+  const emptyAndLoadingNotices = (
+    <>
+      <LoadStatusNotice isLoading={isLoading} errorMessage={errorMessage} loadingLabel="Loading scripts" />
       {scriptListLoadedWithoutError && thereAreNoScripts && (
-        <Typography color="text.secondary">No scripts yet.</Typography>
+        <Typography color="text.secondary" sx={{ fontSize: 13.5 }}>
+          No versions yet.
+        </Typography>
       )}
+    </>
+  );
 
-      {thereAreScripts && (
-        <>
-          <Typography id={VERSIONS_HEADING_ID} variant="subtitle1" component="h3" sx={{ mb: 1 }}>
-            Versions
-          </Typography>
-          <Paper variant="outlined" sx={{ maxHeight: 240, overflow: "auto", mb: 3 }}>
-            <List disablePadding aria-labelledby={VERSIONS_HEADING_ID}>
+  if (isPhoneLayout) {
+    return (
+      <Box component="section" aria-label="Versions" sx={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        {emptyAndLoadingNotices}
+        {thereAreScripts && (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <Box
+              component="label"
+              id={VERSION_SELECT_LABEL_ID}
+              sx={{ fontSize: 12, color: nocturneTokens.neutral[400] }}
+            >
+              Version
+            </Box>
+            <Select
+              labelId={VERSION_SELECT_LABEL_ID}
+              value={selectedScriptId ?? ""}
+              onChange={handleVersionSelectChange}
+              sx={{ minHeight: 44 }}
+            >
               {scripts.map((script, scriptIndex) => {
-                const scriptIsSelected = scriptIndex === selectedScriptIndex;
-                const scriptIsOutOfDate =
-                  findChangedActionFields(script, currentAction).length > 0;
-                const createdAtText = new Date(script.createdAt).toLocaleString();
-                const versionDetailsText = `${createdAtText} · ${describeVersionSource(script)}`;
+                const statusText = describeScriptRunStatusBriefly(findScriptRunStatus(script.latestRun));
+                const outOfDateText = versionIsOutOfDate(script) ? " · Out of date" : "";
                 return (
-                  <ListItemButton
-                    key={script.id}
-                    selected={scriptIsSelected}
-                    aria-current={scriptIsSelected ? "true" : undefined}
-                    onClick={() => {
-                      onSelectScript(script.id);
-                    }}
-                    divider
-                  >
-                    <ListItemIcon sx={{ minWidth: 40 }}>
-                      <ScriptRunStatusIcon latestRun={script.latestRun} />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={`Version ${String(versionNumberAt(scriptIndex))}`}
-                      secondary={versionDetailsText}
-                    />
-                    {scriptIsOutOfDate && (
-                      <Chip label="Out of date" color="warning" size="small" sx={{ ml: 1 }} />
-                    )}
-                  </ListItemButton>
+                  <MenuItem key={script.id} value={script.id}>
+                    Version {versionNumberAt(scriptIndex)} · {statusText} ·{" "}
+                    {formatRelativeTime(script.createdAt, now)}
+                    {outOfDateText}
+                  </MenuItem>
                 );
               })}
-            </List>
-          </Paper>
-        </>
+            </Select>
+          </Box>
+        )}
+        {convertControls}
+      </Box>
+    );
+  }
+
+  return (
+    <Box component="section" aria-labelledby={HEADING_ID} sx={{ minWidth: 0 }}>
+      <Box sx={{ display: "flex", alignItems: "center", mb: "10px" }}>
+        <Typography id={HEADING_ID} variant="h5" component="h2" sx={{ m: 0, mr: "auto" }}>
+          Versions
+        </Typography>
+        {thereAreVersionsToCompare && (
+          <Link component={RouterLink} to={comparePath} state={compareLinkState} underline="none" sx={{ fontSize: 12.5 }}>
+            Compare
+          </Link>
+        )}
+      </Box>
+
+      {emptyAndLoadingNotices}
+
+      {thereAreScripts && (
+        <Box component="ul" aria-labelledby={HEADING_ID} sx={{ m: 0, p: 0, display: "flex", flexDirection: "column", gap: "4px" }}>
+          {scripts.map((script, scriptIndex) => {
+            const scriptIsSelected = script.id === selectedScriptId;
+            return (
+              <Box component="li" key={script.id} sx={{ listStyle: "none" }}>
+                <ButtonBase
+                  aria-current={scriptIsSelected ? "true" : undefined}
+                  onClick={() => {
+                    onSelectScript(script.id);
+                  }}
+                  sx={{
+                    width: "100%",
+                    display: "block",
+                    textAlign: "left",
+                    fontFamily: "inherit",
+                    padding: "10px 12px",
+                    borderRadius: `${String(nocturneTokens.radius.medium)}px`,
+                    backgroundColor: scriptIsSelected ? nocturneTokens.accentRamp[900] : "transparent",
+                    boxShadow: scriptIsSelected ? `inset 0 0 0 1px ${nocturneTokens.accentRamp[700]}` : "none",
+                    "&:hover": {
+                      backgroundColor: scriptIsSelected ? nocturneTokens.accentRamp[900] : nocturneTokens.surface,
+                    },
+                  }}
+                >
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, fontSize: 14, fontWeight: 500 }}>
+                    <ScriptRunStatusIcon latestRun={script.latestRun} size={15} />{" "}
+                    Version {versionNumberAt(scriptIndex)}{" "}
+                    {versionIsOutOfDate(script) && (
+                      <Box component="span" sx={{ ml: "auto", display: "flex" }}>
+                        <StatusTag label="Out of date" tone="stale" isCompact />
+                      </Box>
+                    )}
+                  </Box>{" "}
+                  <Box
+                    title={formatFullDateTime(script.createdAt)}
+                    sx={{ fontSize: 12, color: nocturneTokens.neutral[400], mt: "3px", ml: "23px" }}
+                  >
+                    {describeVersionSource(script)}
+                  </Box>
+                </ButtonBase>
+              </Box>
+            );
+          })}
+        </Box>
       )}
 
-      {selectedScript !== null && (
-        <ActionScriptDetails
-          // Keyed by version, so picking (or saving) another version closes the editor.
-          key={selectedScript.id}
-          script={selectedScript}
-          versionNumber={versionNumberAt(selectedScriptIndex)}
-          editedFromVersionNumber={versionNumberOfScriptId(selectedScript.editedFromActionScriptId)}
-          refinedFromVersionNumber={versionNumberOfScriptId(
-            selectedScript.refinement?.sourceActionScriptId ?? null,
-          )}
-          currentAction={currentAction}
-          catalogModels={modelPicker.models}
-          isSavingEdit={isSavingEdit}
-          saveEditErrorMessage={saveEditErrorMessage}
-          onSaveEdit={handleSaveEdit}
-        />
-      )}
+      {convertControls}
     </Box>
   );
 }

@@ -1,4 +1,5 @@
-import { type JsonResourceState, useJsonResource } from "./useJsonResource";
+import { CRAWL_RUN_POLL_INTERVAL_MS } from "./useCrawlRunProgress";
+import { type PolledJsonResourceState, usePolledJsonResource } from "./usePolledJsonResource";
 import { crawlRunsApiUrl } from "../utils/routePaths";
 
 /** Every value a crawl run's `status` can hold. */
@@ -68,18 +69,35 @@ export interface CrawlRunRecord {
 }
 
 /**
+ * Tells the polling hook whether to fetch the list again: only while one of
+ * the website's crawls is still running.
+ * @param data - The latest response body
+ * @returns True while a listed run's status is "running"
+ */
+function aListedCrawlIsRunning(data: unknown): boolean {
+  // The API is the contract for this shape, as in the typed resource hooks.
+  return (data as CrawlRunRecord[]).some((run) => run.status === "running");
+}
+
+/**
  * Fetches a website's crawl runs (`GET /api/websites/:websiteId/crawl-runs`),
- * newest first.
+ * newest first, and - while one of them is running - fetches the list again
+ * every `CRAWL_RUN_POLL_INTERVAL_MS`, so the website page's "Crawl running"
+ * card counts pages live and the run moves into the history once it ends.
  *
- * A plain fetch, with no "add the POSTed run" helper like the screenshot runs
- * have: starting a crawl navigates to the new run's own page, and coming back
+ * There is no "add the POSTed run" helper like the screenshot runs have:
+ * starting a crawl navigates to the new run's own page, and coming back
  * remounts the website page, which fetches the list again.
  * @param websiteId - The website's cuid
- * @returns The loading / error / data state of the crawl run list
+ * @returns The loading / error / data state of the crawl run list, plus `pollErrorMessage`
  */
-export function useCrawlRuns(websiteId: string): JsonResourceState<CrawlRunRecord[]> {
-  const crawlRunsResource = useJsonResource(crawlRunsApiUrl(websiteId));
+export function useCrawlRuns(websiteId: string): PolledJsonResourceState<CrawlRunRecord[]> {
+  const crawlRunsResource = usePolledJsonResource(
+    crawlRunsApiUrl(websiteId),
+    aListedCrawlIsRunning,
+    CRAWL_RUN_POLL_INTERVAL_MS,
+  );
   // The API is the contract for this shape; see useJsonResource for why the
   // generic hook returns unknown.
-  return crawlRunsResource as JsonResourceState<CrawlRunRecord[]>;
+  return crawlRunsResource as PolledJsonResourceState<CrawlRunRecord[]>;
 }

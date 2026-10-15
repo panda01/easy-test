@@ -34,7 +34,8 @@ const NEW_WEBSITE_VALUES: WebsiteRequestBody = {
  * On save it REPLACES its own history entry with the new website's detail
  * page, so Back from there goes to the list rather than to a stale form.
  * Cancel returns to the list the same history-aware way (see
- * `useReturnNavigation`).
+ * `useReturnNavigation`). Its "Create website" button carries a plus, like
+ * every button that creates something.
  * @returns The rendered create-website page
  */
 export default function WebsiteCreatePage(): ReactElement {
@@ -80,6 +81,7 @@ export default function WebsiteCreatePage(): ReactElement {
       <WebsiteForm
         initialValues={NEW_WEBSITE_VALUES}
         submitLabel="Create website"
+        submitButtonShowsPlus
         isSubmitting={isSubmitting}
         errorMessage={errorMessage}
         onSubmit={handleSubmit}

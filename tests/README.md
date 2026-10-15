@@ -57,6 +57,15 @@ not run under test.
 `act(() => vi.advanceTimersByTimeAsync(ms))`, then assert synchronously:
 Testing Library's `waitFor` / `findBy` do not advance Vitest's fake timers.
 
+**Phone layouts are tested with `stubWindowWidth`.** jsdom has no
+`window.matchMedia`, so `useIsNarrowerThan` (MUI's `useMediaQuery`) reports
+the desktop layout by default. A spec that needs the phone layout calls
+`stubWindowWidth(390)` (from `frontend/support/frontendTestHelpers.tsx`),
+which installs a `matchMedia` that answers the theme's `min-width` /
+`max-width` breakpoint queries for that width, and calls the function it
+returns in `afterEach` to remove it again. The action page switches to its
+single-column layout below `lg`, so its specs also use widths such as 1000.
+
 **No unit test ever calls the Anthropic API or starts a process.**
 `scriptGenerationService.test.ts` replaces `@anthropic-ai/sdk` with a fake
 client whose `beta.messages.create` is a spy (the real prompt file is read, to

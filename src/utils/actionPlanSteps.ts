@@ -271,50 +271,70 @@ function describeFillText(value: string | null): string {
   return `"${value ?? ""}"`;
 }
 
+/** A step's sentence split the way the step list shows it: the verb (muted) and the rest. */
+export interface PlanStepParts {
+  /** What the step does, e.g. "Click", "Go to", "Check that". */
+  verb: string;
+  /** What it does it to, e.g. `button "Sign in"`. */
+  rest: string;
+}
+
 /**
- * Describes one step in a sentence, for the read-only step list.
+ * Describes one step as its verb and the rest of its sentence, for the
+ * read-only step list, which shows the verb muted.
  * @param step - A plan step
- * @returns e.g. `Type "hello" into textbox "Search"`
+ * @returns e.g. `{ verb: "Type", rest: '"hello" into textbox "Search"' }`
  */
-export function describePlanStep(step: PlanStep): string {
+export function describePlanStepParts(step: PlanStep): PlanStepParts {
   const targetText = step.target === null ? "" : describePlanTarget(step.target);
   const value = step.value ?? "";
   switch (step.action) {
     case "goto":
-      return `Go to ${value}`;
+      return { verb: "Go to", rest: value };
     case "click":
-      return `Click ${targetText}`;
+      return { verb: "Click", rest: targetText };
     case "doubleClick":
-      return `Double-click ${targetText}`;
+      return { verb: "Double-click", rest: targetText };
     case "hover":
-      return `Hover over ${targetText}`;
+      return { verb: "Hover over", rest: targetText };
     case "fill":
-      return `Type ${describeFillText(step.value)} into ${targetText}`;
+      return { verb: "Type", rest: `${describeFillText(step.value)} into ${targetText}` };
     case "press":
-      return step.target === null ? `Press ${value}` : `Press ${value} in ${targetText}`;
+      return { verb: "Press", rest: step.target === null ? value : `${value} in ${targetText}` };
     case "check":
-      return `Check ${targetText}`;
+      return { verb: "Check", rest: targetText };
     case "uncheck":
-      return `Uncheck ${targetText}`;
+      return { verb: "Uncheck", rest: targetText };
     case "selectOption":
-      return `Select "${value}" in ${targetText}`;
+      return { verb: "Select", rest: `"${value}" in ${targetText}` };
     case "scrollIntoView":
-      return `Scroll to ${targetText}`;
+      return { verb: "Scroll to", rest: targetText };
     case "scroll":
-      return `Scroll by ${value} pixels`;
+      return { verb: "Scroll by", rest: `${value} pixels` };
     case "uploadFile":
-      return `Upload "${value}" with ${targetText}`;
+      return { verb: "Upload", rest: `"${value}" with ${targetText}` };
     case "respondToNextDialog":
-      return `Answer the next browser dialog with "${value}"`;
+      return { verb: "Answer", rest: `the next browser dialog with "${value}"` };
     case "waitForUrl":
-      return `Wait for the address ${value}`;
+      return { verb: "Wait for", rest: `the address ${value}` };
     case "expectVisible":
-      return `Check that ${targetText} is visible`;
+      return { verb: "Check that", rest: `${targetText} is visible` };
     case "expectHidden":
-      return `Check that ${targetText} is hidden`;
+      return { verb: "Check that", rest: `${targetText} is hidden` };
     case "log":
-      return `Note: ${value}`;
+      return { verb: "Note:", rest: value };
   }
+}
+
+/**
+ * Describes one step in a sentence: its verb and the rest, joined
+ * (see `describePlanStepParts`).
+ * @param step - A plan step
+ * @returns e.g. `Type "hello" into textbox "Search"`
+ */
+export function describePlanStep(step: PlanStep): string {
+  const { verb, rest } = describePlanStepParts(step);
+  return `${verb} ${rest}`;
 }
 
 /**

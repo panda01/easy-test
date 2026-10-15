@@ -5,6 +5,7 @@ import Button from "@mui/material/Button";
 import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
+import { AddIcon } from "./icons";
 import { type WebsiteItemRequestBody } from "../hooks/useWebsiteItems";
 
 /** The "Log in as" choice for running logged out (no credential). */
@@ -24,6 +25,12 @@ export interface TitleDescriptionFormProps {
   initialValues: WebsiteItemRequestBody;
   /** The submit button's text, e.g. "Create use case". */
   submitLabel: string;
+  /**
+   * True to put a plus before the submit button's text, as every button that
+   * creates something has (the create pages); false or omitted for an edit
+   * page's "Save changes".
+   */
+  submitButtonShowsPlus?: boolean;
   /** True while the save request is in flight; disables submit. */
   isSubmitting: boolean;
   /** Why the last save failed (shown above the buttons), or null. */
@@ -51,13 +58,17 @@ export interface TitleDescriptionFormProps {
  *
  * Field state is seeded from `initialValues` once, on mount - see
  * `WebsiteForm` for why the edit pages mount it keyed by the record's id.
- * @param props - Initial values, labels, request state, and callbacks
+ *
+ * On the create pages the submit button carries a plus
+ * (`submitButtonShowsPlus`), like every button that creates something.
+ * @param props - Initial values, labels (and whether submit shows a plus), request state, and callbacks
  * @returns The title / description form
  */
 export default function TitleDescriptionForm(props: TitleDescriptionFormProps): ReactElement {
   const {
     initialValues,
     submitLabel,
+    submitButtonShowsPlus = false,
     isSubmitting,
     errorMessage,
     onSubmit,
@@ -164,7 +175,12 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
         )}
         {saveFailed && <Alert severity="error">{errorMessage}</Alert>}
         <Stack direction="row" spacing={1}>
-          <Button type="submit" variant="contained" disabled={submitIsBlocked}>
+          <Button
+            type="submit"
+            variant="contained"
+            disabled={submitIsBlocked}
+            startIcon={submitButtonShowsPlus ? <AddIcon /> : undefined}
+          >
             {submitLabel}
           </Button>
           <Button onClick={onCancel}>Cancel</Button>

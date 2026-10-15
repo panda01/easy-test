@@ -4,6 +4,8 @@ import { userEvent } from "@testing-library/user-event";
 import { type ReactElement } from "react";
 import { Route, useLocation, useNavigationType } from "react-router-dom";
 import CrawlRunPage from "../../src/pages/CrawlRunPage";
+import { nocturneTokens, statusColors } from "../../src/theme/nocturneTheme";
+import { formatDayAndTime } from "../../src/utils/formatRelativeTime";
 import {
   buildCrawledPageRecord,
   buildCrawledPageSummaryRecord,
@@ -15,6 +17,7 @@ import {
   readBreadcrumbTrail,
   renderPageRoutes,
   stubFetchRoutes,
+  stubWindowWidth,
   type FetchStub,
   type StubbedRouteTable,
 } from "./support/frontendTestHelpers";
@@ -112,6 +115,17 @@ function stubFinishedRun(extraRoutes: StubbedRouteTable = {}): FetchStub {
   });
 }
 
+/**
+ * Finds the tag that says who the crawl viewed the site as, by its text.
+ * @param tagText - The tag's text, e.g. "Logged out"
+ * @returns The tag's chip element
+ */
+function getLoginTag(tagText: string): HTMLElement {
+  const tag = screen.getByText(tagText).closest(".MuiChip-root");
+  if (!(tag instanceof HTMLElement)) throw new Error(`No login tag reads "${tagText}"`);
+  return tag;
+}
+
 describe("CrawlRunPage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -144,45 +158,33 @@ describe("CrawlRunPage", () => {
 
     renderCrawlRunPage();
 
-    expect(await screen.findByRole("heading", { level: 1, name: "Site crawl" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Crawl" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Finished · 2 pages · 6.4 s");
-    const startedAtText = new Date(finishedRun.createdAt).toLocaleString();
-    expect(screen.getByText(`Started ${startedAtText} at https://example.com/`)).toBeInTheDocument();
     expect(await screen.findByText("Example")).toBeInTheDocument();
     expect(readBreadcrumbTrail()).toEqual([
-      { label: "Websites", href: "/websites" },
+      { label: "Websites", href: "/" },
       { label: "Example", href: "/websites/website-1" },
-      { label: `Crawl ${startedAtText}`, href: null },
+      { label: `Crawl · ${formatDayAndTime(finishedRun.createdAt, new Date())}`, href: null },
     ]);
     const siteMap = screen.getByRole("list", { name: "Site map" });
     expect(within(siteMap).getAllByRole("button")).toHaveLength(2);
-    expect(within(siteMap).getByRole("button", { name: /^\/ Succeeded/ })).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
+    expect(within(siteMap).getByRole("button", { name: "/" })).toHaveAttribute("aria-current", "true");
     expect(await screen.findByLabelText("Aria snapshot")).toHaveTextContent(
       '- heading "Home" [level=1]',
     );
-    expect(screen.queryByRole("progressbar", { name: "Crawling" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar", { name: "Pages crawled" })).not.toBeInTheDocument();
     expect(countRequests(fetchStub, "GET", ABOUT_PAGE_API_URL)).toBe(0);
   });
 
-  it("adds which buttons the crawl clicked to its Started line, unless it only followed links", async () => {
-    stubFinishedRun({
-      [`GET ${RUN_API_URL}`]: {
-        status: 200,
-        body: buildCrawlRunWithPagesRecord({ ...finishedRun, buttonMode: "allButRisky" }),
-      },
-    });
+  it("colors the ended crawl's dot by how it ended", async () => {
+    stubFinishedRun();
 
     renderCrawlRunPage();
 
-    const startedAtText = new Date(finishedRun.createdAt).toLocaleString();
-    expect(
-      await screen.findByText(
-        `Started ${startedAtText} at https://example.com/ · clicked buttons except risky ones`,
-      ),
-    ).toBeInTheDocument();
+    const status = await screen.findByRole("status");
+    expect(status.querySelector('[aria-hidden="true"]')).toHaveStyle({
+      backgroundColor: statusColors.passed,
+    });
   });
 
   it("shows a page found by a button with that button, and lists the pages its buttons led to", async () => {
@@ -228,17 +230,17 @@ describe("CrawlRunPage", () => {
     renderCrawlRunPage(`${RUN_PATH}?page=sessions`);
 
     const siteMap = await screen.findByRole("list", { name: "Site map" });
-    expect(
-      within(siteMap).getByRole("button", { name: /^\/sessions\/yoga/ }),
-    ).toHaveTextContent("Succeeded · HTTP 200 · Yoga · via “Open Yoga”");
-    const buttonTargets = await screen.findByRole("list", { name: "Pages its buttons led to" });
-    await user.click(within(buttonTargets).getByRole("button", { name: "/sessions/yoga" }));
+    expect(within(siteMap).getByRole("button", { name: /^\/sessions\/yoga/ })).toHaveTextContent(
+      "/sessions/yogavia “Open Yoga”",
+    );
+    const buttonsCard = await screen.findByRole("region", { name: "Buttons led to · 1" });
+    await user.click(within(buttonsCard).getByRole("button", { name: "“Open Yoga” → /sessions/yoga" }));
 
     expect(await screen.findByLabelText("Aria snapshot")).toHaveTextContent(
       '- heading "Yoga" [level=1]',
     );
     expect(screen.getByRole("region", { name: "/sessions/yoga" })).toHaveTextContent(
-      "Found on: /sessions, by clicking “Open Yoga”",
+      "Found on /sessions via “Open Yoga”",
     );
     expect(screen.getByTestId("probe-search").textContent).toBe("?page=yoga");
   });
@@ -249,15 +251,12 @@ describe("CrawlRunPage", () => {
     renderCrawlRunPage();
     const siteMap = await screen.findByRole("list", { name: "Site map" });
 
-    await user.click(within(siteMap).getByRole("button", { name: /^\/about/ }));
+    await user.click(within(siteMap).getByRole("button", { name: "/about" }));
 
     expect(await screen.findByLabelText("Aria snapshot")).toHaveTextContent(
       '- heading "About" [level=1]',
     );
-    expect(within(siteMap).getByRole("button", { name: /^\/about/ })).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
+    expect(within(siteMap).getByRole("button", { name: "/about" })).toHaveAttribute("aria-current", "true");
     expect(screen.getByTestId("probe-search").textContent).toBe("?page=about");
     expect(screen.getByTestId("probe-navigation-type").textContent).toBe("REPLACE");
     expect(countRequests(fetchStub, "GET", ABOUT_PAGE_API_URL)).toBe(1);
@@ -267,9 +266,9 @@ describe("CrawlRunPage", () => {
     const user = userEvent.setup();
     stubFinishedRun();
     renderCrawlRunPage();
-    const links = await screen.findByRole("list", { name: "Links on this page" });
+    const linksCard = await screen.findByRole("region", { name: "Links · 1" });
 
-    await user.click(within(links).getByRole("button", { name: "/about" }));
+    await user.click(within(linksCard).getByRole("button", { name: "/about" }));
 
     expect(await screen.findByLabelText("Aria snapshot")).toHaveTextContent(
       '- heading "About" [level=1]',
@@ -296,7 +295,7 @@ describe("CrawlRunPage", () => {
     );
   });
 
-  it("shows a failed crawl's reason", async () => {
+  it("shows a failed crawl's reason, with a red dot", async () => {
     stubFinishedRun({
       [`GET ${RUN_API_URL}`]: {
         status: 200,
@@ -315,6 +314,9 @@ describe("CrawlRunPage", () => {
     const status = await screen.findByRole("status");
     expect(status).toHaveTextContent("Failed · 0 pages · 0.1 s");
     expect(status).toHaveTextContent("browserType.launch: Executable doesn't exist");
+    expect(status.querySelector('[aria-hidden="true"]')).toHaveStyle({
+      backgroundColor: statusColors.failed,
+    });
     expect(screen.getByText("No pages yet.")).toBeInTheDocument();
   });
 
@@ -338,7 +340,7 @@ describe("CrawlRunPage", () => {
     );
   });
 
-  it("labels redirected pages with where they landed, and lets a link to a requested URL select the page it led to", async () => {
+  it("labels redirects in the site map and the details, and lets a link to a requested URL select the page it led to", async () => {
     const user = userEvent.setup();
     const calendarPage = buildCrawledPageSummaryRecord({
       id: "calendar",
@@ -375,35 +377,35 @@ describe("CrawlRunPage", () => {
     renderCrawlRunPage(`${RUN_PATH}?page=old-account`);
 
     const siteMap = await screen.findByRole("list", { name: "Site map" });
-    expect(within(siteMap).getByRole("button", { name: /^\/calendar \(from \/\)/ })).toBeInTheDocument();
-    expect(within(siteMap).getByRole("button", { name: /^\/old-account → \/calendar/ })).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
-    expect(screen.getByRole("heading", { level: 2, name: "/old-account → /calendar" })).toBeInTheDocument();
+    expect(within(siteMap).getByRole("button", { name: /^\/calendar/ })).toHaveTextContent("/calendarfrom /");
+    const oldAccountRow = within(siteMap).getByRole("button", { name: /^\/old-account/ });
+    expect(oldAccountRow).toHaveTextContent("/old-account→ /calendar");
+    expect(oldAccountRow).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("heading", { level: 2, name: "/old-account" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "/old-account" })).toHaveTextContent("Redirected to /calendar");
 
     // "/" was only ever requested: the page it led to is recorded as /calendar.
-    const links = await screen.findByRole("list", { name: "Links on this page" });
-    await user.click(within(links).getByRole("button", { name: "/" }));
+    const linksCard = await screen.findByRole("region", { name: "Links · 1" });
+    await user.click(within(linksCard).getByRole("button", { name: "/" }));
 
-    expect(
-      await screen.findByRole("heading", { level: 2, name: "/calendar (from /)" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 2, name: "/calendar" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "/calendar" })).toHaveTextContent("Redirected from /");
     expect(screen.getByTestId("probe-search").textContent).toBe("?page=calendar");
   });
 
-  it("notes that a crawl without a credential was crawled logged out, with no login screenshot", async () => {
+  it("tags a crawl without a credential as logged out, with no login screenshot", async () => {
     stubFinishedRun();
 
     renderCrawlRunPage();
 
-    expect(await screen.findByRole("note")).toHaveTextContent("Crawled logged out (no credential)");
+    await screen.findByRole("heading", { level: 1, name: "Crawl" });
+    expect(getLoginTag("Logged out")).toHaveStyle({ backgroundColor: nocturneTokens.neutral[800] });
     expect(
       screen.queryByRole("region", { name: "Login failure screenshot" }),
     ).not.toBeInTheDocument();
   });
 
-  it("notes which credential a logged-in crawl viewed every page as", async () => {
+  it("tags which credential a logged-in crawl viewed every page as, in green", async () => {
     stubFinishedRun({
       [`GET ${RUN_API_URL}`]: {
         status: 200,
@@ -418,12 +420,13 @@ describe("CrawlRunPage", () => {
 
     renderCrawlRunPage();
 
-    const loginNote = await screen.findByRole("note");
-    expect(loginNote).toHaveTextContent('Logged in as "Admin"');
-    expect(loginNote).toHaveClass("MuiAlert-colorSuccess");
+    await screen.findByRole("heading", { level: 1, name: "Crawl" });
+    expect(getLoginTag("Logged in as “Admin”")).toHaveStyle({
+      backgroundColor: statusColors.loggedInTagBackground,
+    });
   });
 
-  it("shows a failed login's reason, an error note, and the screenshot of what the browser showed", async () => {
+  it("shows a failed login's reason, a red tag, and the screenshot of what the browser showed", async () => {
     stubFinishedRun({
       [`GET ${RUN_API_URL}`]: {
         status: 200,
@@ -444,11 +447,10 @@ describe("CrawlRunPage", () => {
 
     renderCrawlRunPage();
 
-    const loginNote = await screen.findByRole("note");
-    expect(loginNote).toHaveTextContent(
-      'Not logged in - the login as "Wrong password" did not succeed',
-    );
-    expect(loginNote).toHaveClass("MuiAlert-colorError");
+    await screen.findByRole("heading", { level: 1, name: "Crawl" });
+    expect(getLoginTag("Not logged in — login as “Wrong password” failed")).toHaveStyle({
+      backgroundColor: statusColors.failedBannerBackground,
+    });
     expect(screen.getByRole("status")).toHaveTextContent(
       'Login as "Wrong password" failed: Still on the login form after submitting',
     );
@@ -463,12 +465,22 @@ describe("CrawlRunPage", () => {
 });
 
 describe("CrawlRunPage while the crawl runs", () => {
+  /** When the running crawl started. */
+  const CRAWL_STARTED_AT = "2026-03-04T05:06:07.000Z";
+  /** "Now" at the first render: 2 minutes 14 seconds into the crawl. */
+  const TWO_MINUTES_FOURTEEN_IN = new Date(Date.parse(CRAWL_STARTED_AT) + (2 * 60 + 14) * 1000);
+
+  let removeWidthStub: (() => void) | null = null;
+
   beforeEach(() => {
     vi.restoreAllMocks();
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    vi.setSystemTime(TWO_MINUTES_FOURTEEN_IN);
   });
 
   afterEach(() => {
+    removeWidthStub?.();
+    removeWidthStub = null;
     vi.useRealTimers();
   });
 
@@ -483,15 +495,18 @@ describe("CrawlRunPage while the crawl runs", () => {
     });
   }
 
+  /** The run as the first poll finds it: one page visited, one link waiting. */
+  const runningRun = buildCrawlRunWithPagesRecord({
+    status: "running",
+    visitedPageCount: 1,
+    waitingUrlCount: 1,
+    durationMs: null,
+    finishedAt: null,
+    createdAt: CRAWL_STARTED_AT,
+    pages: [homePage],
+  });
+
   it("shows live progress, grows the site map as pages arrive, and stops polling when the crawl ends", async () => {
-    const runningRun = buildCrawlRunWithPagesRecord({
-      status: "running",
-      visitedPageCount: 1,
-      waitingUrlCount: 1,
-      durationMs: null,
-      finishedAt: null,
-      pages: [homePage],
-    });
     let runRequestCount = 0;
     const fetchStub = stubFinishedRun({
       [`GET ${RUN_API_URL}`]: () => {
@@ -505,27 +520,29 @@ describe("CrawlRunPage while the crawl runs", () => {
     await advanceClock(0);
 
     const status = screen.getByRole("status");
-    expect(status).toHaveTextContent("Running · 1 page so far");
-    expect(status).toHaveTextContent("Visited 1 of up to 50 pages · 1 link waiting");
-    expect(within(status).getByRole("progressbar", { name: "Crawling" })).toBeInTheDocument();
+    expect(status).toHaveTextContent("Running");
+    expect(status).toHaveTextContent("1 of up to 50 pages · 1 waiting");
+    expect(status).toHaveTextContent("2:14 of 10:00 max");
+    expect(status).toHaveTextContent("Updated just now");
+    expect(within(status).getByRole("progressbar", { name: "Pages crawled" })).toHaveAttribute(
+      "aria-valuenow",
+      "2",
+    );
     expect(within(screen.getByRole("list", { name: "Site map" })).getAllByRole("button")).toHaveLength(1);
 
-    await advanceClock(2000);
+    await advanceClock(1000);
+    expect(screen.getByRole("status")).toHaveTextContent("2:15 of 10:00 max");
+
+    await advanceClock(1000);
 
     expect(screen.getByRole("status")).toHaveTextContent("Finished · 2 pages · 6.4 s");
     expect(within(screen.getByRole("list", { name: "Site map" })).getAllByRole("button")).toHaveLength(2);
-    expect(screen.queryByRole("progressbar", { name: "Crawling" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar", { name: "Pages crawled" })).not.toBeInTheDocument();
     await advanceClock(10_000);
     expect(countRequests(fetchStub, "GET", RUN_API_URL)).toBe(2);
   });
 
   it("keeps showing the last progress, with a warning, while the server cannot be reached", async () => {
-    const runningRun = buildCrawlRunWithPagesRecord({
-      status: "running",
-      visitedPageCount: 1,
-      durationMs: null,
-      pages: [homePage],
-    });
     let runRequestCount = 0;
     stubFinishedRun({
       [`GET ${RUN_API_URL}`]: () => {
@@ -543,9 +560,48 @@ describe("CrawlRunPage while the crawl runs", () => {
     await advanceClock(0);
     await advanceClock(2000);
 
-    expect(screen.getByRole("status")).toHaveTextContent("Running · 1 page so far");
+    expect(screen.getByRole("status")).toHaveTextContent("1 of up to 50 pages · 1 waiting");
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Could not refresh the crawl (Bad gateway); still trying.",
     );
+  });
+
+  it("tags a crawl still logging in with its credential", async () => {
+    stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: {
+        status: 200,
+        body: buildCrawlRunWithPagesRecord({
+          ...runningRun,
+          credentialId: "credential-1",
+          credential: { id: "credential-1", name: "Admin" },
+          pages: [],
+        }),
+      },
+    });
+
+    renderCrawlRunPage();
+    await advanceClock(0);
+
+    expect(getLoginTag("Logging in as “Admin”…")).toHaveStyle({ backgroundColor: nocturneTokens.neutral[800] });
+  });
+
+  it("shows a progress card, the site map, and the selected page below it on a phone", async () => {
+    removeWidthStub = stubWindowWidth(390);
+    stubFinishedRun({ [`GET ${RUN_API_URL}`]: { status: 200, body: runningRun } });
+
+    renderCrawlRunPage();
+    await advanceClock(0);
+
+    const progressCard = screen.getByRole("status");
+    expect(progressCard).toHaveTextContent("Running");
+    expect(progressCard).toHaveTextContent("2:14");
+    expect(progressCard).toHaveTextContent("1 of up to 50 pages · 1 waiting");
+    expect(progressCard).not.toHaveTextContent("of 10:00 max");
+    const siteMapRows = within(screen.getByRole("list", { name: "Site map" })).getAllByRole("button");
+    expect(siteMapRows[0]).toHaveStyle({ minHeight: "44px" });
+    expect(screen.getByRole("region", { name: "/" })).toBeInTheDocument();
+    const backLink = within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link");
+    expect(backLink).toHaveTextContent("Example");
+    expect(backLink).toHaveAttribute("href", "/websites/website-1");
   });
 });

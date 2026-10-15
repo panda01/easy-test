@@ -5,11 +5,11 @@ Route registrars. One file per API section.
 | File | Routes |
 |---|---|
 | `health.ts` | `GET /api/health` |
-| `websites.ts` | `GET`/`POST /api/websites`, `GET`/`PUT`/`DELETE /api/websites/:websiteId` |
+| `websites.ts` | `GET`/`POST /api/websites`, `GET`/`PUT`/`DELETE /api/websites/:websiteId`. The list answers each website with the dashboard's `summary: { actionCount, passedActionCount, failedActionCount, notRunActionCount, latestRunAt, latestCrawlRun }` |
 | `useCases.ts` | `GET`/`POST /api/websites/:websiteId/use-cases`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/use-cases/:useCaseId` |
-| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId }`; the credential must be one of the website's). The list answers each action with `newestScript: { id, latestRun }` (or null when it has no versions) for its run status icon |
+| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId }`; the credential must be one of the website's). The list answers each action with `newestScript: { id, versionNumber, actionTitle, actionDescription, credentialId, latestRun }` (or null when it has no versions) for its status, version, and "Out of date" tag |
 | `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
-| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, createdAt }` of its newest run, or null) |
+| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run, or null) |
 | `scriptModels.ts` | `GET /api/script-models` |
 | `crawlRuns.ts` | `GET`/`POST /api/websites/:websiteId/crawl-runs`, `GET .../crawl-runs/:crawlRunId`, `GET .../crawl-runs/:crawlRunId/pages/:crawledPageId`, `GET .../crawl-runs/:crawlRunId/login-failure-screenshot` |
 | `credentials.ts` | `GET`/`POST /api/websites/:websiteId/credentials`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/credentials/:credentialId` |

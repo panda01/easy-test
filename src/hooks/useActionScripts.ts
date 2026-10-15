@@ -4,14 +4,19 @@ import { type ActionPlan } from "../utils/actionPlanSteps";
 import { actionScriptsApiUrl } from "../utils/routePaths";
 
 /**
- * A version's newest run, cut down to what its pass / fail / not run status
- * needs. The API reads it from the run's own row.
+ * A version's newest run, cut down to what its status line needs: whether it
+ * passed and, when it failed, at which step or by timing out. The API reads
+ * it from the run's own row.
  */
 export interface LatestActionScriptRunRecord {
   /** The run's cuid. */
   id: string;
   /** True when the run passed. */
   succeeded: boolean;
+  /** The 1-based step the run stopped at, or null when it passed or stopped before the first step. */
+  failedStepNumber: number | null;
+  /** True when the run hit the time limit and was stopped. */
+  timedOut: boolean;
   /** When the run was recorded. */
   createdAt: string;
 }
@@ -154,9 +159,15 @@ export function useActionScripts(websiteId: string, actionId: string): ActionScr
     useState<ReadonlyMap<string, LatestActionScriptRunRecord>>(() => new Map());
 
   const recordFinishedRun = useCallback((finishedRun: FinishedActionScriptRun): void => {
-    const { actionScriptId, id, succeeded, createdAt } = finishedRun;
+    const { actionScriptId, id, succeeded, failedStepNumber, timedOut, createdAt } = finishedRun;
     setLatestRunRecordedThisVisitByScriptId((previousLatestRuns) =>
-      new Map(previousLatestRuns).set(actionScriptId, { id, succeeded, createdAt }),
+      new Map(previousLatestRuns).set(actionScriptId, {
+        id,
+        succeeded,
+        failedStepNumber,
+        timedOut,
+        createdAt,
+      }),
     );
   }, []);
 

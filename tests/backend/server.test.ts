@@ -14,7 +14,7 @@ const mockDbService = vi.hoisted(() => ({
   isUniqueConstraintViolation: vi.fn(),
   isRecordNotFound: vi.fn(),
   createWebsite: vi.fn(),
-  listWebsites: vi.fn(),
+  listWebsitesWithSummaries: vi.fn(),
   findWebsiteByUrl: vi.fn(),
   findWebsiteById: vi.fn(),
   updateWebsite: vi.fn(),
@@ -177,13 +177,13 @@ describe("server.ts", () => {
   });
 
   it("wires the website routes into the full app", async () => {
-    mockDbService.listWebsites.mockResolvedValue([sampleWebsite]);
+    mockDbService.listWebsitesWithSummaries.mockResolvedValue([sampleWebsite]);
 
     const res = await request(app).get("/api/websites");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual([sampleWebsite]);
-    expect(mockDbService.listWebsites).toHaveBeenCalledTimes(1);
+    expect(mockDbService.listWebsitesWithSummaries).toHaveBeenCalledTimes(1);
   });
 
   it("wires the use case routes into the full app", async () => {

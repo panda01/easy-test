@@ -49,16 +49,3 @@ export function findChangedActionFields(
   }
   return changedFields;
 }
-
-/**
- * Names the changed fields for running text: "title", "title and
- * description", or "title, description and credential".
- * @param changedFields - The fields that changed, as `findChangedActionFields` returns them
- * @returns The fields joined with commas and a final "and"
- */
-export function describeChangedActionFields(changedFields: ActionTextField[]): string {
-  const fieldsBeforeTheLast = changedFields.slice(0, -1);
-  const lastField = changedFields.at(-1) ?? "";
-  const thereIsOnlyOneField = fieldsBeforeTheLast.length === 0;
-  return thereIsOnlyOneField ? lastField : `${fieldsBeforeTheLast.join(", ")} and ${lastField}`;
-}

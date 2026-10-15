@@ -135,7 +135,7 @@ describe("CredentialEditPage", () => {
     expect(await findField("Password field selector")).toHaveValue("");
     expect(await findField("Submit button selector")).toHaveValue("button.sign-in");
     expect(readBreadcrumbTrail()).toEqual([
-      { label: "Websites", href: "/websites" },
+      { label: "Websites", href: "/" },
       { label: "Example", href: DETAIL_PATH },
       { label: "Admin", href: null },
       { label: "Edit", href: null },

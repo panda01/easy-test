@@ -2,19 +2,14 @@ import { type ReactElement } from "react";
 import { Link as RouterLink } from "react-router-dom";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import List from "@mui/material/List";
-import ListItemButton from "@mui/material/ListItemButton";
-import ListItemText from "@mui/material/ListItemText";
-import Paper from "@mui/material/Paper";
-import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
+import { AddIcon } from "./icons";
 import LoadStatusNotice from "./LoadStatusNotice";
 import { type CredentialRecord } from "../hooks/useCredentials";
 import { type JsonResourceState } from "../hooks/useJsonResource";
 import { type ReturnState } from "../hooks/useReturnNavigation";
+import { nocturneTokens } from "../theme/nocturneTheme";
 import { credentialEditPath, newCredentialPath } from "../utils/routePaths";
-
-const HEADING_ID = "credentials-section-heading";
 
 /** Props for `CredentialsSection`. */
 export interface CredentialsSectionProps {
@@ -39,35 +34,36 @@ function describeCredentialRow(credential: CredentialRecord): string {
 }
 
 /**
- * The "Credentials" section of a website's page: a heading, a "New
- * credential" button, and the website's credentials (name, then username and
- * description), each linking to its edit page - or an empty-state line when
- * there are none. Passwords are never shown: the server never sends them.
+ * The "Credentials" tab of a website's page: a "New credential" button with
+ * a plus and the website's credentials (name, then username and description), each
+ * linking to its edit page - or an empty-state line when there are none.
+ * Passwords are never shown: the server never sends them. The tab names the
+ * section, so it has no heading of its own.
  * @param props - The owning website, the list request, and the link state
- * @returns The rendered section
+ * @returns The rendered tab content
  */
 export default function CredentialsSection(props: CredentialsSectionProps): ReactElement {
   const { websiteId, credentialsResource, returnToHereState } = props;
   const credentials = credentialsResource.data;
 
   return (
-    <Box component="section" aria-labelledby={HEADING_ID} sx={{ mt: 5 }}>
-      <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
-        <Typography id={HEADING_ID} variant="h5" component="h2">
-          Credentials
+    <Box sx={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: "12px" }}>
+        <Typography sx={{ fontSize: 12, color: nocturneTokens.neutral[400], mr: "auto" }}>
+          Logins for this website. Pick one under Crawls to crawl the site logged in.
         </Typography>
         <Button
           component={RouterLink}
           to={newCredentialPath(websiteId)}
           state={returnToHereState}
           variant="outlined"
+          color="secondary"
+          startIcon={<AddIcon />}
+          sx={{ flex: "none" }}
         >
           New credential
         </Button>
-      </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Logins for this website. Pick one under Crawls to crawl the site logged in.
-      </Typography>
+      </Box>
 
       <LoadStatusNotice
         isLoading={credentialsResource.isLoading}
@@ -76,29 +72,48 @@ export default function CredentialsSection(props: CredentialsSectionProps): Reac
       />
 
       {credentials !== null && credentials.length === 0 && (
-        <Typography color="text.secondary">No credentials yet.</Typography>
+        <Typography color="text.secondary" sx={{ fontSize: 13.5 }}>
+          No credentials yet.
+        </Typography>
       )}
 
       {credentials !== null && credentials.length > 0 && (
-        <Paper variant="outlined">
-          <List disablePadding aria-label="Credentials">
-            {credentials.map((credential) => (
-              <ListItemButton
-                key={credential.id}
+        <Box component="ul" aria-label="Credentials" sx={{ m: 0, p: 0 }}>
+          {credentials.map((credential) => (
+            <Box component="li" key={credential.id} sx={{ listStyle: "none" }}>
+              <Box
                 component={RouterLink}
                 to={credentialEditPath(websiteId, credential.id)}
                 state={returnToHereState}
-                divider
+                sx={{
+                  display: "block",
+                  py: "9px",
+                  color: "inherit",
+                  textDecoration: "none",
+                  borderBottom: `1px solid ${nocturneTokens.rowRule}`,
+                  "&:hover": { color: nocturneTokens.accentRamp[300] },
+                }}
               >
-                <ListItemText
-                  primary={credential.name}
-                  secondary={describeCredentialRow(credential)}
-                  slotProps={{ secondary: { noWrap: true } }}
-                />
-              </ListItemButton>
-            ))}
-          </List>
-        </Paper>
+                <Box component="span" sx={{ display: "block", fontSize: 13.5, fontWeight: 500 }}>
+                  {credential.name}
+                </Box>
+                <Box
+                  component="span"
+                  sx={{
+                    display: "block",
+                    fontSize: 12,
+                    color: nocturneTokens.neutral[400],
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {describeCredentialRow(credential)}
+                </Box>
+              </Box>
+            </Box>
+          ))}
+        </Box>
       )}
     </Box>
   );

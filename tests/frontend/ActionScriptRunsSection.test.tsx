@@ -26,7 +26,8 @@ const olderFailedRun = buildActionScriptRunRecord({
 });
 
 /**
- * Builds the section's props: a loaded two-run list of a logged-out action by default.
+ * Builds the panel's props: a loaded two-run list of version 2 on desktop,
+ * showing the newest run, with version 3 next.
  * @param overrides - Props to replace in the defaults
  * @returns The complete props
  */
@@ -39,22 +40,23 @@ function buildSectionProps(
     runs: [newestRun, olderRun],
     isLoading: false,
     errorMessage: null,
-    selectedRunId: null,
+    selectedRun: newestRun,
     onSelectRun: vi.fn(),
     isRunning: false,
     runErrorMessage: null,
     onRunClick: vi.fn(),
-    credentialName: null,
     versionCanBeRefined: false,
     isRefining: false,
     refineErrorMessage: null,
     onRefine: vi.fn(),
+    nextVersionNumber: 3,
+    isPhoneLayout: false,
     ...overrides,
   };
 }
 
 /**
- * Renders the section with a loaded two-run list by default.
+ * Renders the panel with a loaded two-run list by default.
  * @param overrides - Props to replace in the defaults
  * @returns The Testing Library render result
  */
@@ -62,132 +64,173 @@ function renderSection(overrides: Partial<ActionScriptRunsSectionProps> = {}): R
   return render(<ActionScriptRunsSection {...buildSectionProps(overrides)} />);
 }
 
+/**
+ * Reads the outcome title in the run's status banner.
+ * @returns The banner's outcome line, e.g. "Failed at step 2"
+ */
+function readBannerOutcome(): string {
+  const outcome = screen.getByRole("status").querySelector(".MuiAlert-message > div");
+  return outcome?.textContent ?? "";
+}
+
 describe("ActionScriptRunsSection", () => {
-  it("names the version, explains what running a logged-out action does, and shows the newest run by default", () => {
-    renderSection();
+  describe("on desktop", () => {
+    it("is the Latest run panel, showing the shown run and the version's runs", () => {
+      renderSection();
 
-    expect(screen.getByRole("heading", { name: "Runs of version 2" })).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Running opens a browser window on this computer, runs logged out, and works through the plan's steps. A run is stopped after 5 minutes.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Failed at step 2");
+      expect(screen.getByRole("region", { name: "Latest run" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Latest run" })).toBeInTheDocument();
+      expect(readBannerOutcome()).toBe("Failed at step 2");
+      expect(screen.getByRole("heading", { name: "Runs of version 2" })).toBeInTheDocument();
+      const runButtons = within(screen.getByRole("list", { name: "Runs of version 2" })).getAllByRole("button");
+      expect(runButtons.map((runButton) => runButton.textContent)).toEqual([
+        expect.stringMatching(/^Failed at step 2/),
+        expect.stringMatching(/^Passed/),
+      ]);
+      expect(runButtons[0]).toHaveAttribute("aria-current", "true");
+    });
+
+    it("is headed Run once an older run is shown, and reports picks from the run list", async () => {
+      const user = userEvent.setup();
+      const onSelectRun = vi.fn();
+      renderSection({ selectedRun: olderRun, onSelectRun });
+
+      expect(screen.getByRole("heading", { name: "Run" })).toBeInTheDocument();
+      expect(readBannerOutcome()).toBe("Passed");
+      const runButtons = within(screen.getByRole("list", { name: "Runs of version 2" })).getAllByRole("button");
+      expect(runButtons[1]).toHaveAttribute("aria-current", "true");
+
+      await user.click(runButtons[0]);
+      expect(onSelectRun).toHaveBeenCalledWith("run-2");
+    });
+
+    it("offers Run again with a play icon, and reports clicks", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      renderSection({ onRunClick });
+
+      const runButton = screen.getByRole("button", { name: "Run again" });
+      expect(within(runButton).getByTestId("PlayArrowIcon")).toBeInTheDocument();
+      await user.click(runButton);
+
+      expect(onRunClick).toHaveBeenCalledTimes(1);
+    });
+
+    it("says Run before the first run, and shows progress and a disabled Running… while running", () => {
+      const { rerender } = renderSection({ runs: [], selectedRun: null });
+      expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
+      expect(screen.getByRole("heading", { name: "Latest run" })).toBeInTheDocument();
+
+      rerender(<ActionScriptRunsSection {...buildSectionProps({ runs: [], selectedRun: null, isRunning: true })} />);
+      expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
+      expect(screen.getByRole("progressbar", { name: "Running script" })).toBeInTheDocument();
+    });
+
+    it("shows why a run could not start, and a failed run list", () => {
+      renderSection({ runs: [], selectedRun: null, runErrorMessage: "spawn ENOENT", errorMessage: "Script not found" });
+
+      const alerts = screen.getAllByRole("alert");
+      expect(alerts.map((alert) => alert.textContent)).toEqual([
+        "Could not run the script: spawn ENOENT",
+        expect.stringContaining("Script not found"),
+      ]);
+      expect(screen.queryByText("This version has not been run yet.")).not.toBeInTheDocument();
+    });
+
+    it("says when the version has not been run", () => {
+      renderSection({ runs: [], selectedRun: null });
+
+      expect(screen.getByText("This version has not been run yet.")).toBeInTheDocument();
+      expect(screen.queryByRole("list", { name: "Runs of version 2" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it("shows a spinner while the runs load", () => {
+      renderSection({ runs: [], selectedRun: null, isLoading: true });
+
+      expect(screen.getByRole("progressbar", { name: "Loading runs" })).toBeInTheDocument();
+      expect(screen.queryByText("This version has not been run yet.")).not.toBeInTheDocument();
+    });
   });
 
-  it("says a run logs in first when the action has a credential", () => {
-    renderSection({ credentialName: "Admin" });
+  describe("on a phone", () => {
+    it("is the Latest run card, with Run again beside Refine and no run list", () => {
+      renderSection({
+        isPhoneLayout: true,
+        runs: [newerFailedRun],
+        selectedRun: newerFailedRun,
+        versionCanBeRefined: true,
+      });
 
-    expect(
-      screen.getByText(
-        'Running opens a browser window on this computer, logs in as "Admin", and works through the plan\'s steps. A run is stopped after 5 minutes.',
-      ),
-    ).toBeInTheDocument();
-  });
+      expect(screen.getByRole("region", { name: "Latest run" })).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Latest run" })).not.toBeInTheDocument();
+      const runAgain = screen.getByRole("button", { name: "Run again" });
+      expect(runAgain).toHaveClass("MuiButton-colorSecondary");
+      expect(within(runAgain).queryByTestId("PlayArrowIcon")).not.toBeInTheDocument();
+      expect(runAgain.parentElement).toBe(screen.getByRole("button", { name: "Refine" }).parentElement);
+      expect(screen.queryByRole("list", { name: /^Runs of version/ })).not.toBeInTheDocument();
+    });
 
-  it("shows the selected run and reports picks from the history", async () => {
-    const user = userEvent.setup();
-    const onSelectRun = vi.fn();
-    renderSection({ selectedRunId: "run-1", onSelectRun });
+    it("offers Run on its own before the first run", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      renderSection({ isPhoneLayout: true, runs: [], selectedRun: null, onRunClick });
 
-    expect(screen.getByRole("status")).toHaveTextContent("Passed");
-    const historyButtons = within(screen.getByRole("list", { name: "Run history" })).getAllByRole("button");
-    expect(historyButtons.map((historyButton) => historyButton.textContent)).toEqual([
-      expect.stringMatching(/^Failed at step 2/),
-      expect.stringMatching(/^Passed/),
-    ]);
-    await user.click(historyButtons[0]);
-    expect(onSelectRun).toHaveBeenCalledWith("run-2");
-  });
+      expect(screen.getByText("This version has not been run yet.")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Run" }));
 
-  it("reports Run clicks, and shows progress and a disabled button while running", async () => {
-    const user = userEvent.setup();
-    const onRunClick = vi.fn();
-    const { rerender } = renderSection({ onRunClick });
-
-    await user.click(screen.getByRole("button", { name: "Run script" }));
-    expect(onRunClick).toHaveBeenCalledTimes(1);
-
-    rerender(
-      <ActionScriptRunsSection {...buildSectionProps({ runs: [], isRunning: true, onRunClick })} />,
-    );
-    expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
-    expect(screen.getByRole("progressbar", { name: "Running script" })).toBeInTheDocument();
-  });
-
-  it("shows why a run could not start, and a failed run list", () => {
-    renderSection({ runs: [], runErrorMessage: "spawn ENOENT", errorMessage: "Script not found" });
-
-    const alerts = screen.getAllByRole("alert");
-    expect(alerts.map((alert) => alert.textContent)).toEqual([
-      "Could not run the script: spawn ENOENT",
-      expect.stringContaining("Script not found"),
-    ]);
-    expect(screen.queryByText("This version has not been run yet.")).not.toBeInTheDocument();
-  });
-
-  it("says when the version has not been run", () => {
-    renderSection({ runs: [] });
-
-    expect(screen.getByText("This version has not been run yet.")).toBeInTheDocument();
-    expect(screen.queryByRole("list", { name: "Run history" })).not.toBeInTheDocument();
+      expect(onRunClick).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("refining", () => {
-    it("hands onRefine the selected failed run with the note", async () => {
+    it("hands onRefine the shown failed run with the note, refining into the next version", async () => {
       const user = userEvent.setup();
       const onRefine = vi.fn();
       renderSection({
         runs: [newerFailedRun, olderFailedRun],
-        selectedRunId: "run-3",
+        selectedRun: olderFailedRun,
         versionCanBeRefined: true,
         onRefine,
       });
 
       await user.type(screen.getByRole("textbox", { name: NOTE_FIELD_NAME }), "Log in with the email field");
-      await user.click(screen.getByRole("button", { name: "Refine" }));
+      await user.click(screen.getByRole("button", { name: "Refine into Version 3" }));
 
       expect(onRefine).toHaveBeenCalledWith(olderFailedRun, "Log in with the email field");
     });
 
     it("offers no Refine when the version cannot be refined", () => {
-      renderSection({ runs: [newerFailedRun], versionCanBeRefined: false });
+      renderSection({ runs: [newerFailedRun], selectedRun: newerFailedRun, versionCanBeRefined: false });
 
-      expect(screen.getByRole("status")).toHaveTextContent("Failed at step 3");
-      expect(screen.queryByRole("button", { name: "Refine" })).not.toBeInTheDocument();
+      expect(readBannerOutcome()).toBe("Failed at step 3");
+      expect(screen.queryByRole("button", { name: /^Refine/ })).not.toBeInTheDocument();
     });
 
     it("passes the refine progress through, and disables Refine while a run is in flight", () => {
-      const { rerender } = renderSection({
-        runs: [newerFailedRun],
-        versionCanBeRefined: true,
-        isRefining: true,
-      });
+      const refinableProps = { runs: [newerFailedRun], selectedRun: newerFailedRun, versionCanBeRefined: true };
+      const { rerender } = renderSection({ ...refinableProps, isRefining: true });
       expect(screen.getByRole("button", { name: "Refining…" })).toBeDisabled();
       expect(screen.getByRole("progressbar", { name: "Refining script" })).toBeInTheDocument();
 
-      rerender(
-        <ActionScriptRunsSection
-          {...buildSectionProps({ runs: [newerFailedRun], versionCanBeRefined: true, isRunning: true })}
-        />,
-      );
+      rerender(<ActionScriptRunsSection {...buildSectionProps({ ...refinableProps, isRunning: true })} />);
       expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "Refine" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Refine into Version 3" })).toBeDisabled();
       expect(screen.queryByRole("progressbar", { name: "Refining script" })).not.toBeInTheDocument();
     });
 
-    it("starts the note and the refine error over when another run is picked", async () => {
+    it("starts the note and the refine error over when another run is shown", async () => {
       const user = userEvent.setup();
       const onRefine = vi.fn();
       const refinableProps = { runs: [newerFailedRun, olderFailedRun], versionCanBeRefined: true, onRefine };
-      const { rerender } = renderSection({ ...refinableProps, selectedRunId: "run-4" });
+      const { rerender } = renderSection({ ...refinableProps, selectedRun: newerFailedRun });
       await user.type(screen.getByRole("textbox", { name: NOTE_FIELD_NAME }), "Try the Profile link");
-      await user.click(screen.getByRole("button", { name: "Refine" }));
+      await user.click(screen.getByRole("button", { name: "Refine into Version 3" }));
       rerender(
         <ActionScriptRunsSection
           {...buildSectionProps({
             ...refinableProps,
-            selectedRunId: "run-4",
+            selectedRun: newerFailedRun,
             refineErrorMessage: "Claude is overloaded",
           })}
         />,
@@ -198,13 +241,13 @@ describe("ActionScriptRunsSection", () => {
         <ActionScriptRunsSection
           {...buildSectionProps({
             ...refinableProps,
-            selectedRunId: "run-3",
+            selectedRun: olderFailedRun,
             refineErrorMessage: "Claude is overloaded",
           })}
         />,
       );
 
-      expect(screen.getByRole("status")).toHaveTextContent("Failed before the first step");
+      expect(readBannerOutcome()).toBe("Failed before the first step");
       expect(screen.getByRole("textbox", { name: NOTE_FIELD_NAME })).toHaveValue("");
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });

@@ -1,3 +1,5 @@
+/* Nocturne's ground and text (see src/theme/nocturneTheme.ts, which owns
+   every other style). Set here too so the page is dark before React mounts. */
 * {
     margin: 0;
     padding: 0;
@@ -5,9 +7,8 @@
 }
 
 body {
-    font-family:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0d1117;
-    color: #e6edf3;
+    font-family: "Inter", system-ui, sans-serif;
+    background: #161826;
+    color: #e9e9ed;
     min-height: 100vh;
 }

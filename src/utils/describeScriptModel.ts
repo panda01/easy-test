@@ -53,3 +53,46 @@ export function describeScriptModel(
   const modelText = listedModel === undefined ? modelId : `${listedModel.displayName} (${modelId})`;
   return `${modelText} · ${describeEffort(effort, listedModel)}`;
 }
+
+/**
+ * Names the model that wrote a script the way people read it: its display
+ * name from the live model list ("Claude Opus 5.5"), or its id when the list
+ * does not have it (still loading, failed, or retired).
+ * @param modelId - The stored model id
+ * @param catalogModels - The models the catalog lists (may be empty)
+ * @returns The display name, or the id
+ */
+export function findScriptModelName(modelId: string, catalogModels: DescribableScriptModel[]): string {
+  const listedModel = catalogModels.find((catalogModel) => catalogModel.id === modelId);
+  return listedModel === undefined ? modelId : listedModel.displayName;
+}
+
+/**
+ * Describes which model wrote a script and at what effort without the model
+ * id, for the action page's version caption, e.g. "Claude Opus 5.5 · high
+ * effort" (see `describeScriptModel` for the effort wording).
+ * @param modelId - The stored model id
+ * @param effort - The stored effort level, or null
+ * @param catalogModels - The models the catalog lists (may be empty)
+ * @returns The model name and effort text
+ */
+export function describeScriptModelBriefly(
+  modelId: string,
+  effort: string | null,
+  catalogModels: DescribableScriptModel[],
+): string {
+  const listedModel = catalogModels.find((catalogModel) => catalogModel.id === modelId);
+  return `${findScriptModelName(modelId, catalogModels)} · ${describeEffort(effort, listedModel)}`;
+}
+
+/**
+ * Shortens a model's display name for the narrow versions list by dropping
+ * the family prefix: "Claude Opus 5.5" becomes "Opus 5.5". A name without
+ * the prefix (e.g. a bare model id) is kept as it is.
+ * @param modelName - The model's display name or id
+ * @returns The short name
+ */
+export function shortenScriptModelName(modelName: string): string {
+  const familyPrefix = "Claude ";
+  return modelName.startsWith(familyPrefix) ? modelName.slice(familyPrefix.length) : modelName;
+}

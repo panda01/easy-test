@@ -157,6 +157,20 @@ describe("TitleDescriptionForm", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("puts a plus on the submit button when told to, as the create page does", () => {
+    renderTitleDescriptionForm({ submitButtonShowsPlus: true });
+
+    const submitButton = screen.getByRole("button", { name: "Create use case" });
+    expect(within(submitButton).getByTestId("AddIcon")).toBeInTheDocument();
+  });
+
+  it("leaves the plus off the submit button by default, as the edit page's Save changes has it", () => {
+    renderTitleDescriptionForm({ submitLabel: "Save changes" });
+
+    const submitButton = screen.getByRole("button", { name: "Save changes" });
+    expect(within(submitButton).queryByTestId("AddIcon")).not.toBeInTheDocument();
+  });
+
   it("asks who to log in as only when given credential options, and leaves credentialId out otherwise", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderTitleDescriptionForm({ initialValues: FILLED_VALUES });

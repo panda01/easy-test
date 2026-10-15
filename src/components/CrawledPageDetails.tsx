@@ -1,21 +1,16 @@
 import { type ReactElement, type ReactNode } from "react";
 import Box from "@mui/material/Box";
 import Link from "@mui/material/Link";
-import List from "@mui/material/List";
-import ListItem from "@mui/material/ListItem";
 import Typography from "@mui/material/Typography";
 import CodeBlock from "./CodeBlock";
 import LoadStatusNotice from "./LoadStatusNotice";
 import { type CrawledPageRecord } from "../hooks/useCrawledPage";
 import { type CrawledPageSummaryRecord } from "../hooks/useCrawlRunProgress";
 import { type JsonResourceState } from "../hooks/useJsonResource";
-import { describeCrawledPagePath, formatCrawledPagePath } from "../utils/describeCrawlRun";
-import { describeScreenshotRunOutcome, formatRunDuration } from "../utils/describeScreenshotRun";
-import { formatCount } from "../utils/formatCount";
+import { MONOSPACE_FONT_FAMILY, nocturneTokens, statusColors } from "../theme/nocturneTheme";
+import { describeRedirectFact, formatCrawledPagePath } from "../utils/describeCrawlRun";
 
 const HEADING_ID = "crawled-page-details-heading";
-const LINKS_HEADING_ID = "crawled-page-links-heading";
-const BUTTON_URLS_HEADING_ID = "crawled-page-button-urls-heading";
 
 /** Props for `CrawledPageDetails`. */
 export interface CrawledPageDetailsProps {
@@ -31,92 +26,129 @@ export interface CrawledPageDetailsProps {
   onSelectPage: (crawledPageId: string) => void;
 }
 
-/** Props for `DetailRow`. */
-interface DetailRowProps {
-  /** What the row is, e.g. "Loaded". */
-  label: string;
-  /** The row's value. */
-  children: ReactNode;
-}
-
-/**
- * One "Label: value" line of the page's facts.
- * @param props - The label and the value
- * @returns The rendered line
- */
-function DetailRow(props: DetailRowProps): ReactElement {
-  const { label, children } = props;
-  return (
-    <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
-      <Box component="span" sx={{ color: "text.secondary" }}>
-        {label}:
-      </Box>{" "}
-      {children}
-    </Typography>
-  );
-}
-
-/** Props for `CrawledUrlList`. */
-interface CrawledUrlListProps {
-  /** The id of the heading that names the list. */
-  headingId: string;
+/** Props for `CrawledUrlCard`. */
+interface CrawledUrlCardProps {
+  /** The card's kicker, without the count, e.g. "Links". */
+  kicker: string;
   /** The identity URLs to list, in order. */
   urls: string[];
   /** Every visited page of the run by its identity URL, to select the visited ones. */
   visitedPagesByUrl: ReadonlyMap<string, CrawledPageSummaryRecord>;
   /** Called with a visited page's id when the user picks it. */
   onSelectPage: (crawledPageId: string) => void;
+  /** True to put the button that led to each visited page before its path (“Open Yoga” → /calendar/open-yoga). */
+  namesTheButtons: boolean;
 }
 
 /**
- * A list of same-site page URLs, each shown by its path: a page the crawl
- * visited is a button that selects it, and one it never reached (e.g. the
- * page limit) is plain text marked "(not visited)".
- * @param props - The heading id, the URLs, the run's pages by URL, and the select handler
- * @returns The rendered list
+ * One of the page's two cards - "Links · 14" or "Buttons led to · 3" - listing
+ * same-site page URLs by their path: a page the crawl visited is a button
+ * that selects it, and one it never reached (e.g. the page limit) is plain
+ * text marked "(not visited)".
+ * @param props - The kicker, the URLs, the run's pages by URL, the select handler, and whether to name the buttons
+ * @returns The rendered card
  */
-function CrawledUrlList(props: CrawledUrlListProps): ReactElement {
-  const { headingId, urls, visitedPagesByUrl, onSelectPage } = props;
+function CrawledUrlCard(props: CrawledUrlCardProps): ReactElement {
+  const { kicker, urls, visitedPagesByUrl, onSelectPage, namesTheButtons } = props;
+  const thereAreNoUrls = urls.length === 0;
+  const kickerText = `${kicker} · ${String(urls.length)}`;
+
   return (
-    <List dense disablePadding aria-labelledby={headingId}>
-      {urls.map((url) => {
-        const visitedPage = visitedPagesByUrl.get(url);
-        const urlPath = formatCrawledPagePath(url);
-        return (
-          <ListItem key={url} disableGutters sx={{ wordBreak: "break-all" }}>
-            {visitedPage === undefined ? (
-              <Typography variant="body2" color="text.secondary">
-                {urlPath} (not visited)
-              </Typography>
-            ) : (
-              <Link
-                component="button"
-                type="button"
-                variant="body2"
-                onClick={() => {
-                  onSelectPage(visitedPage.id);
-                }}
-              >
-                {urlPath}
-              </Link>
-            )}
-          </ListItem>
-        );
-      })}
-    </List>
+    <Box
+      component="section"
+      aria-label={kickerText}
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "5.6px",
+        padding: "8.4px 11px",
+        borderRadius: `${String(nocturneTokens.radius.medium)}px`,
+        backgroundColor: nocturneTokens.surface,
+        minWidth: 0,
+      }}
+    >
+      <Box
+        component="h3"
+        sx={{
+          m: 0,
+          fontSize: 10,
+          fontWeight: 400,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+          color: nocturneTokens.accent,
+        }}
+      >
+        {kickerText}
+      </Box>
+      {thereAreNoUrls ? (
+        <Typography sx={{ fontSize: 12.5, color: nocturneTokens.neutral[500] }}>None</Typography>
+      ) : (
+        <Box
+          component="ul"
+          sx={{
+            m: 0,
+            p: 0,
+            fontFamily: MONOSPACE_FONT_FAMILY,
+            fontSize: 12.5,
+            lineHeight: 1.8,
+            color: nocturneTokens.neutral[300],
+            maxHeight: 220,
+            overflow: "auto",
+          }}
+        >
+          {urls.map((url) => {
+            const visitedPage = visitedPagesByUrl.get(url);
+            const urlPath = formatCrawledPagePath(url);
+            const buttonText = visitedPage?.foundByButtonText ?? null;
+            const buttonPrefix = namesTheButtons && buttonText !== null ? `“${buttonText}” → ` : "";
+            return (
+              <Box component="li" key={url} sx={{ listStyle: "none", overflowWrap: "anywhere" }}>
+                {visitedPage === undefined ? (
+                  <Box component="span" sx={{ color: nocturneTokens.neutral[500] }}>
+                    {urlPath} (not visited)
+                  </Box>
+                ) : (
+                  <Link
+                    component="button"
+                    type="button"
+                    onClick={() => {
+                      onSelectPage(visitedPage.id);
+                    }}
+                    underline="hover"
+                    sx={{ font: "inherit", textAlign: "left", color: nocturneTokens.neutral[300] }}
+                  >
+                    {buttonPrefix}
+                    {urlPath}
+                  </Link>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+      )}
+    </Box>
   );
 }
 
 /**
- * One crawled page in full: its path - with its redirect, e.g. "/calendar
- * (from /)" (see `describeCrawledPagePath`) - and outcome ("Failed · HTTP 404 ·
- * 1.2 s") with any error, where it was loaded from and ended up, its title,
- * the page it was found on (and, when a button click led here, which button:
- * "/sessions, by clicking “Open Yoga”"), its Playwright aria snapshot, the
- * same-origin links on it, and - when its buttons led anywhere - the pages
- * its buttons led to. The parent and every visited link or button target are
- * buttons that select that page; one the crawl never reached (the page limit)
- * is plain text.
+ * Counts the lines of an aria snapshot, for "212 lines" beside its heading.
+ * @param ariaSnapshot - The snapshot text
+ * @returns The line count with its noun
+ */
+function describeSnapshotLineCount(ariaSnapshot: string): string {
+  const lineCount = ariaSnapshot.split("\n").length;
+  return lineCount === 1 ? "1 line" : `${String(lineCount)} lines`;
+}
+
+/**
+ * One crawled page in full, as the mockup's details pane draws it: its path
+ * as the heading; a row of facts - its HTTP status (green when it loaded, red
+ * when it did not), its title, its redirect ("Redirected from /"), and where
+ * it was found ("Found on /", and the button when one led here; "Start page"
+ * for the first); a failed page's error; two cards for the same-site links on
+ * it and the pages its buttons led to; and its Playwright aria snapshot. The
+ * parent and every visited link or button target are buttons that select
+ * that page; one the crawl never reached (the page limit) is plain text.
  * @param props - The page, its full record's request state, the run's pages, and the select handler
  * @returns The rendered page details
  */
@@ -124,118 +156,118 @@ export default function CrawledPageDetails(props: CrawledPageDetailsProps): Reac
   const { page, pageResource, visitedPagesByUrl, visitedPagesById, onSelectPage } = props;
   const fullPage = pageResource.data;
   const pageHasErrorMessage = page.errorMessage !== null;
-  const pageWasRedirected = page.finalUrl !== page.requestedUrl;
   const pageIsTheStartPage = page.parentPageId === null;
   const parentPage =
     page.parentPageId === null ? undefined : visitedPagesById.get(page.parentPageId);
   const { foundByButtonText } = page;
   const foundByButtonSuffix =
-    foundByButtonText === null ? "" : `, by clicking “${foundByButtonText}”`;
-  const pageHasLinks = fullPage !== null && fullPage.linkedUrls.length > 0;
-  const pageButtonsLedToPages = fullPage !== null && fullPage.buttonUrls.length > 0;
+    foundByButtonText === null ? "" : ` via “${foundByButtonText}”`;
+  const redirectFact = describeRedirectFact(page);
+  const httpStatusText = page.httpStatus === null ? "No response" : `HTTP ${String(page.httpStatus)}`;
 
-  let foundOnContent: ReactNode = "a page no longer listed";
+  let foundOnFact: ReactNode = "Found on a page no longer listed";
   if (pageIsTheStartPage) {
-    foundOnContent = "this is where the crawl started";
+    foundOnFact = "Start page";
   } else if (parentPage !== undefined) {
-    foundOnContent = (
-      <Link
-        component="button"
-        type="button"
-        onClick={() => {
-          onSelectPage(parentPage.id);
-        }}
-      >
-        {formatCrawledPagePath(parentPage.url)}
-      </Link>
+    foundOnFact = (
+      <>
+        Found on{" "}
+        <Link
+          component="button"
+          type="button"
+          onClick={() => {
+            onSelectPage(parentPage.id);
+          }}
+          sx={{ font: "inherit", verticalAlign: "baseline" }}
+        >
+          {formatCrawledPagePath(parentPage.url)}
+        </Link>
+        {foundByButtonSuffix}
+      </>
     );
   }
 
   return (
-    <Box component="section" aria-labelledby={HEADING_ID}>
+    <Box component="section" aria-labelledby={HEADING_ID} sx={{ minWidth: 0 }}>
       <Typography
         id={HEADING_ID}
-        variant="h6"
         component="h2"
-        sx={{ wordBreak: "break-all", mb: 0.5 }}
+        sx={{ fontFamily: MONOSPACE_FONT_FAMILY, fontSize: 20, mb: "6px", overflowWrap: "anywhere" }}
       >
-        {describeCrawledPagePath(page)}
+        {formatCrawledPagePath(page.url)}
       </Typography>
-      <Typography sx={{ color: page.succeeded ? "success.main" : "error.main" }}>
-        {describeScreenshotRunOutcome(page)} · {formatRunDuration(page.durationMs)}
-      </Typography>
+      <Box
+        sx={{
+          display: "flex",
+          gap: 2,
+          flexWrap: "wrap",
+          fontSize: 13,
+          color: nocturneTokens.neutral[400],
+          mb: pageHasErrorMessage ? 1 : "20px",
+        }}
+      >
+        <Box component="span" sx={{ color: page.succeeded ? statusColors.httpOk : statusColors.failed }}>
+          {httpStatusText}
+        </Box>
+        {page.title !== null && <span>{page.title}</span>}
+        {redirectFact !== null && <span>{redirectFact}</span>}
+        <span>{foundOnFact}</span>
+      </Box>
       {pageHasErrorMessage && (
-        <Typography variant="body2" color="error" sx={{ mt: 0.5 }}>
+        <Typography sx={{ fontSize: 13, color: statusColors.failedStepNote, mb: "20px", overflowWrap: "anywhere" }}>
           {page.errorMessage}
         </Typography>
       )}
 
-      <Box sx={{ mt: 2, display: "grid", gap: 0.5 }}>
-        <DetailRow label="Loaded">{page.requestedUrl}</DetailRow>
-        {pageWasRedirected && <DetailRow label="Ended up at">{page.finalUrl}</DetailRow>}
-        <DetailRow label="Title">{page.title ?? "none"}</DetailRow>
-        <DetailRow label="Found on">
-          {foundOnContent}
-          {foundByButtonSuffix}
-        </DetailRow>
-        <DetailRow label="Links followed to get here">{String(page.depth)}</DetailRow>
-      </Box>
-
-      <Typography variant="subtitle1" component="h3" sx={{ mt: 3, mb: 1 }}>
-        Aria snapshot
-      </Typography>
       <LoadStatusNotice
         isLoading={pageResource.isLoading}
         errorMessage={pageResource.errorMessage}
         loadingLabel="Loading page"
       />
-      {fullPage !== null &&
-        (fullPage.ariaSnapshot === null ? (
-          <Typography color="text.secondary">
-            No aria snapshot was taken for this page.
-          </Typography>
-        ) : (
-          <CodeBlock code={fullPage.ariaSnapshot} label="Aria snapshot" />
-        ))}
 
       {fullPage !== null && (
         <>
-          <Typography id={LINKS_HEADING_ID} variant="subtitle1" component="h3" sx={{ mt: 3 }}>
-            Links on this page
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            {formatCount(fullPage.linkedUrls.length, "same-site link", "same-site links")}
-          </Typography>
-          {pageHasLinks && (
-            <CrawledUrlList
-              headingId={LINKS_HEADING_ID}
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+              gap: "12px",
+              mb: "20px",
+            }}
+          >
+            <CrawledUrlCard
+              kicker="Links"
               urls={fullPage.linkedUrls}
               visitedPagesByUrl={visitedPagesByUrl}
               onSelectPage={onSelectPage}
+              namesTheButtons={false}
             />
-          )}
-        </>
-      )}
+            <CrawledUrlCard
+              kicker="Buttons led to"
+              urls={fullPage.buttonUrls}
+              visitedPagesByUrl={visitedPagesByUrl}
+              onSelectPage={onSelectPage}
+              namesTheButtons
+            />
+          </Box>
 
-      {pageButtonsLedToPages && (
-        <>
-          <Typography
-            id={BUTTON_URLS_HEADING_ID}
-            variant="subtitle1"
-            component="h3"
-            sx={{ mt: 3 }}
-          >
-            Pages its buttons led to
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            {formatCount(fullPage.buttonUrls.length, "same-site page", "same-site pages")}
-          </Typography>
-          <CrawledUrlList
-            headingId={BUTTON_URLS_HEADING_ID}
-            urls={fullPage.buttonUrls}
-            visitedPagesByUrl={visitedPagesByUrl}
-            onSelectPage={onSelectPage}
-          />
+          <Box sx={{ display: "flex", alignItems: "center", mb: 1 }}>
+            <Typography variant="h5" component="h3" sx={{ m: 0, mr: "auto" }}>
+              Aria snapshot
+            </Typography>
+            {fullPage.ariaSnapshot !== null && (
+              <Box component="span" sx={{ fontSize: 12, color: nocturneTokens.neutral[500] }}>
+                {describeSnapshotLineCount(fullPage.ariaSnapshot)}
+              </Box>
+            )}
+          </Box>
+          {fullPage.ariaSnapshot === null ? (
+            <Typography color="text.secondary" sx={{ fontSize: 13.5 }}>
+              No aria snapshot was taken for this page.
+            </Typography>
+          ) : (
+            <CodeBlock code={fullPage.ariaSnapshot} label="Aria snapshot" />
+          )}
         </>
       )}
     </Box>

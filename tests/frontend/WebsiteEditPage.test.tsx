@@ -16,7 +16,8 @@ import {
   type StubbedRouteTable,
 } from "./support/frontendTestHelpers";
 
-const LIST_PATH = "/websites";
+/** The website list: the dashboard, on the home page. */
+const LIST_PATH = "/";
 const DETAIL_PATH = "/websites/website-1";
 const EDIT_PATH = "/websites/website-1/edit";
 const WEBSITE_API_URL = "/api/websites/website-1";

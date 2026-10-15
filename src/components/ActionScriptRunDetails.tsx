@@ -1,14 +1,18 @@
-import { type ChangeEvent, type ReactElement, useState } from "react";
+import { type ChangeEvent, type ReactElement, type ReactNode, useState } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import LinearProgress from "@mui/material/LinearProgress";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
-import CodeBlock from "./CodeBlock";
+import ActionScriptRunOutput, { describeOutputLineCount } from "./ActionScriptRunOutput";
+import DisclosureRow from "./DisclosureRow";
+import { CheckCircleOutlineIcon, HighlightOffIcon } from "./icons";
 import { type ActionScriptRunRecord } from "../hooks/useActionScriptRuns";
+import { MONOSPACE_FONT_FAMILY, nocturneTokens } from "../theme/nocturneTheme";
 import { describeActionScriptRunOutcome } from "../utils/describeActionScriptRun";
 import { formatRunDuration } from "../utils/describeScreenshotRun";
+import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeTime";
 import { actionScriptRunFailureScreenshotApiUrl } from "../utils/routePaths";
 
 /** The longest note the server accepts with a refine request (its `MAX_REFINE_NOTE_LENGTH`). */
@@ -24,12 +28,18 @@ export interface ActionScriptRunDetailsProps {
   versionCanBeRefined: boolean;
   /** True while a "Refine" request is in flight. */
   isRefining: boolean;
-  /** True while a "Run script" request is in flight; "Refine" is disabled meanwhile. */
+  /** True while a "Run" request is in flight; refining is blocked meanwhile. */
   isRunning: boolean;
   /** Why the last "Refine" request failed, or null. */
   refineErrorMessage: string | null;
-  /** Called with this run and the trimmed note (null when blank) when the user clicks "Refine". */
+  /** Called with this run and the trimmed note (null when blank) when the user clicks Refine. */
   onRefine: (failedRun: ActionScriptRunRecord, note: string | null) => void;
+  /** The number the refined version will get, for "Refine into Version 6". */
+  refinedVersionNumber: number;
+  /** True for the phone card: no "Refine with Claude" heading or counter, Refine beside `runAgainButton`, and no output log (the page lists it below). */
+  isCompact: boolean;
+  /** The phone card's "Run again" button, shown beside Refine; ignored on desktop. */
+  runAgainButton?: ReactNode;
 }
 
 /**
@@ -45,24 +55,26 @@ function noteToSend(noteText: string): string | null {
 }
 
 /**
- * One plan run in full: its outcome line ("Failed at step 3 · 4.2 s"), why
- * it stopped, when it ran and who it was logged in as, the page it failed
- * on, the step log, and - when the run failed and saved one - the failure
- * screenshot.
+ * One plan run in full, as the mockup's run panel draws it:
+ * - a status banner: how it went ("Failed at step 9"), then its error, how
+ *   long it took, and (on desktop) when it ran;
+ * - the failure screenshot, when it saved one, and the page it failed on;
+ * - for a failed run of a version Claude wrote, "Refine with Claude": an
+ *   optional note (with a 2,000-character counter on desktop) and a button
+ *   that asks the model that wrote the version to fix it from the run's error,
+ *   screenshot, and failing page - the result is saved as the next version
+ *   ("Refine into Version 6");
+ * - on desktop, the run's "Output log" as a collapsed row.
  *
- * A failed run of a version Claude wrote also gets a "Refine" area: an
- * optional note for Claude and a "Refine" button that asks the model that
- * wrote the version to fix it from the run's error, screenshot, and failing
- * page (the result is saved as a new version). A refine error is shown only
- * once THIS run's details have tried to refine - the page keeps the last
- * error until the next request, and this component is keyed by the run's id,
- * so picking another run never shows a stale error. "Refine" is disabled
- * while a refine or a run is in flight; the note field only while refining,
- * since it is what is being sent.
+ * A refine error is shown only once THIS run's details have tried to refine
+ * - the page keeps the last error until the next request, and this
+ * component is keyed by the run's id, so picking another run never shows a
+ * stale error. Refine is disabled while a refine or a run is in flight; the
+ * note field only while refining, since it is what is being sent.
  *
- * The outcome is a `role="status"` alert: it is a result to read, not an
+ * The banner is a `role="status"` alert: it is a result to read, not an
  * error the user must act on.
- * @param props - The website, the run to show, and the refine state and callback
+ * @param props - The website, the run, the refine state and callback, and the layout
  * @returns The rendered run
  */
 export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProps): ReactElement {
@@ -74,20 +86,24 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
     isRunning,
     refineErrorMessage,
     onRefine,
+    refinedVersionNumber,
+    isCompact,
+    runAgainButton,
   } = props;
   const [noteText, setNoteText] = useState("");
   const [refineWasAttemptedForThisRun, setRefineWasAttemptedForThisRun] = useState(false);
-  const ranAtText = new Date(run.createdAt).toLocaleString();
-  const runHasOutput = run.output !== "";
+  const ranAtText = formatFullDateTime(run.createdAt);
   const runHasFailureScreenshot = run.failureScreenshotFileName !== null;
   const runFailedWithoutScreenshot = !run.succeeded && !runHasFailureScreenshot;
   const runHasAnErrorMessage = run.errorMessage !== null;
-  const runHasAFailingPageUrl = run.failingPageUrl !== null;
   const refineAreaIsShown = runHasAnErrorMessage && versionCanBeRefined;
   const refineIsBlocked = isRefining || isRunning;
   const refineErrorIsShown = refineWasAttemptedForThisRun && refineErrorMessage !== null;
-  const loginText =
-    run.credentialName === null ? "logged out" : `logged in as "${run.credentialName}"`;
+  const bannerDetails = [
+    run.errorMessage,
+    formatRunDuration(run.durationMs),
+    isCompact ? null : formatRelativeTime(run.createdAt, new Date()),
+  ].filter((detail): detail is string => detail !== null);
 
   /**
    * Keeps the note in sync with its field.
@@ -103,111 +119,141 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
     onRefine(run, noteToSend(noteText));
   };
 
-  return (
-    <Box>
-      <Alert role="status" severity={run.succeeded ? "success" : "error"}>
-        {describeActionScriptRunOutcome(run)} · {formatRunDuration(run.durationMs)}
-        {runHasAnErrorMessage && (
-          <Typography variant="body2" sx={{ mt: 0.5 }}>
-            {run.errorMessage}
+  let refineButtonText = `Refine into Version ${String(refinedVersionNumber)}`;
+  if (isRefining) {
+    refineButtonText = "Refining…";
+  } else if (isCompact) {
+    refineButtonText = "Refine";
+  }
+  const refineButton = (
+    <Button
+      onClick={handleRefineClick}
+      disabled={refineIsBlocked}
+      variant="outlined"
+      sx={{ minHeight: isCompact ? 44 : 36 }}
+    >
+      {refineButtonText}
+    </Button>
+  );
+  const refineProgressAndError = (
+    <>
+      {isRefining && (
+        <Box>
+          <LinearProgress aria-label="Refining script" />
+          <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 0.5 }}>
+            This can take a few minutes.
           </Typography>
-        )}
-      </Alert>
-      <Box sx={{ mt: 1, mb: 2 }}>
-        <Typography variant="caption" color="text.secondary" component="p">
-          Ran {ranAtText} · {loginText}
-        </Typography>
-        {runHasAFailingPageUrl && (
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            component="p"
-            sx={{ overflowWrap: "anywhere" }}
-          >
-            Failing page: {run.failingPageUrl}
-          </Typography>
-        )}
-      </Box>
+        </Box>
+      )}
+      {refineErrorIsShown && <Alert severity="error">Could not refine: {refineErrorMessage}</Alert>}
+    </>
+  );
+  const noteField = (
+    <TextField
+      value={noteText}
+      onChange={handleNoteChange}
+      disabled={isRefining}
+      placeholder={
+        isCompact
+          ? "What did you notice? (optional)"
+          : "What did you notice? e.g. the toast says “Spot reserved”, not “Booking confirmed”"
+      }
+      slotProps={{ htmlInput: { maxLength: MAX_REFINE_NOTE_LENGTH, "aria-label": "Note for Claude (optional)" } }}
+      multiline
+      minRows={isCompact ? 2 : 3}
+      fullWidth
+      sx={{ "& .MuiInputBase-root": { fontSize: 13 } }}
+    />
+  );
 
-      {refineAreaIsShown && (
-        <Box sx={{ mb: 3 }}>
-          <TextField
-            label="Note for Claude (optional)"
-            value={noteText}
-            onChange={handleNoteChange}
-            disabled={isRefining}
-            slotProps={{ htmlInput: { maxLength: MAX_REFINE_NOTE_LENGTH } }}
-            multiline
-            minRows={2}
-            fullWidth
-          />
-          <Button
-            onClick={handleRefineClick}
-            disabled={refineIsBlocked}
-            variant="contained"
-            sx={{ mt: 1 }}
-          >
-            {isRefining ? "Refining…" : "Refine"}
-          </Button>
-          {isRefining && (
-            <>
-              <LinearProgress aria-label="Refining script" sx={{ mt: 2 }} />
-              <Typography variant="caption" color="text.secondary" component="p">
-                This can take a few minutes.
-              </Typography>
-            </>
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", gap: isCompact ? "12px" : 2 }}>
+      <Alert
+        role="status"
+        severity={run.succeeded ? "success" : "error"}
+        icon={run.succeeded ? <CheckCircleOutlineIcon /> : <HighlightOffIcon />}
+      >
+        <Box sx={{ fontSize: 14, fontWeight: 500 }}>{describeActionScriptRunOutcome(run)}</Box>
+        <Box sx={{ fontSize: isCompact ? 12 : 12.5, opacity: 0.85, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+          <span title={ranAtText}>{bannerDetails.join(" · ")}</span>
+        </Box>
+      </Alert>
+
+      {(runHasFailureScreenshot || run.failingPageUrl !== null) && (
+        <Box>
+          {runHasFailureScreenshot && (
+            <Box
+              component="img"
+              src={actionScriptRunFailureScreenshotApiUrl(websiteId, run.actionId, run.actionScriptId, run.id)}
+              alt={`Failure screenshot of the run at ${ranAtText}`}
+              sx={{
+                display: "block",
+                width: "100%",
+                height: "auto",
+                borderRadius: `${String(nocturneTokens.radius.medium)}px`,
+                boxShadow: nocturneTokens.shadow.small,
+              }}
+            />
           )}
-          {refineErrorIsShown && (
-            <Alert severity="error" sx={{ mt: 2 }}>
-              Could not refine: {refineErrorMessage}
-            </Alert>
+          {run.failingPageUrl !== null && (
+            <Box
+              sx={{
+                fontFamily: MONOSPACE_FONT_FAMILY,
+                fontSize: 12,
+                color: nocturneTokens.neutral[400],
+                mt: "6px",
+                overflowWrap: "anywhere",
+              }}
+            >
+              {run.failingPageUrl}
+            </Box>
           )}
         </Box>
       )}
-
-      <Typography variant="subtitle2" component="h4" sx={{ mb: 1 }}>
-        Output
-      </Typography>
-      {run.outputWasTruncated && (
-        <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 1 }}>
-          The output was long, so only its end is kept.
-        </Typography>
-      )}
-      {runHasOutput ? (
-        <CodeBlock code={run.output} label="Run output" />
-      ) : (
-        <Typography color="text.secondary">The run logged nothing.</Typography>
-      )}
-
-      {runHasFailureScreenshot && (
-        <>
-          <Typography variant="subtitle2" component="h4" sx={{ mt: 2, mb: 1 }}>
-            Failure screenshot
-          </Typography>
-          <Box
-            component="img"
-            src={actionScriptRunFailureScreenshotApiUrl(
-              websiteId,
-              run.actionId,
-              run.actionScriptId,
-              run.id,
-            )}
-            alt={`Failure screenshot of the run at ${ranAtText}`}
-            sx={{
-              display: "block",
-              width: "100%",
-              height: "auto",
-              border: 1,
-              borderColor: "divider",
-              borderRadius: 1,
-            }}
-          />
-        </>
-      )}
       {runFailedWithoutScreenshot && (
-        <Typography color="text.secondary" sx={{ mt: 2 }}>
+        <Typography color="text.secondary" sx={{ fontSize: 13 }}>
           No failure screenshot was captured for this run.
         </Typography>
+      )}
+
+      {isCompact ? (
+        <>
+          {refineAreaIsShown && noteField}
+          <Box sx={{ display: "grid", gridTemplateColumns: refineAreaIsShown ? "1fr 1fr" : "1fr", gap: 1 }}>
+            {runAgainButton}
+            {refineAreaIsShown && refineButton}
+          </Box>
+          {refineProgressAndError}
+        </>
+      ) : (
+        <>
+          {refineAreaIsShown && (
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 1,
+                pt: "14px",
+                borderTop: `1px solid ${nocturneTokens.divider}`,
+              }}
+            >
+              <Typography component="h3" sx={{ fontSize: 13.5, fontWeight: 500 }}>
+                Refine with Claude
+              </Typography>
+              {noteField}
+              <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <Box component="span" sx={{ fontSize: 12, color: nocturneTokens.neutral[500], mr: "auto" }}>
+                  Optional · {noteText.length.toLocaleString()} / {MAX_REFINE_NOTE_LENGTH.toLocaleString()}
+                </Box>
+                {refineButton}
+              </Box>
+              {refineProgressAndError}
+            </Box>
+          )}
+          <DisclosureRow label="Output log" detail={describeOutputLineCount(run.output)}>
+            <ActionScriptRunOutput run={run} />
+          </DisclosureRow>
+        </>
       )}
     </Box>
   );

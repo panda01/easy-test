@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import CredentialForm, { type CredentialFormProps } from "../../src/components/CredentialForm";
 import { type CredentialRequestBody } from "../../src/hooks/useCredentials";
@@ -260,5 +260,19 @@ describe("CredentialForm", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("puts a plus on the submit button when told to, as the create page does", () => {
+    renderCredentialForm({ submitButtonShowsPlus: true });
+
+    const submitButton = screen.getByRole("button", { name: "Create credential" });
+    expect(within(submitButton).getByTestId("AddIcon")).toBeInTheDocument();
+  });
+
+  it("leaves the plus off the submit button by default, as the edit page's Save changes has it", () => {
+    renderCredentialForm({ submitLabel: "Save changes" });
+
+    const submitButton = screen.getByRole("button", { name: "Save changes" });
+    expect(within(submitButton).queryByTestId("AddIcon")).not.toBeInTheDocument();
   });
 });

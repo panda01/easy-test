@@ -16,9 +16,28 @@ const catalog = buildScriptModelCatalog();
 const newestScript = buildActionScriptRecord({ id: "script-2", summary: "The newest summary." });
 const olderScript = buildActionScriptRecord({ id: "script-1", summary: "The older summary." });
 
+/** A failed latest run, as a version's `latestRun`. */
+const failedLatestRun = {
+  id: "run-2",
+  succeeded: false,
+  failedStepNumber: 2,
+  timedOut: false,
+  createdAt: "2026-04-03T00:00:00.000Z",
+};
+
+/** A passed latest run, as a version's `latestRun`. */
+const passedLatestRun = {
+  id: "run-1",
+  succeeded: true,
+  failedStepNumber: null,
+  timedOut: false,
+  createdAt: "2026-04-02T00:00:00.000Z",
+};
+
 /**
  * Builds the section's props: a loaded two-version list of an up-to-date,
- * logged-out action, with nothing in flight.
+ * logged-out action, showing the newest version on desktop, with nothing in
+ * flight.
  * @param overrides - Props to replace in the defaults
  * @returns The complete props
  */
@@ -27,7 +46,7 @@ function buildSectionProps(overrides: Partial<ActionScriptsSectionProps> = {}): 
     scripts: [newestScript, olderScript],
     isLoading: false,
     errorMessage: null,
-    selectedScriptId: null,
+    selectedScriptId: "script-2",
     onSelectScript: vi.fn(),
     isConverting: false,
     convertErrorMessage: null,
@@ -46,9 +65,7 @@ function buildSectionProps(overrides: Partial<ActionScriptsSectionProps> = {}): 
     currentAction: { title: "Log in", description: "Sign in with a valid account", credentialId: null },
     comparePath: "/websites/website-1/actions/item-1/scripts/compare",
     compareLinkState: { returnTo: "/websites/website-1/actions/item-1" },
-    isSavingEdit: false,
-    saveEditErrorMessage: null,
-    onSaveEdit: vi.fn(),
+    isPhoneLayout: false,
     ...overrides,
   };
 }
@@ -67,7 +84,7 @@ function renderSection(overrides: Partial<ActionScriptsSectionProps> = {}): Rend
 }
 
 /**
- * Reads the rows of the versions list.
+ * Reads the rows of the desktop versions list.
  * @returns Every version row's button
  */
 function getVersionButtons(): HTMLElement[] {
@@ -75,254 +92,271 @@ function getVersionButtons(): HTMLElement[] {
 }
 
 describe("ActionScriptsSection", () => {
-  it("explains what converting does, and shows the newest version when nothing (or an unknown id) is selected", () => {
-    renderSection({ selectedScriptId: "not-in-the-list" });
+  describe("desktop versions list", () => {
+    it("lists the versions under a Versions heading, newest first, and marks the shown one", () => {
+      renderSection({ selectedScriptId: "script-1" });
 
-    expect(screen.getByText(/Claude turns this action into a JSON step plan/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Version 2" })).toBeInTheDocument();
-    expect(screen.getByText("The newest summary.")).toBeInTheDocument();
-    expect(getVersionButtons()[0]).toHaveAttribute("aria-current", "true");
+      expect(screen.getByRole("heading", { name: "Versions" })).toBeInTheDocument();
+      const versionButtons = getVersionButtons();
+      expect(versionButtons[0]).toHaveAccessibleName(/^Not run yet Version 2 /);
+      expect(versionButtons[1]).toHaveAccessibleName(/^Not run yet Version 1 /);
+      expect(versionButtons[0]).not.toHaveAttribute("aria-current");
+      expect(versionButtons[1]).toHaveAttribute("aria-current", "true");
+    });
+
+    it("marks no row when no version is shown", () => {
+      renderSection({ selectedScriptId: null });
+
+      for (const versionButton of getVersionButtons()) {
+        expect(versionButton).not.toHaveAttribute("aria-current");
+      }
+    });
+
+    it("reports the version the user picks", async () => {
+      const user = userEvent.setup();
+      const onSelectScript = vi.fn();
+      renderSection({ onSelectScript });
+
+      await user.click(getVersionButtons()[1]);
+
+      expect(onSelectScript).toHaveBeenCalledWith("script-1");
+    });
+
+    it("starts each version's row with its run status icon, judged by that version's latest run", () => {
+      renderSection({
+        scripts: [
+          buildActionScriptRecord({ id: "script-3", latestRun: null }),
+          buildActionScriptRecord({ id: "script-2", latestRun: failedLatestRun }),
+          buildActionScriptRecord({ id: "script-1", latestRun: passedLatestRun }),
+        ],
+      });
+
+      const versionButtons = getVersionButtons();
+      expect(within(versionButtons[0]).getByRole("img", { name: "Not run yet" })).toBeInTheDocument();
+      expect(within(versionButtons[1]).getByRole("img", { name: "Latest run failed" })).toBeInTheDocument();
+      expect(within(versionButtons[2]).getByRole("img", { name: "Latest run passed" })).toBeInTheDocument();
+      expect(versionButtons.map((versionButton) => within(versionButton).getAllByRole("img"))).toEqual([
+        [expect.anything()],
+        [expect.anything()],
+        [expect.anything()],
+      ]);
+      expect(versionButtons[0]).toHaveAccessibleName(/^Not run yet Version 3 /);
+    });
+
+    it("says where each generated version came from: the short model name, its effort, and when", () => {
+      renderSection({
+        scripts: [
+          buildActionScriptRecord({ id: "script-4", modelId: "claude-opus-5-5", effort: "high" }),
+          buildActionScriptRecord({ id: "script-3", modelId: "claude-haiku-4-5-20251001", effort: null }),
+          buildActionScriptRecord({ id: "script-2", modelId: "claude-retired-1", effort: "low" }),
+          buildActionScriptRecord({ id: "script-1", modelId: null, effort: null }),
+        ],
+      });
+
+      const versionButtons = getVersionButtons();
+      expect(versionButtons[0]).toHaveTextContent(/Version 4 Opus 5\.5 · high · .+$/);
+      expect(versionButtons[1]).toHaveTextContent(/Version 3 Haiku 4\.5 · .+$/);
+      expect(versionButtons[1]).not.toHaveTextContent("Standard");
+      expect(versionButtons[2]).toHaveTextContent(/Version 2 claude-retired-1 · low · .+$/);
+      expect(versionButtons[3]).toHaveTextContent(/Version 1 unknown model · .+$/);
+    });
+
+    it("names the version an edited version came from, or says it was an earlier one", () => {
+      renderSection({
+        scripts: [
+          buildActionScriptRecord({ id: "script-4", editedFromActionScriptId: "deleted-script", modelId: null }),
+          buildActionScriptRecord({ id: "script-3", editedFromActionScriptId: "script-1", modelId: null }),
+          buildActionScriptRecord({ id: "script-2" }),
+          buildActionScriptRecord({ id: "script-1" }),
+        ],
+      });
+
+      const versionButtons = getVersionButtons();
+      expect(versionButtons[0]).toHaveTextContent(/Version 4 Edited from an earlier version · .+$/);
+      expect(versionButtons[1]).toHaveTextContent(/Version 3 Edited from v1 · .+$/);
+    });
+
+    it("names the version and model a refined version came from, or says it was an earlier one", () => {
+      renderSection({
+        scripts: [
+          buildActionScriptRecord({
+            id: "script-4",
+            modelId: "claude-haiku-4-5-20251001",
+            effort: null,
+            refinement: buildActionScriptRefinementRecord({
+              sourceActionScriptId: "deleted-script",
+              refinedActionScriptId: "script-4",
+            }),
+          }),
+          buildActionScriptRecord({
+            id: "script-3",
+            refinement: buildActionScriptRefinementRecord({
+              sourceActionScriptId: "script-1",
+              refinedActionScriptId: "script-3",
+            }),
+          }),
+          buildActionScriptRecord({ id: "script-2", editedFromActionScriptId: "script-1", modelId: null }),
+          buildActionScriptRecord({ id: "script-1" }),
+        ],
+      });
+
+      const versionButtons = getVersionButtons();
+      expect(versionButtons[0]).toHaveTextContent(/Version 4 Refined from an earlier version · Haiku 4\.5 · .+$/);
+      expect(versionButtons[1]).toHaveTextContent(/Version 3 Refined from v1 · Opus 5\.5 · .+$/);
+      expect(versionButtons[2]).toHaveTextContent(/Version 2 Edited from v1 · .+$/);
+    });
+
+    it("gives each origin line the version's exact creation time as its hover title", () => {
+      renderSection({ scripts: [olderScript] });
+
+      expect(within(getVersionButtons()[0]).getByTitle(new Date(olderScript.createdAt).toLocaleString())).toHaveTextContent(
+        /^Opus 5\.5 · high · /,
+      );
+    });
+
+    it("tags out-of-date versions, including a version generated with another credential", () => {
+      renderSection({
+        scripts: [
+          buildActionScriptRecord({ id: "script-3" }),
+          buildActionScriptRecord({ id: "script-2", credentialId: "credential-1", credentialName: "Admin" }),
+          buildActionScriptRecord({ id: "script-1", actionDescription: "An older description" }),
+        ],
+      });
+
+      const versionButtons = getVersionButtons();
+      expect(versionButtons.map((versionButton) => versionButton.textContent.includes("Out of date"))).toEqual([
+        false,
+        true,
+        true,
+      ]);
+    });
+
+    it("links to the comparison page only when there are two versions", () => {
+      const { unmount } = renderSection();
+      expect(screen.getByRole("link", { name: "Compare" })).toHaveAttribute(
+        "href",
+        "/websites/website-1/actions/item-1/scripts/compare",
+      );
+
+      unmount();
+      renderSection({ scripts: [olderScript], selectedScriptId: "script-1" });
+      expect(screen.queryByRole("link", { name: "Compare" })).not.toBeInTheDocument();
+    });
   });
 
-  it("shows the selected version and reports picks", async () => {
-    const user = userEvent.setup();
-    const onSelectScript = vi.fn();
-    renderSection({ selectedScriptId: "script-1", onSelectScript });
+  describe("converting", () => {
+    it("reports Convert clicks, and shows progress and a disabled button while converting", async () => {
+      const user = userEvent.setup();
+      const onConvertClick = vi.fn();
+      const { unmount } = renderSection({ onConvertClick });
 
-    expect(screen.getByRole("heading", { name: "Version 1" })).toBeInTheDocument();
-    expect(screen.getByText("The older summary.")).toBeInTheDocument();
-    const versions = getVersionButtons();
-    expect(versions[1]).toHaveAttribute("aria-current", "true");
+      await user.click(screen.getByRole("button", { name: "Convert to new version" }));
+      expect(onConvertClick).toHaveBeenCalledTimes(1);
 
-    await user.click(versions[0]);
-    expect(onSelectScript).toHaveBeenCalledWith("script-2");
+      unmount();
+      renderSection({ scripts: [], selectedScriptId: null, isConverting: true, onConvertClick });
+      expect(screen.getByRole("button", { name: "Converting…" })).toBeDisabled();
+      expect(screen.getByRole("progressbar", { name: "Converting to script" })).toBeInTheDocument();
+      expect(screen.getByText("This can take a few minutes.")).toBeInTheDocument();
+    });
+
+    it("shows a failed conversion's reason", () => {
+      renderSection({ convertErrorMessage: "Claude declined to convert this action (cyber)" });
+
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Could not convert: Claude declined to convert this action (cyber)",
+      );
+    });
+
+    it("keeps Convert disabled until a model is chosen", () => {
+      renderSection({ canConvert: false });
+
+      expect(screen.getByRole("button", { name: "Convert to new version" })).toBeDisabled();
+    });
+
+    it("puts the Model and Effort dropdowns above Convert", () => {
+      renderSection();
+
+      expect(screen.getByRole("combobox", { name: /^Model/ })).toHaveTextContent("Claude Opus 5.5");
+      expect(screen.getByRole("combobox", { name: /^Effort/ })).toHaveTextContent("high");
+    });
   });
 
-  it("reports Convert clicks, and shows progress and a disabled button while converting", async () => {
-    const user = userEvent.setup();
-    const onConvertClick = vi.fn();
-    const { unmount } = renderSection({ onConvertClick });
-
-    await user.click(screen.getByRole("button", { name: "Convert to script" }));
-    expect(onConvertClick).toHaveBeenCalledTimes(1);
-
-    unmount();
-    renderSection({ scripts: [], isConverting: true, onConvertClick });
-    expect(screen.getByRole("button", { name: "Converting…" })).toBeDisabled();
-    expect(screen.getByRole("progressbar", { name: "Converting to script" })).toBeInTheDocument();
-    expect(screen.getByText("This can take a few minutes.")).toBeInTheDocument();
-  });
-
-  it("shows a failed conversion's reason", () => {
-    renderSection({ convertErrorMessage: "Claude declined to convert this action (cyber)" });
-
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Could not convert: Claude declined to convert this action (cyber)",
-    );
-  });
-
-  it("shows loading, then the empty state, without a versions list", () => {
-    const { unmount } = renderSection({ scripts: [], isLoading: true });
+  it("shows loading, then the empty state, without a versions list or a Compare link", () => {
+    const { unmount } = renderSection({ scripts: [], selectedScriptId: null, isLoading: true });
     expect(screen.getByRole("progressbar", { name: "Loading scripts" })).toBeInTheDocument();
-    expect(screen.queryByText("No scripts yet.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No versions yet.")).not.toBeInTheDocument();
 
     unmount();
-    renderSection({ scripts: [] });
-    expect(screen.getByText("No scripts yet.")).toBeInTheDocument();
+    renderSection({ scripts: [], selectedScriptId: null });
+    expect(screen.getByText("No versions yet.")).toBeInTheDocument();
     expect(screen.queryByRole("list", { name: "Versions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Compare" })).not.toBeInTheDocument();
   });
 
-  it("keeps Convert disabled until a model is chosen", () => {
-    renderSection({ canConvert: false });
+  it("says why the script list could not load, instead of the empty state", () => {
+    renderSection({ scripts: [], selectedScriptId: null, errorMessage: "Database unavailable" });
 
-    expect(screen.getByRole("button", { name: "Convert to script" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Database unavailable");
+    expect(screen.queryByText("No versions yet.")).not.toBeInTheDocument();
   });
 
-  it("shows the model and effort on each generated version's row", () => {
-    renderSection({
-      scripts: [
-        buildActionScriptRecord({ id: "script-3", modelId: "claude-haiku-4-5-20251001", effort: null }),
-        buildActionScriptRecord({ id: "script-2", modelId: "claude-retired-1", effort: null }),
-        buildActionScriptRecord({ id: "script-1", modelId: null, effort: null }),
-      ],
+  describe("phone layout", () => {
+    it("offers a Version dropdown instead of the list, naming each version's status and age", async () => {
+      const user = userEvent.setup();
+      renderSection({
+        isPhoneLayout: true,
+        scripts: [
+          buildActionScriptRecord({ id: "script-3", latestRun: failedLatestRun }),
+          buildActionScriptRecord({ id: "script-2", latestRun: passedLatestRun }),
+          buildActionScriptRecord({ id: "script-1", actionTitle: "Sign in" }),
+        ],
+        selectedScriptId: "script-3",
+      });
+
+      expect(screen.getByRole("region", { name: "Versions" })).toBeInTheDocument();
+      expect(screen.queryByRole("list", { name: "Versions" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Versions" })).not.toBeInTheDocument();
+      const versionSelect = screen.getByRole("combobox", { name: /^Version/ });
+      expect(versionSelect).toHaveTextContent(/^Version 3 · Failed · .+$/);
+
+      await user.click(versionSelect);
+      const options = await screen.findAllByRole("option");
+      expect(options.map((option) => option.textContent)).toEqual([
+        expect.stringMatching(/^Version 3 · Failed · .+$/),
+        expect.stringMatching(/^Version 2 · Passed · .+$/),
+        expect.stringMatching(/^Version 1 · Not run · .+ · Out of date$/),
+      ]);
     });
 
-    const versionButtons = getVersionButtons();
-    expect(versionButtons[0]).toHaveTextContent("Claude Haiku 4.5 (claude-haiku-4-5-20251001) · Standard effort");
-    expect(versionButtons[1]).toHaveTextContent("claude-retired-1 · no effort level");
-    expect(versionButtons[2]).toHaveTextContent(/ · unknown model$/);
-  });
+    it("reports the version picked from the dropdown", async () => {
+      const user = userEvent.setup();
+      const onSelectScript = vi.fn();
+      renderSection({ isPhoneLayout: true, onSelectScript });
 
-  it("names the version an edited version came from, or says it was an earlier one", () => {
-    renderSection({
-      scripts: [
-        buildActionScriptRecord({ id: "script-4", editedFromActionScriptId: "deleted-script", modelId: null }),
-        buildActionScriptRecord({ id: "script-3", editedFromActionScriptId: "script-1", modelId: null }),
-        buildActionScriptRecord({ id: "script-2" }),
-        buildActionScriptRecord({ id: "script-1" }),
-      ],
+      await user.click(screen.getByRole("combobox", { name: /^Version/ }));
+      await user.click(await screen.findByRole("option", { name: /^Version 1 · / }));
+
+      expect(onSelectScript).toHaveBeenCalledWith("script-1");
     });
 
-    const versionButtons = getVersionButtons();
-    // Each row starts with its run status icon's title; none of these versions has run.
-    expect(versionButtons[0]).toHaveTextContent(/^Not run yetVersion 4.+ · Edited from an earlier version$/);
-    expect(versionButtons[1]).toHaveTextContent(/^Not run yetVersion 3.+ · Edited from Version 1$/);
-    expect(versionButtons[2]).toHaveTextContent(/^Not run yetVersion 2.+ · Claude Opus 5\.5 \(claude-opus-5-5\) · high effort$/);
-    expect(screen.getByText(/^Edited .+ from an earlier version · Runs logged out$/)).toBeInTheDocument();
-  });
+    it("keeps the model dropdowns and Convert under the dropdown", async () => {
+      const user = userEvent.setup();
+      const onConvertClick = vi.fn();
+      renderSection({ isPhoneLayout: true, onConvertClick });
 
-  it("names the version and model a refined version came from, or says it was an earlier one, and shows its Refined from details", () => {
-    renderSection({
-      scripts: [
-        buildActionScriptRecord({
-          id: "script-4",
-          modelId: "claude-haiku-4-5-20251001",
-          effort: null,
-          refinement: buildActionScriptRefinementRecord({
-            sourceActionScriptId: "deleted-script",
-            refinedActionScriptId: "script-4",
-          }),
-        }),
-        buildActionScriptRecord({
-          id: "script-3",
-          refinement: buildActionScriptRefinementRecord({
-            sourceActionScriptId: "script-1",
-            refinedActionScriptId: "script-3",
-          }),
-        }),
-        buildActionScriptRecord({ id: "script-2", editedFromActionScriptId: "script-1", modelId: null }),
-        buildActionScriptRecord({ id: "script-1" }),
-      ],
-      selectedScriptId: "script-3",
+      expect(screen.getByRole("combobox", { name: /^Model/ })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Convert to new version" }));
+
+      expect(onConvertClick).toHaveBeenCalledTimes(1);
     });
 
-    const versionButtons = getVersionButtons();
-    // Each row starts with its run status icon's title; none of these versions has run.
-    expect(versionButtons[0]).toHaveTextContent(
-      /^Not run yetVersion 4.+ · Refined from an earlier version · Claude Haiku 4\.5 \(claude-haiku-4-5-20251001\) · Standard effort$/,
-    );
-    expect(versionButtons[1]).toHaveTextContent(
-      /^Not run yetVersion 3.+ · Refined from Version 1 · Claude Opus 5\.5 \(claude-opus-5-5\) · high effort$/,
-    );
-    expect(versionButtons[2]).toHaveTextContent(/^Not run yetVersion 2.+ · Edited from Version 1$/);
-    expect(
-      screen.getByText(/^Refined .+ from Version 1 · Claude Opus 5\.5 \(claude-opus-5-5\) · high effort · Runs logged out$/),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Refined from" })).toBeInTheDocument();
-    const [refinedFromVersionDefinition] = screen.getAllByRole("definition");
-    expect(refinedFromVersionDefinition).toHaveTextContent(/^Version 1$/);
-  });
+    it("shows the empty state and no dropdown when there are no versions", () => {
+      renderSection({ isPhoneLayout: true, scripts: [], selectedScriptId: null });
 
-  it("starts each version's row with its run status icon, judged by that version's latest run", () => {
-    renderSection({
-      scripts: [
-        buildActionScriptRecord({ id: "script-3", latestRun: null }),
-        buildActionScriptRecord({
-          id: "script-2",
-          latestRun: { id: "run-2", succeeded: false, createdAt: "2026-04-03T00:00:00.000Z" },
-        }),
-        buildActionScriptRecord({
-          id: "script-1",
-          latestRun: { id: "run-1", succeeded: true, createdAt: "2026-04-02T00:00:00.000Z" },
-        }),
-      ],
+      expect(screen.getByText("No versions yet.")).toBeInTheDocument();
+      expect(screen.queryByRole("combobox", { name: /^Version/ })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Convert to new version" })).toBeInTheDocument();
     });
-
-    const versionButtons = getVersionButtons();
-    expect(within(versionButtons[0]).getByRole("img", { name: "Not run yet" })).toBeInTheDocument();
-    expect(within(versionButtons[1]).getByRole("img", { name: "Latest run failed" })).toBeInTheDocument();
-    expect(within(versionButtons[2]).getByRole("img", { name: "Latest run passed" })).toBeInTheDocument();
-    expect(versionButtons.map((versionButton) => within(versionButton).getAllByRole("img"))).toEqual([
-      [expect.anything()],
-      [expect.anything()],
-      [expect.anything()],
-    ]);
-    expect(versionButtons[0]).toHaveAccessibleName(/^Not run yet Version 3/);
-  });
-
-  it("marks out-of-date versions with a chip, including a version generated with another credential", () => {
-    renderSection({
-      scripts: [
-        buildActionScriptRecord({ id: "script-3" }),
-        buildActionScriptRecord({ id: "script-2", credentialId: "credential-1", credentialName: "Admin" }),
-        buildActionScriptRecord({ id: "script-1", actionDescription: "An older description" }),
-      ],
-    });
-
-    const versionButtons = getVersionButtons();
-    expect(versionButtons.map((versionButton) => versionButton.textContent.includes("Out of date"))).toEqual([
-      false,
-      true,
-      true,
-    ]);
-  });
-
-  it("links to the comparison page only when there are two versions", () => {
-    const { unmount } = renderSection();
-    expect(screen.getByRole("link", { name: "Compare versions" })).toHaveAttribute(
-      "href",
-      "/websites/website-1/actions/item-1/scripts/compare",
-    );
-
-    unmount();
-    renderSection({ scripts: [olderScript] });
-    expect(screen.queryByRole("link", { name: "Compare versions" })).not.toBeInTheDocument();
-  });
-
-  it("hands the selected version and its edited plan to onSaveEdit", async () => {
-    const user = userEvent.setup();
-    const onSaveEdit = vi.fn();
-    renderSection({ selectedScriptId: "script-1", onSaveEdit });
-
-    await user.click(screen.getByRole("button", { name: "Edit steps" }));
-    const planNameField = screen.getByRole("textbox", { name: "Plan name" });
-    await user.clear(planNameField);
-    await user.type(planNameField, "Log in again");
-    await user.click(screen.getByRole("button", { name: "Save as new version" }));
-
-    expect(onSaveEdit).toHaveBeenCalledWith(olderScript, { ...olderScript.plan, name: "Log in again" });
-  });
-
-  it("passes the edit save state through to the editor", async () => {
-    const user = userEvent.setup();
-    const { rerender } = renderSection({ isSavingEdit: true });
-
-    await user.click(screen.getByRole("button", { name: "Edit steps" }));
-    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
-
-    const onSaveEdit = vi.fn();
-    rerender(
-      <MemoryRouter>
-        <ActionScriptsSection {...buildSectionProps({ onSaveEdit })} />
-      </MemoryRouter>,
-    );
-    await user.click(screen.getByRole("button", { name: "Delete step 2" }));
-    await user.click(screen.getByRole("button", { name: "Save as new version" }));
-    rerender(
-      <MemoryRouter>
-        <ActionScriptsSection
-          {...buildSectionProps({ onSaveEdit, saveEditErrorMessage: "Action not found" })}
-        />
-      </MemoryRouter>,
-    );
-
-    expect(screen.getByRole("alert")).toHaveTextContent("Could not save: Action not found");
-  });
-
-  it("closes the editor when another version is shown", async () => {
-    const user = userEvent.setup();
-    const { rerender } = renderSection();
-    await user.click(screen.getByRole("button", { name: "Edit steps" }));
-    expect(screen.getByRole("textbox", { name: "Plan name" })).toBeInTheDocument();
-
-    rerender(
-      <MemoryRouter>
-        <ActionScriptsSection {...buildSectionProps({ selectedScriptId: "script-1" })} />
-      </MemoryRouter>,
-    );
-
-    expect(screen.getByRole("heading", { name: "Version 1" })).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Plan name" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Edit steps" })).toBeInTheDocument();
   });
 });

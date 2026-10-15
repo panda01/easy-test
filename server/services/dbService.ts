@@ -92,10 +92,23 @@ export type ActionWithCredential = Action & {
   credential: { id: string; name: string } | null;
 };
 
-/** An action's newest active script version, cut down to its id and its newest active run. */
+/**
+ * An action's newest active script version, cut down to what the website's
+ * action list shows: its id, its version number, the action text it was
+ * generated from (so the list can tell it is out of date), and its newest
+ * active run.
+ */
 export interface NewestActionScriptSummary {
   /** The newest version's cuid. */
   id: string;
+  /** Its version number: how many active versions the action has, counting the oldest as 1. */
+  versionNumber: number;
+  /** The action's title when the version was generated. */
+  actionTitle: string;
+  /** The action's description when the version was generated. */
+  actionDescription: string;
+  /** The credential the action ran as when the version was generated, or null for logged out. */
+  credentialId: string | null;
   /** That version's newest active run, or null when it has not been run yet. */
   latestRun: LatestActionScriptRun | null;
 }
@@ -219,14 +232,15 @@ const ACTION_SCRIPT_REFINEMENT_INCLUDE = {
 
 /**
  * How a version's newest run is read wherever its run status is shown (the
- * versions list and the website's actions list): at most ONE run - the
- * newest active one - and only what it takes to say whether it passed.
+ * versions list, the website's actions list, and the dashboard): at most ONE
+ * run - the newest active one - and only what it takes to say how it went:
+ * whether it passed, and, when it failed, at which step or by timing out.
  */
 const LATEST_ACTION_SCRIPT_RUN_QUERY = {
   where: { deletedAt: null },
   orderBy: { createdAt: "desc" },
   take: 1,
-  select: { id: true, succeeded: true, createdAt: true },
+  select: { id: true, succeeded: true, failedStepNumber: true, timedOut: true, createdAt: true },
 } as const;
 
 /**
@@ -245,10 +259,14 @@ type ActionScriptRow = Prisma.ActionScriptGetPayload<{
 }>;
 
 /**
- * A version's newest active run, cut down to what its pass / fail / not run
- * status needs: the run's id, whether it passed, and when it ran.
+ * A version's newest active run, cut down to what its status line needs: the
+ * run's id, whether it passed, the step it failed at (null when it passed or
+ * stopped before the first step), whether it timed out, and when it ran.
  */
-export type LatestActionScriptRun = Pick<ActionScriptRun, "id" | "succeeded" | "createdAt">;
+export type LatestActionScriptRun = Pick<
+  ActionScriptRun,
+  "id" | "succeeded" | "failedStepNumber" | "timedOut" | "createdAt"
+>;
 
 /**
  * An action script as dbService returns it: the row with `plan` typed as a
@@ -502,16 +520,125 @@ export async function createWebsite(data: WebsiteInput): Promise<Website> {
   return created;
 }
 
+/** The parts of a website's newest crawl run the dashboard shows. */
+export type WebsiteLatestCrawlRun = Pick<
+  CrawlRun,
+  "id" | "status" | "visitedPageCount" | "pageLimit" | "createdAt" | "finishedAt"
+>;
+
 /**
- * Lists every active (not soft-deleted) website, newest first.
- * @returns All active rows ordered by `createdAt` descending
+ * What the dashboard shows for one website: how many of its active actions
+ * pass, fail, or have not been run (judged, like the action list, by each
+ * action's newest version's latest run), when any of its scripts last ran,
+ * and its newest crawl.
  */
-export async function listWebsites(): Promise<Website[]> {
-  const websites = await prisma.website.findMany({
+export interface WebsiteSummary {
+  /** The website's active actions. */
+  actionCount: number;
+  /** Actions whose newest version's latest run passed. */
+  passedActionCount: number;
+  /** Actions whose newest version's latest run failed. */
+  failedActionCount: number;
+  /** Actions with no versions, or whose newest version has not been run. */
+  notRunActionCount: number;
+  /** When any active script of the website last ran, or null when none has. */
+  latestRunAt: Date | null;
+  /** The website's newest active crawl run, or null when it has never been crawled. */
+  latestCrawlRun: WebsiteLatestCrawlRun | null;
+}
+
+/** A website as the website list returns it: the row plus its dashboard `summary`. */
+export type WebsiteWithSummary = Website & { summary: WebsiteSummary };
+
+/**
+ * What the website list brings along to build each website's summary: its
+ * active actions (each with only its newest active version's latest run),
+ * its newest active script run of any version, and its newest active crawl
+ * run - every relation read with `take: 1` where only the newest row counts.
+ */
+const WEBSITE_SUMMARY_INCLUDE = {
+  actions: {
+    where: { deletedAt: null },
+    select: {
+      scripts: {
+        where: { deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { runs: LATEST_ACTION_SCRIPT_RUN_QUERY },
+      },
+    },
+  },
+  actionScriptRuns: {
     where: { deletedAt: null },
     orderBy: { createdAt: "desc" },
+    take: 1,
+    select: { createdAt: true },
+  },
+  crawlRuns: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: {
+      id: true,
+      status: true,
+      visitedPageCount: true,
+      pageLimit: true,
+      createdAt: true,
+      finishedAt: true,
+    },
+  },
+} as const;
+
+/** A website row as Prisma returns it with `WEBSITE_SUMMARY_INCLUDE`. */
+type WebsiteSummaryRow = Prisma.WebsiteGetPayload<{ include: typeof WEBSITE_SUMMARY_INCLUDE }>;
+
+/**
+ * Turns a website row with its summary relations into the shape the API
+ * answers with: the website's own fields plus `summary`, without the
+ * relation lists it was counted from.
+ * @param websiteRow - A website row as Prisma returns it with `WEBSITE_SUMMARY_INCLUDE`
+ * @returns The website with its `summary`
+ */
+function toWebsiteWithSummary(websiteRow: WebsiteSummaryRow): WebsiteWithSummary {
+  const { actions, actionScriptRuns, crawlRuns, ...website } = websiteRow;
+  let passedActionCount = 0;
+  let failedActionCount = 0;
+  let notRunActionCount = 0;
+  for (const action of actions) {
+    const newestVersionLatestRun = action.scripts.at(0)?.runs.at(0) ?? null;
+    if (newestVersionLatestRun === null) {
+      notRunActionCount += 1;
+    } else if (newestVersionLatestRun.succeeded) {
+      passedActionCount += 1;
+    } else {
+      failedActionCount += 1;
+    }
+  }
+  return {
+    ...website,
+    summary: {
+      actionCount: actions.length,
+      passedActionCount,
+      failedActionCount,
+      notRunActionCount,
+      latestRunAt: actionScriptRuns.at(0)?.createdAt ?? null,
+      latestCrawlRun: crawlRuns.at(0) ?? null,
+    },
+  };
+}
+
+/**
+ * Lists every active website, newest first, each with the summary the
+ * dashboard shows (see `WebsiteSummary`), read in one query.
+ * @returns All active websites ordered by `createdAt` descending, each with its `summary`
+ */
+export async function listWebsitesWithSummaries(): Promise<WebsiteWithSummary[]> {
+  const websiteRows = await prisma.website.findMany({
+    where: { deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    include: WEBSITE_SUMMARY_INCLUDE,
   });
-  return websites;
+  return websiteRows.map(toWebsiteWithSummary);
 }
 
 /**
@@ -758,8 +885,10 @@ const ACTION_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true
 
 /**
  * What the website's action list brings along on top of the credential: the
- * action's newest active version (as a list of zero or one), with only its id
- * and its newest active run (`LATEST_ACTION_SCRIPT_RUN_QUERY`).
+ * action's newest active version (as a list of zero or one), with only its
+ * id, the action text it was generated from, and its newest active run
+ * (`LATEST_ACTION_SCRIPT_RUN_QUERY`), plus the count of the action's active
+ * versions, which is the newest version's number.
  */
 const ACTION_LIST_INCLUDE = {
   ...ACTION_CREDENTIAL_INCLUDE,
@@ -767,8 +896,15 @@ const ACTION_LIST_INCLUDE = {
     where: { deletedAt: null },
     orderBy: { createdAt: "desc" },
     take: 1,
-    select: { id: true, runs: LATEST_ACTION_SCRIPT_RUN_QUERY },
+    select: {
+      id: true,
+      actionTitle: true,
+      actionDescription: true,
+      credentialId: true,
+      runs: LATEST_ACTION_SCRIPT_RUN_QUERY,
+    },
   },
+  _count: { select: { scripts: { where: { deletedAt: null } } } },
 } as const;
 
 /** An action row as Prisma returns it with `ACTION_LIST_INCLUDE`. */
@@ -777,26 +913,35 @@ type ActionListRow = Prisma.ActionGetPayload<{ include: typeof ACTION_LIST_INCLU
 /**
  * Turns an action list row into the shape the API answers with: the
  * zero-or-one `scripts` list becomes `newestScript` (null when the action has
- * no versions), and that version's zero-or-one `runs` list becomes its
- * `latestRun` (null when it has not been run).
+ * no versions) - numbered by the count of active versions - and that
+ * version's zero-or-one `runs` list becomes its `latestRun` (null when it has
+ * not been run).
  * @param actionRow - An action row as Prisma returns it with `ACTION_LIST_INCLUDE`
- * @returns The action with its credential and its `newestScript`, without `scripts`
+ * @returns The action with its credential and its `newestScript`, without `scripts` or `_count`
  */
 function toActionWithNewestScript(actionRow: ActionListRow): ActionWithNewestScript {
-  const { scripts: newestScriptList, ...action } = actionRow;
+  const { scripts: newestScriptList, _count: versionCounts, ...action } = actionRow;
   const newestScriptRow = newestScriptList.at(0);
   const actionHasNoScripts = newestScriptRow === undefined;
   if (actionHasNoScripts) {
     return { ...action, newestScript: null };
   }
-  const newestScriptLatestRun = newestScriptRow.runs.at(0) ?? null;
-  return { ...action, newestScript: { id: newestScriptRow.id, latestRun: newestScriptLatestRun } };
+  const { runs: latestRunList, ...newestScriptFields } = newestScriptRow;
+  return {
+    ...action,
+    newestScript: {
+      ...newestScriptFields,
+      versionNumber: versionCounts.scripts,
+      latestRun: latestRunList.at(0) ?? null,
+    },
+  };
 }
 
 /**
  * Lists a website's active actions, newest first, each with its newest
- * version's latest run, so the list can show whether the action's script
- * currently passes.
+ * version's number, the action text it was generated from, and its latest
+ * run, so the list can show whether the action's script currently passes and
+ * whether it is out of date.
  * @param websiteId - The owning website's cuid
  * @returns The website's active actions ordered by `createdAt` descending, each with its credential's id and name and its `newestScript` (null when it has no versions)
  */

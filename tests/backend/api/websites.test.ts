@@ -8,7 +8,7 @@ import express, { type Express } from "express";
  * so a rejection is a plain 500 by default and a 409 only when a test opts in.
  */
 const mockDbService = vi.hoisted(() => ({
-  listWebsites: vi.fn(),
+  listWebsitesWithSummaries: vi.fn(),
   findWebsiteById: vi.fn(),
   createWebsite: vi.fn(),
   updateWebsite: vi.fn(),
@@ -69,18 +69,36 @@ describe("website routes", () => {
   });
 
   describe("GET /api/websites", () => {
-    it("returns 200 with every website the service lists", async () => {
-      mockDbService.listWebsites.mockResolvedValue([otherWebsite, sampleWebsite]);
+    it("returns 200 with every website the service lists, each with its dashboard summary", async () => {
+      const otherWebsiteWithSummary = {
+        ...otherWebsite,
+        summary: {
+          actionCount: 3,
+          passedActionCount: 1,
+          failedActionCount: 1,
+          notRunActionCount: 1,
+          latestRunAt: "2026-01-10T00:00:00.000Z",
+          latestCrawlRun: {
+            id: "crawl-run-1",
+            status: "running",
+            visitedPageCount: 12,
+            pageLimit: 50,
+            createdAt: "2026-01-10T00:00:00.000Z",
+            finishedAt: null,
+          },
+        },
+      };
+      mockDbService.listWebsitesWithSummaries.mockResolvedValue([otherWebsiteWithSummary, sampleWebsite]);
 
       const res = await request(createWebsitesApp()).get("/api/websites");
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual([otherWebsite, sampleWebsite]);
-      expect(mockDbService.listWebsites).toHaveBeenCalledTimes(1);
+      expect(res.body).toEqual([otherWebsiteWithSummary, sampleWebsite]);
+      expect(mockDbService.listWebsitesWithSummaries).toHaveBeenCalledTimes(1);
     });
 
     it("returns 200 with an empty array when there are no websites", async () => {
-      mockDbService.listWebsites.mockResolvedValue([]);
+      mockDbService.listWebsitesWithSummaries.mockResolvedValue([]);
 
       const res = await request(createWebsitesApp()).get("/api/websites");
 
@@ -89,7 +107,7 @@ describe("website routes", () => {
     });
 
     it("returns 500 with the error message when the query fails", async () => {
-      mockDbService.listWebsites.mockRejectedValue(new Error("connection refused"));
+      mockDbService.listWebsitesWithSummaries.mockRejectedValue(new Error("connection refused"));
 
       const res = await request(createWebsitesApp()).get("/api/websites");
 
@@ -98,7 +116,7 @@ describe("website routes", () => {
     });
 
     it("returns 500 with the stringified value when the query rejects with a non-Error", async () => {
-      mockDbService.listWebsites.mockRejectedValue({ code: "P1001" });
+      mockDbService.listWebsitesWithSummaries.mockRejectedValue({ code: "P1001" });
 
       const res = await request(createWebsitesApp()).get("/api/websites");
 

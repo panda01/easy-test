@@ -13,6 +13,7 @@ import {
   buildPlanTarget,
   changePlanStepAction,
   describePlanStep,
+  describePlanStepParts,
   describePlanTarget,
   findPlanProblems,
   formatPlanJson,
@@ -218,6 +219,39 @@ describe("describePlanStep", () => {
     ["a step with no value", { action: "log", target: null, value: null }, "Note: "],
   ])("describes %s", (_caseName, step, expectedSentence) => {
     expect(describePlanStep(step)).toBe(expectedSentence);
+  });
+});
+
+describe("describePlanStepParts", () => {
+  it.each<[string, PlanStep, string, string]>([
+    ["goto", { action: "goto", target: null, value: "/calendar" }, "Go to", "/calendar"],
+    ["click", CLICK_SIGN_IN, "Click", 'button "Sign in"'],
+    ["hover", { action: "hover", target: { title: "Help" }, value: null }, "Hover over", 'the element titled "Help"'],
+    [
+      "fill",
+      { action: "fill", target: { label: "Search" }, value: "hello" },
+      "Type",
+      '"hello" into the field labelled "Search"',
+    ],
+    ["scroll", { action: "scroll", target: null, value: "600" }, "Scroll by", "600 pixels"],
+    ["waitForUrl", { action: "waitForUrl", target: null, value: "**/done" }, "Wait for", "the address **/done"],
+    [
+      "expectVisible",
+      { action: "expectVisible", target: { role: "heading", name: "Open Yoga" }, value: null },
+      "Check that",
+      'heading "Open Yoga" is visible',
+    ],
+    ["log", { action: "log", target: null, value: "Signed in" }, "Note:", "Signed in"],
+  ])("splits %s into its verb and the rest", (_caseName, step, expectedVerb, expectedRest) => {
+    expect(describePlanStepParts(step)).toEqual({ verb: expectedVerb, rest: expectedRest });
+  });
+
+  it("joins back into exactly the sentence describePlanStep gives, for every action", () => {
+    for (const action of PLAN_STEP_ACTIONS) {
+      const step: PlanStep = { action, target: { role: "button", name: "Go" }, value: "x" };
+      const { verb, rest } = describePlanStepParts(step);
+      expect(describePlanStep(step)).toBe(`${verb} ${rest}`);
+    }
   });
 });
 
