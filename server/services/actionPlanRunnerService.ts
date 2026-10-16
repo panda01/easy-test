@@ -657,7 +657,7 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
   };
 
   const startedAt = performance.now();
-  const browser = await chromium.launch({ headless: false, slowMo: PLAN_RUN_SLOW_MO_MS });
+  const browser = await chromium.launch({ headless: true, slowMo: PLAN_RUN_SLOW_MO_MS });
   // Kept on an object because the timer below changes it from a callback.
   const timeLimit: { wasHit: boolean; stopping: Promise<FailureEvidence> | null } = {
     wasHit: false,

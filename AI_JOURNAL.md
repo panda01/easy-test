@@ -4,6 +4,123 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-16 14:24 EDT — `setup-droplet.sh`: undid the "no asterisks at sudo's prompt" change
+
+**Intent:**
+- Undo the 14:00 change (the entry below), as the user asked. sudo's password prompt shows `*` per character again, which is Ubuntu 26.04's sudo-rs default.
+
+### Decisions
+- **Made by the user:** undo the change.
+- **Made by me:** the 14:00 entry stays as history, and this entry records the undo.
+
+### Files changed
+| File | What changed |
+|---|---|
+| `setup-droplet.sh` | **Removed:** the readonly setting `sudo_no_password_feedback_file`; from `run_root_phase`, the step that wrote `Defaults !pwfeedback` to `/etc/sudoers.d/no-password-feedback` (and its local `sudoers_draft`); the "stop sudo from showing *" wording in header step 2. The script is back to the 13:44 version. |
+| `AI_JOURNAL.md` | This entry. |
+
+### Verification
+- `bash -n` passes, `shellcheck` is clean, and `grep` finds no `pwfeedback`, `sudoers`, `visudo` or "asterisk" left in the script.
+- **Docker** (fresh `ubuntu:26.04` arm64 container with systemd, the same harness):
+  - The first run exits 0.
+  - The log shows `[sudo: authenticate] Password: ***************` again.
+  - `/etc/sudoers.d/` holds only `README`.
+  - The 23 original checks in `check.sh` pass. Its 2 sudoers checks were removed.
+- **Cleanup:** the test container and `droplet-test-image` were removed. No servers were left running.
+
+---
+
+## 2026-10-16 14:00 EDT — `setup-droplet.sh`: no asterisks at sudo's password prompt
+
+**Intent:**
+- The user saw `*` for every character at the sudo password prompt and asked for even that to be hidden.
+- The cause: Ubuntu 26.04's sudo is sudo-rs, which turns on `pwfeedback` (asterisks) by default. The `passwd` prompts were already silent.
+
+### Decisions
+- **Made by the user:** no typing feedback at all at the password prompt.
+- **Made by me:**
+  - Add a sudoers drop-in, `/etc/sudoers.d/no-password-feedback`, containing `Defaults !pwfeedback`.
+  - It is checked with `visudo -c -f` before it is installed, then installed 440 root:root.
+  - It is written in the root half before the `su -` handoff, so the first sudo prompt is already silent.
+  - It applies to every sudo user on the droplet.
+
+### Files changed
+| File | What changed |
+|---|---|
+| `setup-droplet.sh` | **New readonly setting:** `sudo_no_password_feedback_file`. **Changed `run_root_phase`:** a new step after `usermod` writes `Defaults !pwfeedback` to a `mktemp` draft (new local `sudoers_draft`), checks it with `visudo -c -f`, installs it with mode 440, and deletes the draft. Header step 2 updated. |
+| `AI_JOURNAL.md` | This entry. |
+
+### Verification
+- `bash -n` passes, and `shellcheck` is clean.
+- **Docker** (`ubuntu:26.04` arm64 with systemd, the same harness as the entry below, run from a fresh container):
+  - **First run:** exit 0. The log shows `[sudo: authenticate] Password: ` with nothing after it (before this change: `***************`). `visudo` printed "parsed OK". All 25 checks in `check.sh` pass, including 2 new ones: the drop-in is 440 root:root, and `visudo -c` passes for the whole sudo config.
+  - **Second run:** exit 0. Still no asterisks; the skip paths are unchanged; 25/25 checks pass.
+- **Not verified:** on a real droplet.
+- **Cleanup:** the test container and `droplet-test-image` were removed. No servers were left running.
+
+---
+
+## 2026-10-16 13:44 EDT — `setup-droplet.sh`: first-boot setup for a DigitalOcean Ubuntu 26.04 droplet
+
+**Intent:**
+- Give the user one script to run as root on a fresh DigitalOcean Ubuntu 26.04 droplet, as they asked. It:
+  - creates `panda01`, asks for its password, gives it sudo, and copies root's `authorized_keys` to it;
+  - switches to `panda01` with `su -` and, using sudo, installs nginx and turns on ufw (OpenSSH, plus nginx from anywhere);
+  - installs nvm and Node 26 as `panda01`;
+  - creates a GitHub SSH key and prints its public half to add to the repo.
+- Every line of the script is explained in a comment, as the user asked.
+
+### Decisions
+- **Made by the user** (answered in Plannotator, plan v1, then approved in v2):
+  - The GitHub key has no passphrase (`-N ""`), so the server can `git pull` without anyone there.
+  - The key file is the default `~/.ssh/id_ed25519`, so a plain `git clone git@github.com:...` uses it with no `~/.ssh/config`.
+  - The script lives in the repo root next to `stop-dev.sh`, left uncommitted.
+  - Verification is a Docker `ubuntu:26.04` container with systemd.
+- **Made by me** (listed in the approved plan):
+  - Firewall rules: `ufw allow OpenSSH` (port 22) and `ufw allow 'Nginx Full'` (80 and 443).
+  - The key label is `panda01@$(hostname)`.
+  - GitHub's published ed25519 host key goes into `known_hosts`.
+  - A `curl http://localhost` check runs after nginx is installed.
+  - Re-runs skip the user, password, key and `authorized_keys` when they already exist.
+- **Found while testing:**
+  - `su - user -c` (util-linux) runs the command with no terminal, so sudo stopped with "A terminal is required to authenticate". It is now `su --pty - panda01 -c ...`, still the `su -` login the user asked for.
+  - Ubuntu 26.04 ships `sudo-rs` and Rust coreutils. The script works with both.
+- **Open, asked the user:** whether to add `libatomic1` to the script's `apt-get install` line as a safeguard (see Verification).
+- **Not changed:** `package.json` still pins `"engines": { "node": "=25.4.0" }`. On Node 26, `npm install` prints an EBADENGINE warning (only a warning unless `engine-strict` is set).
+
+### Files changed
+| File | What changed |
+|---|---|
+| `setup-droplet.sh` | **New**, executable. **Functions:** `run_root_phase(this_script_path)` (checks, `useradd`, `passwd` retry loop, `usermod -aG sudo`, `authorized_keys` copy, copies itself to panda01's home, the `su --pty -` handoff, a cleanup `trap`) and `run_new_user_phase()` (apt/nginx, `systemctl enable --now nginx` plus a `curl` check, ufw, nvm `v0.40.8`, Node 26 plus a version check, `ssh-keygen`, `known_hosts`, the printed key and steps). **Readonly settings:** `new_username`, `new_user_home`, `new_user_script_copy`, `as_new_user_flag`, `root_authorized_keys`, `nvm_version`, `node_major_version`, `github_key_file_name`, `github_host_key_line`. JSDoc-style header and function comments. |
+| `AI_JOURNAL.md` | This entry. |
+
+No application code, tests or config were changed, so `npm run lint` and `npm run test:coverage` were not run.
+
+### Verification
+- `bash -n` passes, and `shellcheck` (run inside the container) is clean.
+- **Docker:** an `ubuntu:26.04` (arm64) container with systemd as PID 1, `--privileged`, and the packages a droplet ships. The script ran as root under `expect`, which typed the password at each prompt. Files are in `claude_tmp/droplet-test/` (`Dockerfile`, `run-setup.exp`, `check.sh`, `run1.log`, `run2.log`).
+  - **First run:** exit 0. All 23 checks in `check.sh` pass:
+    - user, shell, sudo group and password;
+    - `authorized_keys` identical to root's, 700/600, owned by panda01;
+    - sudo works;
+    - nginx active, enabled and serving its welcome page;
+    - ufw active at boot with OpenSSH and Nginx Full from Anywhere (v4 and v6);
+    - `node -v` is v26.12.0 in a login shell, with npm 11.20.0;
+    - ed25519 key with no passphrase, mode 600, label `panda01@test-droplet`;
+    - GitHub's host key in `known_hosts`, and `ssh -T git@github.com` reaches GitHub with no host prompt ("Permission denied (publickey)", as expected before the key is added);
+    - the script's copy in panda01's home removed.
+  - **Second run:** exit 0. No new-password prompt, only sudo's. The key, `authorized_keys` and `known_hosts` are unchanged. ufw says "Skipping adding existing rule". 23/23 checks still pass.
+  - **Refusals:** not root, run through `cat | bash`, and no root `authorized_keys` each exit 1 with a clear message.
+- **Test-image fixes** (the test image, not the script), to match a real droplet:
+  - Added `openssh-server`, which provides the `OpenSSH` ufw profile.
+  - Added `libatomic1`. Node's official x64 and arm64 builds both need `libatomic.so.1` (`readelf -d` on `node-v26.12.0-linux-x64`). Ubuntu's published 26.04 amd64 server cloud-image manifest includes `libatomic1`, but the bare Docker base image doesn't.
+- **Not verified:**
+  - On a real droplet or on x86_64 (this Mac's Docker runs arm64 only).
+  - The GitHub deploy-key login itself (needs the key added to a repo).
+- **Cleanup:** the test container, `droplet-test-image` and the `ubuntu:26.04` base image (not on this Mac before) were removed. No servers were left running. Docker's build cache from these builds remains.
+
+---
+
 ## 2026-10-15 11:22 EDT — Centered fixed-width pages, crawl History filtered by "Crawl as", a plus on every create button
 
 **Intent:**

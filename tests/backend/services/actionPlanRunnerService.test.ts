@@ -311,7 +311,7 @@ describe("runActionPlan", () => {
     await runActionPlan(buildRunRequest());
 
     expect(mockMkdir).toHaveBeenCalledWith(RUN_DIRECTORY, { recursive: true });
-    expect(mockChromium.launch).toHaveBeenCalledWith({ headless: false, slowMo: PLAN_RUN_SLOW_MO_MS });
+    expect(mockChromium.launch).toHaveBeenCalledWith({ headless: true, slowMo: PLAN_RUN_SLOW_MO_MS });
     expect(PLAN_RUN_SLOW_MO_MS).toBe(100);
     expect(mockBrowser.newPage).toHaveBeenCalledWith({ viewport: { width: 1280, height: 720 } });
     expect(mockPage.setDefaultTimeout).toHaveBeenCalledWith(PLAN_STEP_TIMEOUT_MS);

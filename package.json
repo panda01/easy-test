@@ -21,7 +21,7 @@
     "stop": "pm2 stop easy-test",
     "restart": "pm2 restart easy-test",
     "logs": "pm2 logs easy-test",
-    "postinstall": "prisma generate && prisma db push && playwright install chromium",
+    "postinstall": "prisma generate && prisma db push && playwright install --with-deps chromium",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
