@@ -4,6 +4,34 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-19 12:23 EDT — Pin Node to 26.12.0, the version used locally
+
+**Intent:**
+- The user asked to update `engines` to Node 26.12. It was pinned to `=25.4.0`, while local development runs v26.12.0. CI (`actions/setup-node` with `node-version-file: package.json`) was testing on 25.4.0.
+- This change came up while looking into the failing CI run 39277861813. It doesn't fix those failures: `ActionPlanEditor.test.tsx` times out on the slower GitHub runner, and that is a separate issue.
+
+### Decisions
+- **Made by the user:** move to Node 26.12.
+- **Made by me:**
+  - Kept the existing exact-pin style, `=26.12.0`.
+  - Also updated the two docs that repeat the version (README, the workflow comment).
+  - `setup-droplet.sh` already installs Node 26 through nvm, so it was left alone.
+
+### Files changed
+| File | Change |
+|---|---|
+| `package.json` | **Changed:** `engines.node` from `=25.4.0` to `=26.12.0`. |
+| `package-lock.json` | **Changed:** the root package's mirrored `engines.node`, to `=26.12.0`. |
+| `README.md` | **Changed:** "First-time setup" now says it requires Node 26.12.0. |
+| `.github/workflows/tests.yml` | **Changed:** the comment on the "Set up Node from package.json engines" step now names `=26.12.0`. No step changed. |
+
+### Verification
+- `semver.satisfies("v26.12.0", "=26.12.0")` is true for the local Node.
+- `npm ci --dry-run --ignore-scripts` exits 0, so the lockfile is still in sync with `package.json`.
+- `actions/node-versions/versions-manifest.json` lists 26.12.0 with `node-26.12.0-linux-x64.tar.gz`, so `setup-node` can install it on `ubuntu-latest`.
+
+---
+
 ## 2026-10-19 10:28 EDT — Structure skeletons are only built for pages whose URL could be a slug
 
 **Intent:**

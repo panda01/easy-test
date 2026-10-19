@@ -155,7 +155,7 @@ Development runs on `npm run dev`. A production build runs under pm2 with
 
 ## First-time setup
 
-Requires Node 25.4.0 and a local PostgreSQL server.
+Requires Node 26.12.0 and a local PostgreSQL server.
 
 ```sh
 createdb easy_test_dev
