@@ -927,10 +927,12 @@ describe("ActionDetailPage", () => {
       expect(screen.getByRole("heading", { name: "Refine with Claude" })).toBeInTheDocument();
       expect(screen.getByText("Optional · 0 / 2,000")).toBeInTheDocument();
 
-      await user.type(
-        screen.getByRole("textbox", { name: "Note for Claude (optional)" }),
-        "  The link is called Profile now  ",
-      );
+      // Pasted, not typed: the note is a multiline field, and MUI's autosize
+      // re-measures it with getComputedStyle after every keystroke (~8ms each
+      // under jsdom). Typing it took about half this spec's time and pushed it
+      // past the 5s timeout when the suite ran under load.
+      await user.click(screen.getByRole("textbox", { name: "Note for Claude (optional)" }));
+      await user.paste("  The link is called Profile now  ");
       expect(screen.getByText("Optional · 34 / 2,000")).toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "Refine into Version 2" }));
 

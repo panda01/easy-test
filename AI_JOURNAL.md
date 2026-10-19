@@ -4,6 +4,65 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-19 16:35 EDT — The refine spec pastes its note instead of typing it
+
+**Intent:**
+- The user asked to paste the note's value in the refine spec ("refines a failed run into the next version…"). It timed out at 5 s in a full `test:coverage` run.
+- Typing the 34-character note was about half the spec's time, because MUI's autosize re-measures the multiline field with `getComputedStyle` after every keystroke (see the 16:32 entry). Pasting sets the text in one change.
+
+### Decisions
+- **Made by the user:** paste the note rather than type it (after the memoized-textarea attempt did not help).
+- **Made by me:**
+  - Kept the same text, so the 34-character counter and the trimmed note in the request body are still checked.
+  - Added a comment saying why this spec pastes.
+  - Changed only this spec. The other typing-heavy specs that have timed out under load (`CredentialForm`, `WebsiteForm`, `CredentialCreatePage`, `WebsiteCreatePage`) are untouched.
+
+### Files changed
+| File | Change |
+|---|---|
+| `tests/frontend/ActionDetailPage.test.tsx` | **Changed:** in "refines a failed run into the next version…", `user.type(noteField, …)` became `user.click(noteField)` + `user.paste(…)`, with a comment explaining why. Assertions are unchanged. |
+
+### Verification
+- The spec file alone, 5 runs: 55/55 each time. This spec took 304–436 ms in the verbose reporter, down from 869 ms in the same reporter before.
+- `npm run tsc:client` passes.
+- `npm run test:coverage`: 119/119 files and 2550/2550 tests. Statements 99.49 %, branches 98.5 %, functions 100 %, lines 99.78 %, all above the 80/70/80/80 thresholds.
+- Not run: `npm run lint`. It covers only `server` and `src`, and this change is in `tests/`. No Playwright check, because no app code changed.
+
+---
+
+## 2026-10-19 16:32 EDT — Tried a memoized textarea for the refine note; no speedup, reverted
+
+**Intent:**
+- The refine spec in `ActionDetailPage.test.tsx` ("refines a failed run into the next version…") timed out at 5 s during a full `test:coverage` run. It takes ~0.9 s on its own.
+- About half of that is `user.type` entering a 34-character note. Each keystroke re-renders `ActionScriptRunDetails`, the note's state is local to it (`:93`), and MUI's `TextareaAutosize` re-measures itself with `getComputedStyle` after every render (`TextareaAutosize.js:176-178` → `:73`). That costs ~8 ms per keystroke under jsdom. The page as a whole does not re-render.
+- The user asked to try forge-gym's `MemoizedTextArea` on this field and report whether it speeds the test up.
+
+### Decisions
+- **Made by the user:** try `memo` on this one textarea and measure.
+- **Made by me (in the plan the user accepted):** revert if it doesn't help.
+
+### Files changed
+None in the end. During the experiment:
+- `src/components/MemoizedTextArea.tsx` was added (`MemoizedTextAreaProps`, `MemoizedTextArea`), then deleted.
+- In `src/components/ActionScriptRunDetails.tsx`, the note's `TextField` became `MemoizedTextArea` with `onValueChange={setNoteText}`, and `handleNoteChange` was removed. All of it was restored. `git diff` is empty.
+
+### Result
+- Measured with a throwaway setup file in `claude_tmp/`, which counts `getComputedStyle` calls on a `<textarea>` per test. 5 runs before and 5 after. Both runs passed 55/55.
+
+| | Before | With memo |
+|---|---|---|
+| Refine spec, textarea style reads | 45 | 45 |
+| Refine spec, time (5 runs) | 755–931 ms, median 894 | 823–903 ms, median 854 |
+| Whole file, textarea style reads | 59 | 57 |
+| Whole file, total of test times | 8.6–9.8 s, median 9.2 | 8.3–9.6 s, median 8.8 |
+
+- The time differences are within run-to-run noise.
+- **Why it can't help here:** `memo` skips a render only when the props are unchanged. Typing goes into this textarea itself, so its `value` changes on every keystroke. In forge-gym it helped because the keystrokes went into *other* fields of a form that kept every field in one state object.
+- MUI 7 also uses `TextareaAutosize` for a fixed `rows`, so that would not avoid the measurement either (`InputBase.js:440-461`).
+- What did measure faster earlier: entering the note with `user.click` + `user.paste` instead of `user.type`. Note entry went from ~440 ms to ~55 ms, and the spec from ~920 ms to ~560 ms (measured on a copy in `claude_tmp/`, not applied).
+
+---
+
 ## 2026-10-19 15:49 EDT — Vite's dev watcher skips coverage/ and claude_tmp/
 
 **Intent:**
