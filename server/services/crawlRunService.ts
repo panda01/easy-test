@@ -7,6 +7,7 @@ import {
   markCrawlRunLoggedIn,
   markRunningCrawlRunsInterrupted,
   recordCrawledPage,
+  saveCrawledPageStructureSkeletons,
   type CrawlRunWithCredential,
   type CrawledPageInput,
   type CrawlProgress,
@@ -24,6 +25,8 @@ import { buildCrawlLoginDetails, type CrawlLoginDetails } from "./crawlerLoginSe
 import { measureElapsedMs } from "./playwrightService.js";
 import { describeError } from "../utils/describeError.js";
 import { DEFAULT_CRAWL_BUTTON_MODE, type CrawlButtonMode } from "../utils/crawlButtonModes.js";
+import { saveCrawlWebObjects } from "./webObjectService.js";
+import type { NewStructureSkeleton } from "../utils/crawlPatternSampling.js";
 
 /**
  * The websites with a crawl running in THIS process. Checked and updated
@@ -94,6 +97,8 @@ async function recordCrawlFailure(
     await finishCrawlRun(crawlRun.websiteId, crawlRun.id, {
       status: "failed",
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       errorMessage: describeError(crawlError),
       loginFailureScreenshotFileName: null,
       durationMs: measureElapsedMs(crawlStartedAt),
@@ -223,8 +228,11 @@ function describeCrawlRunEnding(
 
 /**
  * Runs one crawl to the end in the background and records it: the login
- * (when it has a credential), each page as it is visited, then how the crawl
- * ended.
+ * (when it has a credential), each page as it is visited - and the structure
+ * skeletons its slug detection builds for recorded pages - then how the crawl
+ * ended - with the links its sampling skipped - and, when it recorded at
+ * least one page, the web objects it found, which replace the website's
+ * previous ones (see `saveCrawlWebObjects`; a failure there is only logged).
  *
  * NEVER rejects - every failure becomes a `failed` run (or a log line) -
  * because nothing awaits it in production. When the run was deleted with its
@@ -264,6 +272,16 @@ async function runCrawlInBackground(
     return recordedPage?.id ?? null;
   };
 
+  /**
+   * Saves the structure skeletons the crawl's slug detection built for pages
+   * this run already recorded.
+   * @param structureSkeletons - Each recorded page's id and its new skeleton
+   * @returns True when they were saved; false when the run is no longer active
+   */
+  const recordStructureSkeletons = async (
+    structureSkeletons: NewStructureSkeleton[],
+  ): Promise<boolean> => saveCrawledPageStructureSkeletons(website.id, crawlRun.id, structureSkeletons);
+
   const crawlLogin: CrawlLogin | null =
     credentialLogin === null ? null : buildCrawlLogin(website, crawlRun, credentialLogin);
 
@@ -275,6 +293,7 @@ async function runCrawlInBackground(
         screenshotMinimumWaitMs: website.screenshotMinimumWaitMs,
       },
       recordVisitedPage,
+      recordStructureSkeletons,
       crawlLogin,
       buttonMode,
     );
@@ -291,13 +310,24 @@ async function runCrawlInBackground(
     const loginFailureScreenshotFileName = crawlOutcome.loginFailureScreenshotWasCaptured
       ? (credentialLogin?.failureScreenshotFileName ?? null)
       : null;
-    await finishCrawlRun(website.id, crawlRun.id, {
+    const runWasFinished = await finishCrawlRun(website.id, crawlRun.id, {
       status: crawlRunEnding.status,
       waitingUrlCount: crawlOutcome.waitingUrlCount,
+      skippedSimilarUrlCount: crawlOutcome.skippedSimilarUrlCount,
+      skippedSimilarUrlCountsByPattern: crawlOutcome.skippedSimilarUrlCountsByPattern,
       errorMessage: crawlRunEnding.errorMessage,
       loginFailureScreenshotFileName,
       durationMs: measureElapsedMs(crawlStartedAt),
     });
+    const crawlRecordedPages = crawlOutcome.visitedPageCount > 0;
+    const crawlFoundWebObjectsToSave = runWasFinished && crawlRecordedPages;
+    if (crawlFoundWebObjectsToSave) {
+      await saveCrawlWebObjects(
+        website.id,
+        crawlRun.id,
+        crawlOutcome.skippedSimilarUrlCountsByPattern,
+      );
+    }
   } catch (crawlError: unknown) {
     await recordCrawlFailure(crawlRun, crawlStartedAt, crawlError);
   } finally {

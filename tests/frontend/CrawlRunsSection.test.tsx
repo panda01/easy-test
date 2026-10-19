@@ -4,6 +4,7 @@ import { userEvent } from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import CrawlRunsSection, {
   CRAWL_LOGGED_OUT_VALUE,
+  DEFAULT_CRAWL_BUTTON_MODE,
   type CrawlRunsSectionProps,
 } from "../../src/components/CrawlRunsSection";
 import { buildCrawlRunRecord, buildCredentialRecord } from "./support/frontendTestHelpers";
@@ -56,6 +57,8 @@ function renderSection(overrides: Partial<CrawlRunsSectionProps> = {}): RenderRe
     credentials: [adminCredential, editorCredential],
     selectedCredentialId: CRAWL_LOGGED_OUT_VALUE,
     onSelectedCredentialChange: vi.fn(),
+    selectedButtonMode: DEFAULT_CRAWL_BUTTON_MODE,
+    onSelectedButtonModeChange: vi.fn(),
     now: NOW,
     ...overrides,
   };
@@ -82,12 +85,75 @@ describe("CrawlRunsSection", () => {
     expect(screen.queryByText(/follows every link/)).not.toBeInTheDocument();
   });
 
-  it("hides the Crawl as picker, keeping the Crawl website button, when told to", () => {
+  it("hides the Crawl as picker, keeping the Buttons picker and the Crawl website button, when told to", () => {
     renderSection({ crawlAsPickerIsShown: false });
 
     expect(screen.queryByRole("combobox", { name: "Crawl as" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("combobox")).toEqual([screen.getByRole("combobox", { name: "Buttons" })]);
     expect(screen.getByRole("button", { name: "Crawl website" })).toBeEnabled();
+  });
+
+  it("puts Crawl as first, then Buttons, with the Crawl website button below them", () => {
+    renderSection();
+
+    const crawlAsPicker = screen.getByRole("combobox", { name: "Crawl as" });
+    const buttonModePicker = screen.getByRole("combobox", { name: "Buttons" });
+    const crawlButton = screen.getByRole("button", { name: "Crawl website" });
+    const buttonModePickerFollowsCrawlAs =
+      crawlAsPicker.compareDocumentPosition(buttonModePicker) & Node.DOCUMENT_POSITION_FOLLOWING;
+    const crawlButtonFollowsButtonModePicker =
+      buttonModePicker.compareDocumentPosition(crawlButton) & Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(buttonModePickerFollowsCrawlAs).toBeTruthy();
+    expect(crawlButtonFollowsButtonModePicker).toBeTruthy();
+    // Each picker and the button sit in their own row of the column, not side by side.
+    expect(crawlAsPicker.closest(".MuiInputBase-root")?.parentElement).toBe(
+      crawlButton.parentElement?.parentElement,
+    );
+    expect(buttonModePicker.closest(".MuiInputBase-root")?.parentElement).toBe(
+      crawlButton.parentElement?.parentElement,
+    );
+  });
+
+  it("shows the Buttons picker reading Links only by default, offering every mode", async () => {
+    const user = userEvent.setup();
+    renderSection();
+
+    const buttonModePicker = screen.getByRole("combobox", { name: "Buttons" });
+    expect(buttonModePicker).toHaveTextContent("Links only (no buttons)");
+    await user.click(buttonModePicker);
+    const options = await screen.findAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Links only (no buttons)",
+      "Buttons, except risky ones",
+      "Only “Open” buttons",
+    ]);
+  });
+
+  it.each([
+    { optionName: "Buttons, except risky ones", buttonMode: "allButRisky" },
+    { optionName: "Only “Open” buttons", buttonMode: "openOnly" },
+  ])("hands the $buttonMode mode to the page when $optionName is picked", async ({ optionName, buttonMode }) => {
+    const user = userEvent.setup();
+    const onSelectedButtonModeChange = vi.fn();
+    renderSection({ onSelectedButtonModeChange });
+
+    await user.click(screen.getByRole("combobox", { name: "Buttons" }));
+    await user.click(await screen.findByRole("option", { name: optionName }));
+
+    expect(onSelectedButtonModeChange).toHaveBeenCalledWith(buttonMode);
+  });
+
+  it("shows the picked mode and hands back Links only when it is picked again", async () => {
+    const user = userEvent.setup();
+    const onSelectedButtonModeChange = vi.fn();
+    renderSection({ selectedButtonMode: "openOnly", onSelectedButtonModeChange });
+
+    const buttonModePicker = screen.getByRole("combobox", { name: "Buttons" });
+    expect(buttonModePicker).toHaveTextContent("Only “Open” buttons");
+    await user.click(buttonModePicker);
+    await user.click(await screen.findByRole("option", { name: "Links only (no buttons)" }));
+
+    expect(onSelectedButtonModeChange).toHaveBeenCalledWith("linksOnly");
   });
 
   it("lists every ended run, newest first, each linking to its own page with how long ago it ran", () => {
@@ -320,7 +386,7 @@ describe("CrawlRunsSection", () => {
     it("says there are no logged-out crawls, with no History list, when none of the ended crawls was logged out", () => {
       renderSection({ runs: [adminRun, editorRun], selectedCredentialId: CRAWL_LOGGED_OUT_VALUE });
 
-      expect(screen.getByText("No logged-out crawls yet.")).toBeInTheDocument();
+      expect(screen.getByText("No logged-out crawls with links only yet.")).toBeInTheDocument();
       expect(screen.queryByRole("list", { name: "History" })).not.toBeInTheDocument();
       expect(screen.queryByText("No crawls yet.")).not.toBeInTheDocument();
     });
@@ -328,14 +394,14 @@ describe("CrawlRunsSection", () => {
     it("names the picked credential when none of the ended crawls was made as it", () => {
       renderSection({ runs: [loggedOutRun, editorRun], selectedCredentialId: "credential-1" });
 
-      expect(screen.getByText("No crawls as “Admin” yet.")).toBeInTheDocument();
+      expect(screen.getByText("No crawls as “Admin” with links only yet.")).toBeInTheDocument();
       expect(screen.queryByRole("list", { name: "History" })).not.toBeInTheDocument();
     });
 
     it("falls back to the picked credential when it is no longer among the credentials", () => {
       renderSection({ runs: [loggedOutRun], selectedCredentialId: "credential-gone" });
 
-      expect(screen.getByText("No crawls as the picked credential yet.")).toBeInTheDocument();
+      expect(screen.getByText("No crawls as the picked credential with links only yet.")).toBeInTheDocument();
     });
 
     it("says nothing about the pick while the only crawl is still running", () => {
@@ -362,6 +428,111 @@ describe("CrawlRunsSection", () => {
       );
       expect(screen.getByRole("button", { name: "Crawl website" })).toBeDisabled();
       expect(getHistoryHrefs()).toEqual(["/websites/website-1/crawl-runs/logged-out-run"]);
+    });
+  });
+
+  describe("History filtered by Buttons", () => {
+    const loggedOutLinksOnlyRun = buildCrawlRunRecord({
+      id: "logged-out-links-only-run",
+      createdAt: "2026-03-05T04:06:07.000Z",
+    });
+    const loggedOutOpenOnlyRun = buildCrawlRunRecord({
+      id: "logged-out-open-only-run",
+      buttonMode: "openOnly",
+      createdAt: "2026-03-05T03:06:07.000Z",
+    });
+    const adminAllButRiskyRun = buildCrawlRunRecord({
+      id: "admin-all-but-risky-run",
+      credentialId: "credential-1",
+      isLoggedIn: true,
+      credential: { id: "credential-1", name: "Admin" },
+      buttonMode: "allButRisky",
+      createdAt: "2026-03-05T02:06:07.000Z",
+    });
+    const adminOpenOnlyRun = buildCrawlRunRecord({
+      id: "admin-open-only-run",
+      credentialId: "credential-1",
+      isLoggedIn: true,
+      credential: { id: "credential-1", name: "Admin" },
+      buttonMode: "openOnly",
+      createdAt: "2026-03-05T01:06:07.000Z",
+    });
+    const mixedRuns = [loggedOutLinksOnlyRun, loggedOutOpenOnlyRun, adminAllButRiskyRun, adminOpenOnlyRun];
+
+    /**
+     * Reads where each History row links to, which names its run.
+     * @returns The hrefs of the History rows, in order
+     */
+    function getHistoryHrefs(): (string | null)[] {
+      return getHistoryLinks().map((link) => link.getAttribute("href"));
+    }
+
+    it("lists only the crawls made with the picked mode as the picked person", () => {
+      renderSection({ runs: mixedRuns, selectedCredentialId: CRAWL_LOGGED_OUT_VALUE, selectedButtonMode: "openOnly" });
+
+      expect(getHistoryHrefs()).toEqual(["/websites/website-1/crawl-runs/logged-out-open-only-run"]);
+    });
+
+    it("needs both picks to match: a credential's crawls in another mode stay hidden", () => {
+      renderSection({ runs: mixedRuns, selectedCredentialId: "credential-1", selectedButtonMode: "allButRisky" });
+
+      expect(getHistoryHrefs()).toEqual(["/websites/website-1/crawl-runs/admin-all-but-risky-run"]);
+    });
+
+    it("filters by the mode alone while the Crawl as picker is hidden", () => {
+      renderSection({ runs: mixedRuns, crawlAsPickerIsShown: false, selectedButtonMode: "openOnly" });
+
+      expect(getHistoryHrefs()).toEqual([
+        "/websites/website-1/crawl-runs/logged-out-open-only-run",
+        "/websites/website-1/crawl-runs/admin-open-only-run",
+      ]);
+    });
+
+    it.each([
+      {
+        label: "Logged out with buttons except risky ones",
+        selectedCredentialId: CRAWL_LOGGED_OUT_VALUE,
+        selectedButtonMode: "allButRisky" as const,
+        runs: [loggedOutLinksOnlyRun, adminAllButRiskyRun],
+        expectedText: "No logged-out crawls with buttons except risky ones yet.",
+      },
+      {
+        label: "Admin with links only",
+        selectedCredentialId: "credential-1",
+        selectedButtonMode: "linksOnly" as const,
+        runs: [loggedOutLinksOnlyRun, adminOpenOnlyRun],
+        expectedText: "No crawls as “Admin” with links only yet.",
+      },
+      {
+        label: "a credential no longer listed with only Open buttons",
+        selectedCredentialId: "credential-gone",
+        selectedButtonMode: "openOnly" as const,
+        runs: [loggedOutOpenOnlyRun],
+        expectedText: "No crawls as the picked credential with only “Open” buttons yet.",
+      },
+    ])("names both picks when none of the ended crawls matches $label", ({ selectedCredentialId, selectedButtonMode, runs, expectedText }) => {
+      renderSection({ runs, selectedCredentialId, selectedButtonMode });
+
+      expect(screen.getByText(expectedText)).toBeInTheDocument();
+      expect(screen.queryByRole("list", { name: "History" })).not.toBeInTheDocument();
+      expect(screen.queryByText("No crawls yet.")).not.toBeInTheDocument();
+    });
+
+    it("names only the mode when no ended crawl matches it while the Crawl as picker is hidden", () => {
+      renderSection({ runs: [loggedOutLinksOnlyRun], crawlAsPickerIsShown: false, selectedButtonMode: "allButRisky" });
+
+      expect(screen.getByText("No crawls with buttons except risky ones yet.")).toBeInTheDocument();
+      expect(screen.queryByRole("list", { name: "History" })).not.toBeInTheDocument();
+    });
+
+    it("still shows the running crawl made in a mode other than the picked one", () => {
+      const openOnlyRunningRun = buildCrawlRunRecord({ ...runningRun, buttonMode: "openOnly" });
+      renderSection({ runs: [openOnlyRunningRun, loggedOutLinksOnlyRun], selectedButtonMode: "linksOnly" });
+
+      const progressCard = screen.getByRole("status");
+      expect(within(progressCard).getByText("Crawl running")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Crawl website" })).toBeDisabled();
+      expect(getHistoryHrefs()).toEqual(["/websites/website-1/crawl-runs/logged-out-links-only-run"]);
     });
   });
 });

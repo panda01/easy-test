@@ -18,6 +18,8 @@ const {
   mockCrawlRunDelegate,
   mockCrawledPageDelegate,
   mockCredentialDelegate,
+  mockWebObjectDelegate,
+  mockPagePatternDelegate,
   mockTransaction,
 } = vi.hoisted(
   () => {
@@ -28,8 +30,8 @@ const {
      * `prisma.useCase`, `prisma.action`, `prisma.screenshotRun`,
      * `prisma.actionScript`, `prisma.actionScriptRun`,
      * `prisma.actionScriptRefinement`, `prisma.crawlRun`,
-     * `prisma.crawledPage`, `prisma.credential`) carrying every method
-     * dbService calls.
+     * `prisma.crawledPage`, `prisma.credential`, `prisma.webObject`,
+     * `prisma.pagePattern`) carrying every method dbService calls.
      * @returns An object whose query methods are bare vitest mocks
      */
     function createMockModelDelegate() {
@@ -39,6 +41,7 @@ const {
         create: vi.fn(),
         update: vi.fn(),
         updateMany: vi.fn(),
+        createMany: vi.fn(),
       };
     }
 
@@ -52,6 +55,8 @@ const {
     const crawlRunDelegate = createMockModelDelegate();
     const crawledPageDelegate = createMockModelDelegate();
     const credentialDelegate = createMockModelDelegate();
+    const webObjectDelegate = createMockModelDelegate();
+    const pagePatternDelegate = createMockModelDelegate();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
@@ -65,6 +70,8 @@ const {
       crawlRun: crawlRunDelegate,
       crawledPage: crawledPageDelegate,
       credential: credentialDelegate,
+      webObject: webObjectDelegate,
+      pagePattern: pagePatternDelegate,
     };
 
     return {
@@ -78,6 +85,8 @@ const {
       mockCrawlRunDelegate: crawlRunDelegate,
       mockCrawledPageDelegate: crawledPageDelegate,
       mockCredentialDelegate: credentialDelegate,
+      mockWebObjectDelegate: webObjectDelegate,
+      mockPagePatternDelegate: pagePatternDelegate,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
@@ -109,6 +118,8 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     crawlRun = mockCrawlRunDelegate;
     crawledPage = mockCrawledPageDelegate;
     credential = mockCredentialDelegate;
+    webObject = mockWebObjectDelegate;
+    pagePattern = mockPagePatternDelegate;
     $transaction = mockTransaction;
   },
 }));
@@ -146,6 +157,7 @@ import {
   findCrawlRunForWebsite,
   createCrawlRunForWebsite,
   recordCrawledPage,
+  saveCrawledPageStructureSkeletons,
   finishCrawlRun,
   markRunningCrawlRunsInterrupted,
   listCrawledPageSummariesForRun,
@@ -159,6 +171,11 @@ import {
   softDeleteCredentialForWebsite,
   adoptWebsiteLoginUrl,
   findLatestCrawledPagesForWebsite,
+  replaceWebsiteWebObjects,
+  listWebObjectsForWebsite,
+  findWebObjectNamesForCrawlRun,
+  renameWebObject,
+  type WebObjectInput,
 } from "../../../server/services/dbService.js";
 
 const sampleWebsite = {
@@ -521,6 +538,7 @@ const sampleCrawledPageInput = {
 
 const sampleCrawledPage = {
   ...sampleCrawledPageInput,
+  structureSkeleton: "heading[level=1]",
   id: "crawled-page-1",
   crawlRunId: "crawl-run-1",
   websiteId: "cuid-1",
@@ -835,7 +853,7 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script refinements, crawl runs, crawled pages, and credentials inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script refinements, crawl runs, crawled pages, credentials, page patterns, and web objects inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
@@ -846,6 +864,8 @@ describe("dbService", () => {
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 30 });
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 2 });
+      mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 9 });
+      mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 4 });
 
       const websiteWasDeleted = await softDeleteWebsite("cuid-1");
 
@@ -892,9 +912,17 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockPagePatternDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(mockWebObjectDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
     });
 
-    it("softDeleteWebsite writes one shared deletedAt timestamp to all ten tables", async () => {
+    it("softDeleteWebsite writes one shared deletedAt timestamp to all twelve tables", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
@@ -905,6 +933,8 @@ describe("dbService", () => {
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 0 });
       const millisecondsBeforeCall = Date.now();
 
       await softDeleteWebsite("cuid-1");
@@ -924,6 +954,8 @@ describe("dbService", () => {
       const crawlRunDeletedAt = readDeletedAtWrittenBy(mockCrawlRunDelegate.updateMany);
       const crawledPageDeletedAt = readDeletedAtWrittenBy(mockCrawledPageDelegate.updateMany);
       const credentialDeletedAt = readDeletedAtWrittenBy(mockCredentialDelegate.updateMany);
+      const pagePatternDeletedAt = readDeletedAtWrittenBy(mockPagePatternDelegate.updateMany);
+      const webObjectDeletedAt = readDeletedAtWrittenBy(mockWebObjectDelegate.updateMany);
 
       expect(websiteDeletedAt).toBeInstanceOf(Date);
       expect(useCaseDeletedAt).toBe(websiteDeletedAt);
@@ -935,6 +967,8 @@ describe("dbService", () => {
       expect(crawlRunDeletedAt).toBe(websiteDeletedAt);
       expect(crawledPageDeletedAt).toBe(websiteDeletedAt);
       expect(credentialDeletedAt).toBe(websiteDeletedAt);
+      expect(pagePatternDeletedAt).toBe(websiteDeletedAt);
+      expect(webObjectDeletedAt).toBe(websiteDeletedAt);
       const deletedAtMilliseconds = (websiteDeletedAt as Date).getTime();
       expect(deletedAtMilliseconds).toBeGreaterThanOrEqual(millisecondsBeforeCall);
       expect(deletedAtMilliseconds).toBeLessThanOrEqual(millisecondsAfterCall);
@@ -956,6 +990,8 @@ describe("dbService", () => {
       expect(mockCrawlRunDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockCrawledPageDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockCredentialDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockPagePatternDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockWebObjectDelegate.updateMany).not.toHaveBeenCalled();
     });
 
     it("adoptWebsiteLoginUrl saves a learned login URL only on an active website that has none", async () => {
@@ -1880,11 +1916,58 @@ describe("dbService", () => {
       expect(mockCrawledPageDelegate.create).not.toHaveBeenCalled();
     });
 
+    it("saveCrawledPageStructureSkeletons locks the running run, then writes each skeleton on its active page, inside one transaction", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const skeletonsWereSaved = await saveCrawledPageStructureSkeletons("cuid-1", "crawl-run-1", [
+        { crawledPageId: "crawled-page-1", structureSkeleton: "heading[level=1]" },
+        { crawledPageId: "crawled-page-2", structureSkeleton: "heading[level=1]\nparagraph" },
+      ]);
+
+      expect(skeletonsWereSaved).toBe(true);
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+      expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "crawl-run-1", websiteId: "cuid-1", status: "running", deletedAt: null },
+        data: { updatedAt: expect.any(Date) },
+      });
+      expect(mockCrawledPageDelegate.updateMany.mock.calls).toEqual([
+        [
+          {
+            where: { id: "crawled-page-1", crawlRunId: "crawl-run-1", websiteId: "cuid-1", deletedAt: null },
+            data: { structureSkeleton: "heading[level=1]" },
+          },
+        ],
+        [
+          {
+            where: { id: "crawled-page-2", crawlRunId: "crawl-run-1", websiteId: "cuid-1", deletedAt: null },
+            data: { structureSkeleton: "heading[level=1]\nparagraph" },
+          },
+        ],
+      ]);
+      const runLockOrder = mockCrawlRunDelegate.updateMany.mock.invocationCallOrder[0];
+      const firstPageUpdateOrder = mockCrawledPageDelegate.updateMany.mock.invocationCallOrder[0];
+      expect(runLockOrder).toBeLessThan(firstPageUpdateOrder);
+    });
+
+    it("saveCrawledPageStructureSkeletons writes nothing and returns false when the run is no longer active and running", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      const skeletonsWereSaved = await saveCrawledPageStructureSkeletons("cuid-1", "deleted-run", [
+        { crawledPageId: "crawled-page-1", structureSkeleton: "heading[level=1]" },
+      ]);
+
+      expect(skeletonsWereSaved).toBe(false);
+      expect(mockCrawledPageDelegate.updateMany).not.toHaveBeenCalled();
+    });
+
     it("finishCrawlRun writes the outcome and finish time to the active running run only", async () => {
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
       const finish = {
         status: "stoppedAtPageLimit" as const,
         waitingUrlCount: 12,
+        skippedSimilarUrlCount: 5,
+        skippedSimilarUrlCountsByPattern: { "/websites/{website}": 5 },
         errorMessage: null,
         loginFailureScreenshotFileName: null,
         durationMs: 64000,
@@ -1905,6 +1988,8 @@ describe("dbService", () => {
       const runWasFinished = await finishCrawlRun("cuid-1", "deleted-run", {
         status: "finished",
         waitingUrlCount: 0,
+        skippedSimilarUrlCount: 0,
+        skippedSimilarUrlCountsByPattern: {},
         errorMessage: null,
         loginFailureScreenshotFileName: null,
         durationMs: 10,
@@ -1964,6 +2049,251 @@ describe("dbService", () => {
       mockCrawledPageDelegate.findFirst.mockResolvedValue(null);
 
       expect(await findCrawledPageForRun("cuid-1", "crawl-run-1", "other-page")).toBeNull();
+    });
+  });
+
+  describe("web objects", () => {
+    /** What every web object read includes: its active patterns in order, and its crawl's id and start. */
+    const WEB_OBJECT_INCLUDE = {
+      pagePatterns: { where: { deletedAt: null }, orderBy: { sortOrder: "asc" } },
+      crawlRun: { select: { id: true, createdAt: true } },
+    };
+
+    /** Two objects as a crawl's end hands them over: Website, then Action under it. */
+    const detectedWebObjects: WebObjectInput[] = [
+      {
+        instancePatternKey: "/websites/{website}",
+        detectedName: "Website",
+        parentInstancePatternKey: null,
+        instanceCount: 3,
+        skippedLinkCount: 0,
+        pagePatterns: [
+          {
+            key: "/websites/{website}",
+            segments: [
+              { kind: "static", value: "websites" },
+              { kind: "variable", placeholder: "website", valueShape: "cuid" },
+            ],
+            role: "instance",
+            viewName: null,
+            detectedBy: "idShape",
+            pageCount: 3,
+          },
+          {
+            key: "/websites/new",
+            segments: [
+              { kind: "static", value: "websites" },
+              { kind: "static", value: "new" },
+            ],
+            role: "create",
+            viewName: null,
+            detectedBy: "idShape",
+            pageCount: 1,
+          },
+        ],
+      },
+      {
+        instancePatternKey: "/websites/{website}/credentials/{credential}",
+        detectedName: "Credential",
+        parentInstancePatternKey: "/websites/{website}",
+        instanceCount: 1,
+        skippedLinkCount: 2,
+        pagePatterns: [],
+      },
+    ];
+
+    const sampleWebObject = {
+      id: "web-object-1",
+      websiteId: "cuid-1",
+      crawlRunId: "crawl-run-1",
+      parentWebObjectId: null,
+      instancePatternKey: "/websites/{website}",
+      detectedName: "Website",
+      name: "Site",
+      instanceCount: 3,
+      skippedLinkCount: 0,
+      sortOrder: 0,
+      createdAt: new Date("2026-01-09T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-09T00:00:00.000Z"),
+      deletedAt: null,
+      pagePatterns: [],
+      crawlRun: { id: "crawl-run-1", createdAt: new Date("2026-01-07T00:00:00.000Z") },
+    };
+
+    it("replaceWebsiteWebObjects locks the run, soft deletes the website's previous patterns and objects, then creates the new ones in order, parents first", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 5 });
+      mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 2 });
+      mockWebObjectDelegate.create
+        .mockResolvedValueOnce({ id: "web-object-website" })
+        .mockResolvedValueOnce({ id: "web-object-credential" });
+      mockPagePatternDelegate.createMany.mockResolvedValue({ count: 2 });
+
+      const webObjectsWereReplaced = await replaceWebsiteWebObjects("cuid-1", "crawl-run-1", detectedWebObjects);
+
+      expect(webObjectsWereReplaced).toBe(true);
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+      expect(mockCrawlRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "crawl-run-1", websiteId: "cuid-1", deletedAt: null },
+        data: { updatedAt: expect.any(Date) },
+      });
+      expect(mockPagePatternDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(mockWebObjectDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(mockWebObjectDelegate.create).toHaveBeenNthCalledWith(1, {
+        data: {
+          websiteId: "cuid-1",
+          crawlRunId: "crawl-run-1",
+          parentWebObjectId: null,
+          instancePatternKey: "/websites/{website}",
+          detectedName: "Website",
+          instanceCount: 3,
+          skippedLinkCount: 0,
+          sortOrder: 0,
+        },
+        select: { id: true },
+      });
+      expect(mockWebObjectDelegate.create).toHaveBeenNthCalledWith(2, {
+        data: {
+          websiteId: "cuid-1",
+          crawlRunId: "crawl-run-1",
+          parentWebObjectId: "web-object-website",
+          instancePatternKey: "/websites/{website}/credentials/{credential}",
+          detectedName: "Credential",
+          instanceCount: 1,
+          skippedLinkCount: 2,
+          sortOrder: 1,
+        },
+        select: { id: true },
+      });
+      // Only the object that has patterns writes any.
+      expect(mockPagePatternDelegate.createMany).toHaveBeenCalledTimes(1);
+      expect(mockPagePatternDelegate.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            ...detectedWebObjects[0].pagePatterns[0],
+            websiteId: "cuid-1",
+            crawlRunId: "crawl-run-1",
+            webObjectId: "web-object-website",
+            sortOrder: 0,
+          },
+          {
+            ...detectedWebObjects[0].pagePatterns[1],
+            websiteId: "cuid-1",
+            crawlRunId: "crawl-run-1",
+            webObjectId: "web-object-website",
+            sortOrder: 1,
+          },
+        ],
+      });
+      const lockOrder = mockCrawlRunDelegate.updateMany.mock.invocationCallOrder[0];
+      const patternReplaceOrder = mockPagePatternDelegate.updateMany.mock.invocationCallOrder[0];
+      const objectReplaceOrder = mockWebObjectDelegate.updateMany.mock.invocationCallOrder[0];
+      const firstCreateOrder = mockWebObjectDelegate.create.mock.invocationCallOrder[0];
+      expect(lockOrder).toBeLessThan(patternReplaceOrder);
+      expect(patternReplaceOrder).toBeLessThan(objectReplaceOrder);
+      expect(objectReplaceOrder).toBeLessThan(firstCreateOrder);
+      // The replaced rows share one timestamp with the run's lock.
+      expect(readDeletedAtWrittenBy(mockWebObjectDelegate.updateMany)).toBe(
+        readDeletedAtWrittenBy(mockPagePatternDelegate.updateMany),
+      );
+    });
+
+    it("replaceWebsiteWebObjects writes nothing and returns false when the crawl run is no longer active", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      const webObjectsWereReplaced = await replaceWebsiteWebObjects("cuid-1", "deleted-run", detectedWebObjects);
+
+      expect(webObjectsWereReplaced).toBe(false);
+      expect(mockPagePatternDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockWebObjectDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockWebObjectDelegate.create).not.toHaveBeenCalled();
+    });
+
+    it("replaceWebsiteWebObjects still clears the previous objects when the crawl found none", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 3 });
+      mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      expect(await replaceWebsiteWebObjects("cuid-1", "crawl-run-1", [])).toBe(true);
+      expect(mockWebObjectDelegate.updateMany).toHaveBeenCalledTimes(1);
+      expect(mockWebObjectDelegate.create).not.toHaveBeenCalled();
+    });
+
+    it("replaceWebsiteWebObjects names no parent when the parent is not in the list", async () => {
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockWebObjectDelegate.create.mockResolvedValue({ id: "web-object-orphan" });
+
+      await replaceWebsiteWebObjects("cuid-1", "crawl-run-1", [detectedWebObjects[1]]);
+
+      expect(mockWebObjectDelegate.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ parentWebObjectId: null }) }),
+      );
+    });
+
+    it("replaceWebsiteWebObjects propagates a failure inside the transaction", async () => {
+      const createError = new Error("unique constraint failed");
+      mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockWebObjectDelegate.create.mockRejectedValue(createError);
+
+      await expect(replaceWebsiteWebObjects("cuid-1", "crawl-run-1", detectedWebObjects)).rejects.toBe(createError);
+    });
+
+    it("listWebObjectsForWebsite returns the website's active objects in detection order, with their patterns and crawl", async () => {
+      mockWebObjectDelegate.findMany.mockResolvedValue([sampleWebObject]);
+
+      const webObjects = await listWebObjectsForWebsite("cuid-1");
+
+      expect(mockWebObjectDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        orderBy: { sortOrder: "asc" },
+        include: WEB_OBJECT_INCLUDE,
+      });
+      expect(webObjects).toEqual([sampleWebObject]);
+    });
+
+    it("findWebObjectNamesForCrawlRun reads the names of the run's active objects only", async () => {
+      const savedNames = [{ id: "web-object-1", instancePatternKey: "/websites/{website}", detectedName: "Website", name: null }];
+      mockWebObjectDelegate.findMany.mockResolvedValue(savedNames);
+
+      const webObjectNames = await findWebObjectNamesForCrawlRun("cuid-1", "crawl-run-1");
+
+      expect(mockWebObjectDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", crawlRunId: "crawl-run-1", deletedAt: null },
+        select: { id: true, instancePatternKey: true, detectedName: true, name: true },
+      });
+      expect(webObjectNames).toBe(savedNames);
+    });
+
+    it("renameWebObject writes the name to the website's active object and returns it with its patterns and crawl", async () => {
+      mockWebObjectDelegate.update.mockResolvedValue(sampleWebObject);
+
+      const renamed = await renameWebObject("cuid-1", "web-object-1", "Site");
+
+      expect(mockWebObjectDelegate.update).toHaveBeenCalledWith({
+        where: { id: "web-object-1", websiteId: "cuid-1", deletedAt: null },
+        data: { name: "Site" },
+        include: WEB_OBJECT_INCLUDE,
+      });
+      expect(renamed).toBe(sampleWebObject);
+    });
+
+    it("renameWebObject returns null when no active object of that website matched", async () => {
+      mockWebObjectDelegate.update.mockRejectedValue(recordNotFoundError);
+
+      expect(await renameWebObject("cuid-1", "replaced-object", null)).toBeNull();
+    });
+
+    it("renameWebObject propagates any other failure", async () => {
+      const databaseError = new Error("connection reset");
+      mockWebObjectDelegate.update.mockRejectedValue(databaseError);
+
+      await expect(renameWebObject("cuid-1", "web-object-1", "Site")).rejects.toBe(databaseError);
     });
   });
 

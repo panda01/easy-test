@@ -39,8 +39,8 @@ generator client {
 /// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
 /// timestamp on the website's active use cases, actions, screenshot runs,
 /// action scripts, action script runs, action script refinements, crawl runs,
-/// crawled pages, and credentials) instead of removing the row. Every dbService
-/// query filters `deletedAt: null`.
+/// crawled pages, credentials, web objects, and page patterns) instead of
+/// removing the row. Every dbService query filters `deletedAt: null`.
 ///
 /// Two per-website settings control WHEN the Playwright controller takes a
 /// screenshot, after the page's `load` event:
@@ -77,6 +77,8 @@ model Website {
   crawlRuns               CrawlRun[]
   crawledPages            CrawledPage[]
   credentials             Credential[]
+  webObjects              WebObject[]
+  pagePatterns            PagePattern[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -381,27 +383,43 @@ model ActionScriptRefinement {
 /// ...), or `openOnly` (only "open" buttons). A click only counts when it
 /// lands on a different page of the same site; that page is then crawled like
 /// a link (see `CrawledPage.foundByButtonText` and `buttonUrls`).
+///
+/// SAMPLING: the crawl visits at most 3 pages per URL pattern (e.g. 3 pages
+/// of `/websites/{website}/actions/{action}`), detected from scratch within
+/// this crawl - never from an earlier one. The links it skipped for that are
+/// still listed in their page's `linkedUrls`. `skippedSimilarUrlCount` is how
+/// many it skipped, and `skippedSimilarUrlCountsByPattern` the same count per
+/// pattern key (a JSON object, e.g. `{ "/websites/{website}": 4 }`). Both are
+/// written when the crawl finishes, so they stay 0 / `{}` while it runs.
+///
+/// WEB OBJECTS: `webObjects` and `pagePatterns` are what this crawl found,
+/// saved for its website - only while this is the website's latest crawl
+/// with pages (see `WebObject`).
 model CrawlRun {
-  id                             String        @id @default(cuid())
-  websiteId                      String
-  credentialId                   String?
-  isLoggedIn                     Boolean       @default(false)
-  buttonMode                     String        @default("linksOnly")
-  startUrl                       String
-  status                         String
-  pageLimit                      Int
-  visitedPageCount               Int           @default(0)
-  waitingUrlCount                Int           @default(0)
-  errorMessage                   String?
-  loginFailureScreenshotFileName String?
-  durationMs                     Int?
-  finishedAt                     DateTime?
-  createdAt                      DateTime      @default(now())
-  updatedAt                      DateTime      @updatedAt
-  deletedAt                      DateTime?
-  website                        Website       @relation(fields: [websiteId], references: [id])
-  credential                     Credential?   @relation(fields: [credentialId], references: [id])
-  pages                          CrawledPage[]
+  id                               String        @id @default(cuid())
+  websiteId                        String
+  credentialId                     String?
+  isLoggedIn                       Boolean       @default(false)
+  buttonMode                       String        @default("linksOnly")
+  startUrl                         String
+  status                           String
+  pageLimit                        Int
+  visitedPageCount                 Int           @default(0)
+  waitingUrlCount                  Int           @default(0)
+  skippedSimilarUrlCount           Int           @default(0)
+  skippedSimilarUrlCountsByPattern Json          @default("{}")
+  errorMessage                     String?
+  loginFailureScreenshotFileName   String?
+  durationMs                       Int?
+  finishedAt                       DateTime?
+  createdAt                        DateTime      @default(now())
+  updatedAt                        DateTime      @updatedAt
+  deletedAt                        DateTime?
+  website                          Website       @relation(fields: [websiteId], references: [id])
+  credential                       Credential?   @relation(fields: [credentialId], references: [id])
+  pages                            CrawledPage[]
+  webObjects                       WebObject[]
+  pagePatterns                     PagePattern[]
 
   @@index([websiteId])
   @@index([credentialId])
@@ -444,6 +462,17 @@ model CrawlRun {
 /// `succeeded` is true only when navigation completed, the page answered below
 /// HTTP 400, AND its aria snapshot was taken. `ariaSnapshot` is Playwright's
 /// YAML aria snapshot of `<body>`, or null when it could not be taken.
+///
+/// `structureSkeleton` is the aria snapshot reduced to its roles only - no
+/// text, no names, repeated sibling rows collapsed - one role per line,
+/// indented by depth (see `summarizePageStructure`). Two pages built from the
+/// same template have nearly the same skeleton, which is how URL slugs such
+/// as `/blog/my-first-post` are told apart from different pages. It is only
+/// built for a page whose URL has enough siblings among the run's visited
+/// pages to be a slug (at least 3 values, like `/blog/a`, `/blog/b`,
+/// `/blog/c`), when the crawl compares them - so it is often filled in after
+/// the page was saved. Null for every other page, and when there is no aria
+/// snapshot.
 model CrawledPage {
   id                String        @id @default(cuid())
   crawlRunId        String
@@ -460,6 +489,7 @@ model CrawledPage {
   errorMessage      String?
   title             String?
   ariaSnapshot      String?
+  structureSkeleton String?
   linkedUrls        String[]
   buttonUrls        String[]      @default([])
   foundByButtonText String?
@@ -476,6 +506,101 @@ model CrawledPage {
   @@index([websiteId])
   @@index([parentPageId])
   @@map("crawled_pages")
+}
+
+/// A KIND of thing a website has many of, found by crawling it - "Website"
+/// for `/websites/{website}`, "Action" for
+/// `/websites/{website}/actions/{action}` - with the URL patterns of its pages
+/// (`pagePatterns`). Belongs to exactly one website and to the crawl run that
+/// found it.
+///
+/// OUTPUT ONLY: these rows are written when a crawl with at least one page
+/// ends, and no crawl ever reads them. The website's LATEST such crawl
+/// replaces them all: in one transaction, every active web object and page
+/// pattern of the website is soft deleted and that crawl's are created - so a
+/// rename (`name`) lasts until the next crawl. Soft deleted with the website
+/// too.
+///
+/// `instancePatternKey` is the pattern of one instance's page, and the
+/// object's key within the website (unique among active rows); an object can
+/// have it with no page of its own, when only its views were crawled.
+/// `detectedName` is what detection named it (the singular of the path
+/// segment before its variable); `name` is the user's rename, null to show
+/// `detectedName`. `parentWebObjectId` is the object whose variable comes
+/// earlier in the path (Website for Action), or null.
+///
+/// `instanceCount` is how many distinct instances the crawl saw (distinct
+/// values of its variable), and `skippedLinkCount` how many links to its
+/// pages the crawl skipped because it already had 3 of the same pattern.
+/// `sortOrder` keeps detection's order (parents before their children),
+/// because every row of one replacement shares its `createdAt`.
+model WebObject {
+  id                 String        @id @default(cuid())
+  websiteId          String
+  crawlRunId         String
+  parentWebObjectId  String?
+  instancePatternKey String
+  detectedName       String
+  name               String?
+  instanceCount      Int
+  skippedLinkCount   Int
+  sortOrder          Int
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  deletedAt          DateTime?
+  website            Website       @relation(fields: [websiteId], references: [id])
+  crawlRun           CrawlRun      @relation(fields: [crawlRunId], references: [id])
+  parentWebObject    WebObject?    @relation("WebObjectTree", fields: [parentWebObjectId], references: [id])
+  childWebObjects    WebObject[]   @relation("WebObjectTree")
+  pagePatterns       PagePattern[]
+
+  // A key may appear on any number of replaced (soft-deleted) rows but on at
+  // most one active row of the website.
+  @@unique([websiteId, instancePatternKey], where: { deletedAt: null })
+  @@index([websiteId])
+  @@index([crawlRunId])
+  @@map("web_objects")
+}
+
+/// One URL pattern of a web object, e.g.
+/// `/websites/{website}/actions/{action}/edit`. Created and replaced together
+/// with its web object (see `WebObject`).
+///
+/// `segments` is the pattern's path, one entry per segment: `{ kind:
+/// "static", value }` or `{ kind: "variable", placeholder, valueShape }`
+/// (`uuid`, `cuid`, `number`, `hex`, `ulid`, `opaqueToken`, or `slug`).
+/// `role` is how the pattern relates to its object:
+/// - `instance`: one instance's own page (`.../{action}`);
+/// - `view`: a sub-page of one instance (`.../{action}/edit`; `viewName` is
+///   the part after the variable, e.g. `edit` or `scripts/compare`);
+/// - `collection`: the list of the object's instances (`.../actions`);
+/// - `create`: the page that makes a new one (`.../actions/new`).
+/// `detectedBy` says how the variable was recognised: `idShape` (it looks
+/// like an id) or `siblingStructure` (3+ sibling pages built alike - a slug).
+/// `pageCount` is how many of the crawl's pages it matched.
+model PagePattern {
+  id          String    @id @default(cuid())
+  websiteId   String
+  crawlRunId  String
+  webObjectId String
+  key         String
+  segments    Json
+  role        String
+  viewName    String?
+  detectedBy  String
+  pageCount   Int
+  sortOrder   Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  website     Website   @relation(fields: [websiteId], references: [id])
+  crawlRun    CrawlRun  @relation(fields: [crawlRunId], references: [id])
+  webObject   WebObject @relation(fields: [webObjectId], references: [id])
+
+  @@unique([websiteId, key], where: { deletedAt: null })
+  @@index([websiteId])
+  @@index([webObjectId])
+  @@map("page_patterns")
 }
 
 /// A login for a website - what the crawler types into the website's login

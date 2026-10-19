@@ -72,9 +72,11 @@ own URL. The Credentials tab and "Crawl as" only show when the website or
 one of its credentials has a login URL.
 
 A crawl can also **click buttons**: the crawl API takes a `buttonMode` -
-`linksOnly` (the default), `allButRisky`, or `openOnly`. The website page
-starts every crawl with the default (links only); the redesign has no picker
-for it. A click only counts when it
+`linksOnly` (the default), `allButRisky`, or `openOnly`, picked in the
+Crawls tab's **Buttons** dropdown ("Links only (no buttons)", "Buttons,
+except risky ones", "Only “Open” buttons"). The tab's History lists only the
+crawls made with the picked mode (and, when "Crawl as" is shown, as the
+picked credential). A click only counts when it
 lands on another page of the same site, which is then crawled like a link
 and shown as "via “Open Yoga”". Risky buttons - create, delete, update, log
 out, pay, confirm, and similar (the full list is in

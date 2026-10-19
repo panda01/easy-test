@@ -11,10 +11,18 @@ import {
   type CrawlRun,
   type CrawledPage,
   type Credential,
+  type WebObject,
+  type PagePattern,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import type { CrawlButtonMode } from "../utils/crawlButtonModes.js";
 import { type ActionPlan, parseActionPlan } from "../utils/actionPlanSchema.js";
+import type {
+  PagePatternRole,
+  PathSegment,
+  PatternDetectionMethod,
+} from "../utils/detectPagePatterns.js";
+import type { NewStructureSkeleton } from "../utils/crawlPatternSampling.js";
 
 export type {
   Website,
@@ -27,6 +35,8 @@ export type {
   CrawlRun,
   CrawledPage,
   Credential,
+  WebObject,
+  PagePattern,
 };
 
 /**
@@ -371,6 +381,10 @@ export interface CrawlRunFinish {
   status: FinishedCrawlRunStatus;
   /** Links still queued when it ended (0 when every reachable page was visited). */
   waitingUrlCount: number;
+  /** Links skipped because the crawl already had enough pages of their URL pattern. */
+  skippedSimilarUrlCount: number;
+  /** The same skipped links, counted per pattern key. */
+  skippedSimilarUrlCountsByPattern: Record<string, number>;
   /** Why the crawl failed, or null when it did not. */
   errorMessage: string | null;
   /**
@@ -383,8 +397,10 @@ export interface CrawlRunFinish {
 }
 
 /**
- * The fields a caller supplies when recording one crawled page. Pages are
- * create-only, so there is no matching "update" input.
+ * The fields a caller supplies when recording one crawled page. Its
+ * `structureSkeleton` is not one of them: it is only built later, when the
+ * crawl's slug detection compares the page (see
+ * `saveCrawledPageStructureSkeletons`), and starts out null.
  */
 export interface CrawledPageInput {
   /** The page whose link led here, or null for the start page. */
@@ -713,9 +729,9 @@ export async function updateWebsite(
 /**
  * Soft deletes an active website AND its active use cases, actions, screenshot
  * runs, action scripts, action script runs, action script refinements, crawl
- * runs, crawled pages, and credentials.
+ * runs, crawled pages, credentials, web objects, and page patterns.
  *
- * All ten updates run in one transaction and share one `deletedAt`
+ * All twelve updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
@@ -775,6 +791,14 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.credential.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.pagePattern.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.webObject.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1428,6 +1452,55 @@ export async function recordCrawledPage(
 }
 
 /**
+ * Saves the structure skeletons a crawl's slug detection built for pages it
+ * already recorded (see `recordVisitedPatternPage`) - a page only gets one
+ * once its URL has enough siblings to be compared by structure.
+ *
+ * All the writes run in one transaction. Its first write locks the crawl
+ * run's row with `status: "running", deletedAt: null` in its condition (like
+ * `recordCrawledPage`), which serialises it with `softDeleteWebsite`: when
+ * the run is gone, nothing is written and false tells the crawler to stop.
+ * Each page is only updated while it is an active page of this run.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @param structureSkeletons - Each page's id and its new skeleton
+ * @returns True when the skeletons were saved; false when the run is no longer active
+ */
+export async function saveCrawledPageStructureSkeletons(
+  websiteId: string,
+  crawlRunId: string,
+  structureSkeletons: NewStructureSkeleton[],
+): Promise<boolean> {
+  /**
+   * The transaction body. Declared with an explicit parameter type because
+   * the overloaded `$transaction` signature does not contextually type an
+   * inline callback (tsc reports an implicit any).
+   * @param transaction - The transaction-scoped Prisma client
+   * @returns True when the skeletons were saved; false when the run is no longer active
+   */
+  const saveWhileRunIsActive = async (transaction: Prisma.TransactionClient): Promise<boolean> => {
+    const crawlRunLock = await transaction.crawlRun.updateMany({
+      where: { id: crawlRunId, websiteId, status: "running", deletedAt: null },
+      data: { updatedAt: new Date() },
+    });
+    const runIsNoLongerActive = crawlRunLock.count === 0;
+    if (runIsNoLongerActive) {
+      return false;
+    }
+    for (const { crawledPageId, structureSkeleton } of structureSkeletons) {
+      await transaction.crawledPage.updateMany({
+        where: { id: crawledPageId, crawlRunId, websiteId, deletedAt: null },
+        data: { structureSkeleton },
+      });
+    }
+    return true;
+  };
+
+  const skeletonsWereSaved = await prisma.$transaction(saveWhileRunIsActive);
+  return skeletonsWereSaved;
+}
+
+/**
  * Records that a crawl's login succeeded: sets `isLoggedIn: true`. The crawler
  * calls this BEFORE it records the first page, so every page of a logged-in
  * run was viewed logged in. Only an active run that is still `running` is
@@ -1605,6 +1678,225 @@ export async function findLatestCrawledPagesForWebsite(
     (page: Omit<CrawledPageSnapshot, "ariaSnapshot"> & { ariaSnapshot: string | null }) =>
       page.ariaSnapshot !== null,
   ) as CrawledPageSnapshot[];
+}
+
+// === Web objects ===
+// What a website's latest crawl (with pages) found: the kinds of things the
+// site has many of, with their URL patterns. Written only when a crawl ends,
+// by REPLACING the website's previous ones; only the name can be changed
+// afterwards. Soft deleted with the website too.
+
+/** One URL pattern of a web object, as a crawl's end saves it. */
+export interface PagePatternInput {
+  /** The pattern as a path: `/websites/{website}/actions/{action}/edit`. */
+  key: string;
+  /** The pattern's path, one entry per segment. */
+  segments: PathSegment[];
+  /** How the pattern relates to its web object. */
+  role: PagePatternRole;
+  /** For a `view`, the part after the object's variable; otherwise null. */
+  viewName: string | null;
+  /** How the pattern's variable was recognised. */
+  detectedBy: PatternDetectionMethod;
+  /** How many of the crawl's pages it matched. */
+  pageCount: number;
+}
+
+/** One web object as a crawl's end saves it. */
+export interface WebObjectInput {
+  /** The pattern of one instance's page; the object's key within the website. */
+  instancePatternKey: string;
+  /** What detection named it. */
+  detectedName: string;
+  /** The parent object's key (it comes earlier in the same list), or null. */
+  parentInstancePatternKey: string | null;
+  /** How many distinct instances the crawl saw. */
+  instanceCount: number;
+  /** Links to its pages the crawl skipped. */
+  skippedLinkCount: number;
+  /** Its patterns, in the order to list them. */
+  pagePatterns: PagePatternInput[];
+}
+
+/** The crawl a web object was found by, as the web object reads name it. */
+export interface WebObjectCrawlRunSummary {
+  /** The crawl run's cuid. */
+  id: string;
+  /** When the crawl started. */
+  createdAt: Date;
+}
+
+/** A web object with its active page patterns and the crawl that found it - what the web object reads return. */
+export type WebObjectWithPatterns = WebObject & {
+  pagePatterns: PagePattern[];
+  crawlRun: WebObjectCrawlRunSummary;
+};
+
+/** The saved name of a web object, as a crawl run's grouping joins it in. */
+export type WebObjectName = Pick<WebObject, "id" | "instancePatternKey" | "detectedName" | "name">;
+
+/** What the web object reads include: the active patterns in order, and the crawl's id and start. */
+const WEB_OBJECT_INCLUDE = {
+  pagePatterns: { where: { deletedAt: null }, orderBy: { sortOrder: "asc" } },
+  crawlRun: { select: { id: true, createdAt: true } },
+} as const;
+
+/**
+ * Replaces a website's web objects with the ones a crawl just found - every
+ * active web object and page pattern of the website is soft deleted, then the
+ * new ones are created, each object followed by its patterns - so renames do
+ * not carry over: a name lasts until the next crawl.
+ *
+ * Everything runs in one transaction: if any write fails, the previous
+ * objects stay. Its first write locks the crawl run's row, with the run's
+ * `deletedAt: null` in its condition (like `recordCrawledPage`), which
+ * serialises it with `softDeleteWebsite`: when the run (with its website) is
+ * gone, nothing is written. Objects are created in the order given, so a
+ * parent (listed before its children) already has an id when its children
+ * name it; `sortOrder` keeps that order.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run that found the objects
+ * @param webObjects - The objects, each parent before its children
+ * @returns True when the objects were replaced; false when the crawl run (or its website) is no longer active
+ */
+export async function replaceWebsiteWebObjects(
+  websiteId: string,
+  crawlRunId: string,
+  webObjects: WebObjectInput[],
+): Promise<boolean> {
+  /**
+   * The transaction body. Declared with an explicit parameter type because
+   * the overloaded `$transaction` signature does not contextually type an
+   * inline callback (tsc reports an implicit any).
+   * @param transaction - The transaction-scoped Prisma client
+   * @returns True when the objects were replaced; false when the run is no longer active
+   */
+  const replaceInsideTransaction = async (
+    transaction: Prisma.TransactionClient,
+  ): Promise<boolean> => {
+    const replacedAt = new Date();
+    const crawlRunLock = await transaction.crawlRun.updateMany({
+      where: { id: crawlRunId, websiteId, deletedAt: null },
+      data: { updatedAt: replacedAt },
+    });
+    const runIsNoLongerActive = crawlRunLock.count === 0;
+    if (runIsNoLongerActive) {
+      return false;
+    }
+
+    await transaction.pagePattern.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt: replacedAt },
+    });
+    await transaction.webObject.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt: replacedAt },
+    });
+
+    const webObjectIdsByKey = new Map<string, string>();
+    for (const [webObjectIndex, webObject] of webObjects.entries()) {
+      const { parentInstancePatternKey } = webObject;
+      const parentWebObjectId =
+        parentInstancePatternKey === null
+          ? null
+          : (webObjectIdsByKey.get(parentInstancePatternKey) ?? null);
+      const created = await transaction.webObject.create({
+        data: {
+          websiteId,
+          crawlRunId,
+          parentWebObjectId,
+          instancePatternKey: webObject.instancePatternKey,
+          detectedName: webObject.detectedName,
+          instanceCount: webObject.instanceCount,
+          skippedLinkCount: webObject.skippedLinkCount,
+          sortOrder: webObjectIndex,
+        },
+        select: { id: true },
+      });
+      webObjectIdsByKey.set(webObject.instancePatternKey, created.id);
+
+      const webObjectHasPatterns = webObject.pagePatterns.length > 0;
+      if (webObjectHasPatterns) {
+        await transaction.pagePattern.createMany({
+          data: webObject.pagePatterns.map((pagePattern, patternIndex) => ({
+            ...pagePattern,
+            websiteId,
+            crawlRunId,
+            webObjectId: created.id,
+            sortOrder: patternIndex,
+          })),
+        });
+      }
+    }
+    return true;
+  };
+
+  const webObjectsWereReplaced = await prisma.$transaction(replaceInsideTransaction);
+  return webObjectsWereReplaced;
+}
+
+/**
+ * Lists a website's active web objects - the ones its latest crawl with pages
+ * found - in detection order (each parent before its children), each with
+ * its active page patterns in order and the id and start of the crawl that
+ * found it.
+ * @param websiteId - The owning website's cuid
+ * @returns The website's active web objects; empty when no crawl found any
+ */
+export async function listWebObjectsForWebsite(
+  websiteId: string,
+): Promise<WebObjectWithPatterns[]> {
+  const webObjects = await prisma.webObject.findMany({
+    where: { websiteId, deletedAt: null },
+    orderBy: { sortOrder: "asc" },
+    include: WEB_OBJECT_INCLUDE,
+  });
+  return webObjects;
+}
+
+/**
+ * Reads the names of the active web objects one crawl run found - none once
+ * a newer crawl replaced them.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns Each object's id, key, and names; empty when the run's objects were replaced or never saved
+ */
+export async function findWebObjectNamesForCrawlRun(
+  websiteId: string,
+  crawlRunId: string,
+): Promise<WebObjectName[]> {
+  const webObjectNames = await prisma.webObject.findMany({
+    where: { websiteId, crawlRunId, deletedAt: null },
+    select: { id: true, instancePatternKey: true, detectedName: true, name: true },
+  });
+  return webObjectNames;
+}
+
+/**
+ * Renames an active web object, until the next crawl replaces it.
+ * @param websiteId - The owning website's cuid
+ * @param webObjectId - The web object's cuid
+ * @param name - The new name, or null to show the detected name again
+ * @returns The renamed object with its patterns and crawl, or null when no active object of that website matched (it never existed, or a newer crawl replaced it)
+ */
+export async function renameWebObject(
+  websiteId: string,
+  webObjectId: string,
+  name: string | null,
+): Promise<WebObjectWithPatterns | null> {
+  try {
+    const renamed = await prisma.webObject.update({
+      where: { id: webObjectId, websiteId, deletedAt: null },
+      data: { name },
+      include: WEB_OBJECT_INCLUDE,
+    });
+    return renamed;
+  } catch (error: unknown) {
+    if (isRecordNotFound(error)) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 // === Credentials ===

@@ -7,7 +7,10 @@ import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
 import Typography from "@mui/material/Typography";
 import ConfirmDeleteDialog from "../components/ConfirmDeleteDialog";
-import CrawlRunsSection, { CRAWL_LOGGED_OUT_VALUE } from "../components/CrawlRunsSection";
+import CrawlRunsSection, {
+  CRAWL_LOGGED_OUT_VALUE,
+  DEFAULT_CRAWL_BUTTON_MODE,
+} from "../components/CrawlRunsSection";
 import CredentialsSection from "../components/CredentialsSection";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import MoreActionsMenu from "../components/MoreActionsMenu";
@@ -15,8 +18,9 @@ import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import PageContainer from "../components/PageContainer";
 import ScreenshotRunsSection from "../components/ScreenshotRunsSection";
 import StatusDot from "../components/StatusDot";
+import WebObjectsSection from "../components/WebObjectsSection";
 import WebsiteItemListSection from "../components/WebsiteItemListSection";
-import { type CrawlRunRecord, useCrawlRuns } from "../hooks/useCrawlRuns";
+import { type CrawlButtonModeRecord, type CrawlRunRecord, useCrawlRuns } from "../hooks/useCrawlRuns";
 import { useCredentials } from "../hooks/useCredentials";
 import { useIsNarrowerThan } from "../hooks/useIsNarrowerThan";
 import { useJsonMutation } from "../hooks/useJsonMutation";
@@ -42,13 +46,14 @@ import { ACTION_KIND, USE_CASE_KIND } from "../utils/websiteItemKinds";
 /** The query parameter naming the open tab. */
 const TAB_QUERY_PARAMETER = "tab";
 
-/** Every tab the page can open: the side panel's three, plus Actions and Use cases on a phone. */
-type WebsiteTab = "actions" | "crawls" | "use-cases" | "screenshots" | "credentials";
+/** Every tab the page can open: the side panel's four, plus Actions and Use cases on a phone. */
+type WebsiteTab = "actions" | "crawls" | "objects" | "use-cases" | "screenshots" | "credentials";
 
 /** The text each tab shows (Credentials adds its count, Crawls a dot while one runs). */
 const TAB_LABELS: Record<WebsiteTab, string> = {
   actions: "Actions",
   crawls: "Crawls",
+  objects: "Objects",
   "use-cases": "Use cases",
   screenshots: "Screenshots",
   credentials: "Credentials",
@@ -91,8 +96,9 @@ function formatLoginPage(loginUrl: string, websiteUrl: string): string {
  *   "⋯" menu on a phone);
  * - the website's Actions first (each with its run status, version, and
  *   whether it is out of date), then its Use cases as cards;
- * - a side panel with tabs for Crawls, Screenshots, and Credentials. On a
- *   phone the panel's tabs and the Actions and Use cases share one row of
+ * - a side panel with tabs for Crawls, Objects (the web objects the latest
+ *   crawl found - see `WebObjectsSection`), Screenshots, and Credentials. On
+ *   a phone the panel's tabs and the Actions and Use cases share one row of
  *   tabs instead. The open tab lives in the query string (`?tab=crawls`,
  *   replaced rather than pushed), so it survives a reload.
  *
@@ -103,10 +109,12 @@ function formatLoginPage(loginUrl: string, websiteUrl: string): string {
  * The recorded run is added to the top of the run list and selected.
  *
  * "Crawl website" (Crawls tab) POSTs a new crawl run - logged out, or logged
- * in as the credential picked in "Crawl as" - which the server crawls in the
+ * in as the credential picked in "Crawl as", clicking the buttons picked in
+ * "Buttons" (links only by default) - which the server crawls in the
  * background; the request answers at once, and the page then navigates to
- * the new run's own page to watch it grow. While a crawl runs, the crawl list
- * is re-fetched (see `useCrawlRuns`) so its progress card counts pages live.
+ * the new run's own page to watch it grow. Both picks also filter the tab's
+ * History. While a crawl runs, the crawl list is re-fetched (see
+ * `useCrawlRuns`) so its progress card counts pages live.
  *
  * The login features - the Credentials tab and the "Crawl as" picker - show
  * only when the website or one of its credentials has a login page URL.
@@ -159,6 +167,8 @@ export default function WebsiteDetailPage(): ReactElement {
     errorMessage: crawlStartErrorMessage,
   } = useJsonMutation();
   const [selectedCredentialId, setSelectedCredentialId] = useState(CRAWL_LOGGED_OUT_VALUE);
+  const [selectedButtonMode, setSelectedButtonMode] =
+    useState<CrawlButtonModeRecord>(DEFAULT_CRAWL_BUTTON_MODE);
 
   const websiteLoginUrl = website?.loginUrl ?? null;
   const websiteRequiresLogin = websiteLoginUrl !== null;
@@ -167,11 +177,10 @@ export default function WebsiteDetailPage(): ReactElement {
   );
   const loginFeaturesAreShown = websiteRequiresLogin || aCredentialHasItsOwnLoginUrl;
 
-  const panelTabs: WebsiteTab[] = loginFeaturesAreShown
-    ? ["crawls", "screenshots", "credentials"]
-    : ["crawls", "screenshots"];
+  const credentialsTabs: WebsiteTab[] = loginFeaturesAreShown ? ["credentials"] : [];
+  const panelTabs: WebsiteTab[] = ["crawls", "objects", "screenshots", ...credentialsTabs];
   const availableTabs: WebsiteTab[] = isPhoneLayout
-    ? ["actions", "crawls", "use-cases", "screenshots", ...panelTabs.slice(2)]
+    ? ["actions", "crawls", "objects", "use-cases", "screenshots", ...credentialsTabs]
     : panelTabs;
   const openTab = chooseOpenTab(searchParams.get(TAB_QUERY_PARAMETER), availableTabs);
 
@@ -232,18 +241,20 @@ export default function WebsiteDetailPage(): ReactElement {
   /**
    * POSTs a new crawl run for this website - with the credential picked in
    * "Crawl as", or `credentialId: null` to crawl logged out (always, while the
-   * login features are hidden) - and, when the server started it, opens the
-   * run's own page to watch it. The crawl follows links only: the request
-   * leaves `buttonMode` out, which the server reads as `linksOnly`. A refused
-   * start (e.g. a crawl is already running) shows the error alert in the
-   * Crawls tab.
+   * login features are hidden) and the `buttonMode` picked in "Buttons" -
+   * and, when the server started it, opens the run's own page to watch it. A
+   * refused start (e.g. a crawl is already running) shows the error alert in
+   * the Crawls tab.
    * @returns Resolves once the request (and any navigation) is done
    */
   const startCrawl = async (): Promise<void> => {
     const loggedOutIsPicked = selectedCredentialId === CRAWL_LOGGED_OUT_VALUE;
     const crawlIsLoggedOut = loggedOutIsPicked || !loginFeaturesAreShown;
     const credentialId = crawlIsLoggedOut ? null : selectedCredentialId;
-    const result = await sendCrawlRequest("POST", crawlRunsApiUrl(websiteId), { credentialId });
+    const result = await sendCrawlRequest("POST", crawlRunsApiUrl(websiteId), {
+      credentialId,
+      buttonMode: selectedButtonMode,
+    });
     if (!result.succeeded) return;
     // The API is the contract for this shape, as in the typed resource hooks.
     const startedRun = result.data as CrawlRunRecord;
@@ -367,9 +378,12 @@ export default function WebsiteDetailPage(): ReactElement {
         credentials={credentials}
         selectedCredentialId={selectedCredentialId}
         onSelectedCredentialChange={setSelectedCredentialId}
+        selectedButtonMode={selectedButtonMode}
+        onSelectedButtonModeChange={setSelectedButtonMode}
         now={now}
       />
     ),
+    objects: <WebObjectsSection websiteId={website.id} />,
     screenshots: (
       <ScreenshotRunsSection
         websiteId={website.id}
@@ -515,7 +529,7 @@ export default function WebsiteDetailPage(): ReactElement {
           </Box>
           <Box
             component="aside"
-            aria-label="Crawls, screenshots, and credentials"
+            aria-label="Crawls, objects, screenshots, and credentials"
             sx={{
               backgroundColor: nocturneTokens.surface,
               borderRadius: `${String(nocturneTokens.radius.large)}px`,

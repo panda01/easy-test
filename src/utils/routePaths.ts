@@ -103,6 +103,17 @@ export function crawlRunDetailPath(websiteId: string, crawlRunId: string): strin
 }
 
 /**
+ * Builds the path of one crawl run's page opened on its site map's Objects
+ * view: the crawl's pages grouped into web objects.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @returns `/websites/<websiteId>/crawl-runs/<crawlRunId>?view=objects`
+ */
+export function crawlRunObjectsPath(websiteId: string, crawlRunId: string): string {
+  return `${crawlRunDetailPath(websiteId, crawlRunId)}?view=objects`;
+}
+
+/**
  * Builds the path of the create form page for a website's credential.
  * @param websiteId - The owning website's cuid
  * @returns `/websites/<websiteId>/credentials/new`
@@ -320,6 +331,26 @@ export function crawledPageApiUrl(
  */
 export function credentialsApiUrl(websiteId: string): string {
   return `${websiteApiUrl(websiteId)}/credentials`;
+}
+
+/**
+ * Builds the API url of a website's web objects: GET lists the ones its
+ * latest crawl found.
+ * @param websiteId - The owning website's cuid
+ * @returns `/api/websites/<websiteId>/web-objects`
+ */
+export function webObjectsApiUrl(websiteId: string): string {
+  return `${websiteApiUrl(websiteId)}/web-objects`;
+}
+
+/**
+ * Builds the API url of one web object: PUT `{ name }` renames it.
+ * @param websiteId - The owning website's cuid
+ * @param webObjectId - The web object's cuid
+ * @returns `/api/websites/<websiteId>/web-objects/<webObjectId>`
+ */
+export function webObjectApiUrl(websiteId: string, webObjectId: string): string {
+  return `${webObjectsApiUrl(websiteId)}/${encodeURIComponent(webObjectId)}`;
 }
 
 /**

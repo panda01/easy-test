@@ -11,6 +11,7 @@ import {
   buildNewestActionScriptRecord,
   buildScreenshotRunRecord,
   buildWebsiteItemRecord,
+  buildWebObjectRecord,
   buildWebsiteRecord,
   countRequests,
   createDeferred,
@@ -33,6 +34,7 @@ const ACTIONS_API_URL = "/api/websites/website-1/actions";
 const SCREENSHOT_RUNS_API_URL = "/api/websites/website-1/screenshot-runs";
 const CRAWL_RUNS_API_URL = "/api/websites/website-1/crawl-runs";
 const CREDENTIALS_API_URL = "/api/websites/website-1/credentials";
+const WEB_OBJECTS_API_URL = "/api/websites/website-1/web-objects";
 
 /** History as it is after clicking the website on the dashboard. */
 const OPENED_FROM_LIST: RouterStart = {
@@ -411,20 +413,23 @@ describe("WebsiteDetailPage", () => {
   });
 
   describe("tabs", () => {
-    it("keeps the actions and use cases in view and puts Crawls, Screenshots, and Credentials in a side panel, Crawls open", async () => {
-      stubLoadedWebsite();
+    it("keeps the actions and use cases in view and puts Crawls, Objects, Screenshots, and Credentials in a side panel, Crawls open", async () => {
+      const fetchStub = stubLoadedWebsite();
 
       renderWebsiteDetailPage(OPENED_FROM_LIST);
 
-      const sidePanel = await screen.findByRole("complementary", { name: "Crawls, screenshots, and credentials" });
+      const sidePanel = await screen.findByRole("complementary", { name: "Crawls, objects, screenshots, and credentials" });
       const tabList = within(sidePanel).getByRole("tablist", { name: "Website sections" });
       await waitFor(() => {
         expect(within(tabList).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
           "Crawls",
+          "Objects",
           "Screenshots",
           "Credentials · 0",
         ]);
       });
+      // The web objects are only fetched once their tab is opened.
+      expect(countRequests(fetchStub, "GET", WEB_OBJECTS_API_URL)).toBe(0);
       expect(within(tabList).getByRole("tab", { name: "Crawls" })).toHaveAttribute("aria-selected", "true");
       expect(within(sidePanel).getByRole("tabpanel", { name: "Crawls" })).toBeInTheDocument();
       expect(screen.getByRole("region", { name: "Actions" })).toBeInTheDocument();
@@ -442,6 +447,20 @@ describe("WebsiteDetailPage", () => {
       expect(screen.queryByRole("tabpanel", { name: "Crawls" })).not.toBeInTheDocument();
       expect(screen.getByTestId("page-search").textContent).toBe("?tab=screenshots");
       expect(screen.getByTestId("page-navigation-type").textContent).toBe("REPLACE");
+    });
+
+    it("opens the Objects tab, which lists the web objects the latest crawl found", async () => {
+      const user = userEvent.setup();
+      stubLoadedWebsite({
+        [`GET ${WEB_OBJECTS_API_URL}`]: { status: 200, body: [buildWebObjectRecord({ name: "Site" })] },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const objectsPanel = await openTab(user, "Objects");
+
+      expect(await within(objectsPanel).findByRole("heading", { name: "Site" })).toBeInTheDocument();
+      expect(within(objectsPanel).getByText("detected as Website")).toBeInTheDocument();
+      expect(screen.getByTestId("page-search").textContent).toBe("?tab=objects");
     });
 
     it("opens the tab named in the query string", async () => {
@@ -732,7 +751,7 @@ describe("WebsiteDetailPage", () => {
       expect(countRequests(fetchStub, "GET", CRAWL_RUNS_API_URL)).toBeGreaterThanOrEqual(2);
     });
 
-    it("POSTs once, with no button mode, and opens the new crawl's page", async () => {
+    it("POSTs once, following links only by default, and opens the new crawl's page", async () => {
       const user = userEvent.setup();
       const fetchStub = stubLoadedWebsite({
         [`POST ${CRAWL_RUNS_API_URL}`]: { status: 201, body: runningCrawlRun },
@@ -746,7 +765,7 @@ describe("WebsiteDetailPage", () => {
       expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credentialId: null }),
+        body: JSON.stringify({ credentialId: null, buttonMode: "linksOnly" }),
       });
       expect(countRequests(fetchStub, "POST", CRAWL_RUNS_API_URL)).toBe(1);
     });
@@ -771,8 +790,56 @@ describe("WebsiteDetailPage", () => {
       expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credentialId: "credential-1" }),
+        body: JSON.stringify({ credentialId: "credential-1", buttonMode: "linksOnly" }),
       });
+    });
+
+    it("crawls with the button mode picked in Buttons", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubLoadedWebsite({
+        [`POST ${CRAWL_RUNS_API_URL}`]: { status: 201, body: runningCrawlRun },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      await user.click(await screen.findByRole("combobox", { name: "Buttons" }));
+      await user.click(await screen.findByRole("option", { name: "Only “Open” buttons" }));
+      await user.click(screen.getByRole("button", { name: "Crawl website" }));
+
+      await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
+      expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId: null, buttonMode: "openOnly" }),
+      });
+    });
+
+    it("narrows the History to the crawls made with the mode picked in Buttons", async () => {
+      const user = userEvent.setup();
+      const allButRiskyCrawlRun = buildCrawlRunRecord({
+        id: "crawl-run-all-but-risky",
+        buttonMode: "allButRisky",
+      });
+      stubLoadedWebsite({
+        [`GET ${CRAWL_RUNS_API_URL}`]: { status: 200, body: [allButRiskyCrawlRun, finishedCrawlRun] },
+      });
+      renderWebsiteDetailPage(OPENED_FROM_LIST);
+
+      const linksOnlyHistory = await screen.findByRole("list", { name: "History" });
+      expect(within(linksOnlyHistory).getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+        "/websites/website-1/crawl-runs/crawl-run-1",
+      ]);
+
+      await user.click(screen.getByRole("combobox", { name: "Buttons" }));
+      await user.click(await screen.findByRole("option", { name: "Buttons, except risky ones" }));
+      const allButRiskyHistory = screen.getByRole("list", { name: "History" });
+      expect(within(allButRiskyHistory).getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+        "/websites/website-1/crawl-runs/crawl-run-all-but-risky",
+      ]);
+
+      await user.click(screen.getByRole("combobox", { name: "Buttons" }));
+      await user.click(await screen.findByRole("option", { name: "Only “Open” buttons" }));
+      expect(screen.getByText("No logged-out crawls with only “Open” buttons yet.")).toBeInTheDocument();
+      expect(screen.queryByRole("list", { name: "History" })).not.toBeInTheDocument();
     });
 
     it("narrows the History to the crawls made as the person picked in Crawl as", async () => {
@@ -810,7 +877,7 @@ describe("WebsiteDetailPage", () => {
 
       await user.click(screen.getByRole("combobox", { name: "Crawl as" }));
       await user.click(await screen.findByRole("option", { name: "Editor" }));
-      expect(screen.getByText("No crawls as “Editor” yet.")).toBeInTheDocument();
+      expect(screen.getByText("No crawls as “Editor” with links only yet.")).toBeInTheDocument();
       expect(screen.queryByRole("list", { name: "History" })).not.toBeInTheDocument();
     });
 
@@ -831,13 +898,14 @@ describe("WebsiteDetailPage", () => {
       });
 
       expect(within(crawlsPanel).queryByRole("combobox", { name: "Crawl as" })).not.toBeInTheDocument();
+      expect(within(crawlsPanel).getByRole("combobox", { name: "Buttons" })).toBeInTheDocument();
       await user.click(within(crawlsPanel).getByRole("button", { name: "Crawl website" }));
 
       await readProbeAfterLanding("/websites/website-1/crawl-runs/crawl-run-2");
       expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credentialId: null }),
+        body: JSON.stringify({ credentialId: null, buttonMode: "linksOnly" }),
       });
     });
 
@@ -1025,7 +1093,7 @@ describe("WebsiteDetailPage", () => {
       expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credentialId: "credential-1" }),
+        body: JSON.stringify({ credentialId: "credential-1", buttonMode: "linksOnly" }),
       });
     });
 
@@ -1081,6 +1149,7 @@ describe("WebsiteDetailPage", () => {
         expect(within(tabList).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
           "Actions",
           "Crawls",
+          "Objects",
           "Use cases",
           "Screenshots",
           "Credentials · 0",

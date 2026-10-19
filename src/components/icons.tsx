@@ -18,6 +18,8 @@ export { default as ChevronLeftIcon } from "@mui/icons-material/ChevronLeft";
 export { default as ChevronRightIcon } from "@mui/icons-material/ChevronRight";
 export { default as DeleteOutlineIcon } from "@mui/icons-material/DeleteOutline";
 export { default as DragIndicatorIcon } from "@mui/icons-material/DragIndicator";
+export { default as EditOutlinedIcon } from "@mui/icons-material/EditOutlined";
+export { default as ExpandMoreIcon } from "@mui/icons-material/ExpandMore";
 export { default as HighlightOffIcon } from "@mui/icons-material/HighlightOff";
 export { default as MoreHorizIcon } from "@mui/icons-material/MoreHoriz";
 export { default as PlayArrowIcon } from "@mui/icons-material/PlayArrow";

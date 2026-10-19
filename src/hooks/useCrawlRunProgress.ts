@@ -49,9 +49,56 @@ export interface CrawledPageSummaryRecord {
   deletedAt: string | null;
 }
 
-/** A crawl run together with its pages in visiting order. */
+/** How a URL pattern relates to its web object: one instance's page, a sub-page of one, the list, or the create page. */
+export type PagePatternRoleRecord = "instance" | "view" | "collection" | "create";
+
+/** How a pattern's variable was recognised: by an id's shape, or as a slug from sibling pages built alike. */
+export type PatternDetectionMethodRecord = "idShape" | "siblingStructure";
+
+/** One URL pattern of a web object in a crawl run's grouping. */
+export interface CrawlPageGroupingPatternRecord {
+  /** The pattern as a path: `/websites/{website}/actions/{action}/edit`. */
+  key: string;
+  role: PagePatternRoleRecord;
+  /** For a `view`, the part after the object's variable (`edit`); otherwise null. */
+  viewName: string | null;
+  detectedBy: PatternDetectionMethodRecord;
+  /** The crawled pages it matched, in visiting order. */
+  pageIds: string[];
+}
+
+/** One web object - a kind of thing the site has many of - in a crawl run's grouping. */
+export interface CrawlPageGroupingWebObjectRecord {
+  /** The saved web object's cuid, or null when this run's objects are not the website's saved ones (still running, or replaced by a newer crawl). */
+  webObjectId: string | null;
+  /** The pattern of one instance's page; the object's key. */
+  instancePatternKey: string;
+  /** The name to show: the user's rename, or the detected name. */
+  displayName: string;
+  /** What detection named it (`Action`). */
+  detectedName: string;
+  /** The parent object's key, or null. */
+  parentInstancePatternKey: string | null;
+  /** The distinct instances the crawl saw. */
+  instanceValues: string[];
+  /** Links to its pages the crawl skipped because it already had 3 of the same pattern. */
+  skippedLinkCount: number;
+  /** Its patterns: instance, views, list page, create page. */
+  patterns: CrawlPageGroupingPatternRecord[];
+}
+
+/** A crawl run's pages grouped into web objects by their URL patterns. */
+export interface CrawlPageGroupingRecord {
+  /** The web objects, each parent before its children. */
+  webObjects: CrawlPageGroupingWebObjectRecord[];
+  /** The pages that belong to no web object, in visiting order. */
+  standalonePageIds: string[];
+}
+
+/** A crawl run together with its pages in visiting order, and those pages grouped into web objects. */
 export interface CrawlRunWithPagesRecord extends CrawlRunRecord {
   pages: CrawledPageSummaryRecord[];
+  pageGrouping: CrawlPageGroupingRecord;
 }
 
 /**

@@ -55,6 +55,10 @@ export interface CrawlRunRecord {
   visitedPageCount: number;
   /** Links queued but not yet visited. */
   waitingUrlCount: number;
+  /** Links skipped because the crawl already had 3 pages of their URL pattern; 0 until the crawl ends. */
+  skippedSimilarUrlCount: number;
+  /** The same skipped links, per pattern key (`/websites/{website}`); empty until the crawl ends. */
+  skippedSimilarUrlCountsByPattern: Record<string, number>;
   /** Why the crawl failed or was interrupted, or null. */
   errorMessage: string | null;
   /** Set when the login failed and a screenshot of it was saved (served by `crawlRunLoginFailureScreenshotApiUrl`); null otherwise. */

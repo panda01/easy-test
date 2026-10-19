@@ -17,6 +17,7 @@ import {
 } from "../../../src/hooks/useActionScripts";
 import { type CrawledPageRecord } from "../../../src/hooks/useCrawledPage";
 import {
+  type CrawlPageGroupingWebObjectRecord,
   type CrawledPageSummaryRecord,
   type CrawlRunWithPagesRecord,
 } from "../../../src/hooks/useCrawlRunProgress";
@@ -27,6 +28,7 @@ import {
   type ScriptModelOption,
 } from "../../../src/hooks/useScriptModels";
 import { type ScreenshotRunRecord } from "../../../src/hooks/useScreenshotRuns";
+import { type PagePatternRecord, type WebObjectRecord } from "../../../src/hooks/useWebObjects";
 import {
   type NewestActionScriptRecord,
   type WebsiteItemRecord,
@@ -378,6 +380,8 @@ export function buildCrawlRunRecord(overrides: Partial<CrawlRunRecord> = {}): Cr
     pageLimit: 50,
     visitedPageCount: 3,
     waitingUrlCount: 0,
+    skippedSimilarUrlCount: 0,
+    skippedSimilarUrlCountsByPattern: {},
     errorMessage: null,
     loginFailureScreenshotFileName: null,
     durationMs: 6400,
@@ -468,14 +472,102 @@ export function buildCrawledPageRecord(
 
 /**
  * Builds a crawl run with its pages, as the run endpoint returns it: by
- * default the default run with no pages.
- * @param overrides - Fields to replace in the default run, `pages` included
+ * default the default run with no pages and nothing grouped.
+ * @param overrides - Fields to replace in the default run, `pages` and `pageGrouping` included
  * @returns The crawl run with its pages
  */
 export function buildCrawlRunWithPagesRecord(
   overrides: Partial<CrawlRunWithPagesRecord> = {},
 ): CrawlRunWithPagesRecord {
-  return { ...buildCrawlRunRecord(), pages: [], ...overrides };
+  return {
+    ...buildCrawlRunRecord(),
+    pages: [],
+    pageGrouping: { webObjects: [], standalonePageIds: [] },
+    ...overrides,
+  };
+}
+
+/**
+ * Builds one web object of a crawl run's grouping: by default the saved
+ * "Website" object of `/websites/{website}`, with one instance page.
+ * @param overrides - Fields to replace in the default object
+ * @returns The grouping's web object record
+ */
+export function buildCrawlPageGroupingWebObjectRecord(
+  overrides: Partial<CrawlPageGroupingWebObjectRecord> = {},
+): CrawlPageGroupingWebObjectRecord {
+  return {
+    webObjectId: "web-object-1",
+    instancePatternKey: "/websites/{website}",
+    displayName: "Website",
+    detectedName: "Website",
+    parentInstancePatternKey: null,
+    instanceValues: ["41"],
+    skippedLinkCount: 0,
+    patterns: [
+      {
+        key: "/websites/{website}",
+        role: "instance",
+        viewName: null,
+        detectedBy: "idShape",
+        pageIds: ["crawled-page-1"],
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a saved page pattern as the web object list returns it: by default
+ * the instance pattern of web-object-1, matching 3 pages.
+ * @param overrides - Fields to replace in the default pattern
+ * @returns The page pattern record
+ */
+export function buildPagePatternRecord(overrides: Partial<PagePatternRecord> = {}): PagePatternRecord {
+  return {
+    id: "page-pattern-1",
+    websiteId: "website-1",
+    crawlRunId: "crawl-run-1",
+    webObjectId: "web-object-1",
+    key: "/websites/{website}",
+    role: "instance",
+    viewName: null,
+    detectedBy: "idShape",
+    pageCount: 3,
+    sortOrder: 0,
+    createdAt: "2026-03-04T05:06:13.000Z",
+    updatedAt: "2026-03-04T05:06:13.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a saved web object as the web object list returns it: by default
+ * the "Website" object crawl-run-1 found, not renamed, with its instance
+ * pattern.
+ * @param overrides - Fields to replace in the default object
+ * @returns The web object record
+ */
+export function buildWebObjectRecord(overrides: Partial<WebObjectRecord> = {}): WebObjectRecord {
+  return {
+    id: "web-object-1",
+    websiteId: "website-1",
+    crawlRunId: "crawl-run-1",
+    parentWebObjectId: null,
+    instancePatternKey: "/websites/{website}",
+    detectedName: "Website",
+    name: null,
+    instanceCount: 3,
+    skippedLinkCount: 0,
+    sortOrder: 0,
+    createdAt: "2026-03-04T05:06:13.000Z",
+    updatedAt: "2026-03-04T05:06:13.000Z",
+    deletedAt: null,
+    pagePatterns: [buildPagePatternRecord()],
+    crawlRun: { id: "crawl-run-1", createdAt: "2026-03-04T05:06:07.000Z" },
+    ...overrides,
+  };
 }
 
 /**

@@ -66,8 +66,10 @@ import {
   isLogoutLink,
   readRawPageLinks,
   type CrawlLogin,
+  type RecordStructureSkeletons,
   type RecordVisitedPage,
 } from "../../../server/services/crawlerService.js";
+import type { NewStructureSkeleton } from "../../../server/utils/crawlPatternSampling.js";
 
 const START_URL = "https://example.com/";
 /** The website's timing settings: no minimum wait, so no `waitForTimeout` call. */
@@ -152,6 +154,15 @@ let recordedProgress: CrawlProgress[] = [];
  */
 const recordVisitedPage = vi.fn<RecordVisitedPage>();
 
+/** The structure skeletons the crawler handed over to be saved, in order. */
+let savedStructureSkeletons: NewStructureSkeleton[] = [];
+
+/**
+ * The skeleton saver handed to the crawler. `beforeEach` makes it keep every
+ * skeleton and say the run is still active; a test may replace that behaviour.
+ */
+const recordStructureSkeletons = vi.fn<RecordStructureSkeletons>();
+
 /**
  * Reads the visited URLs (identities) in visiting order.
  * @returns Each recorded page's `url`
@@ -204,6 +215,11 @@ describe("crawlWebsite", () => {
       recordedProgress.push(progress);
       return Promise.resolve(`page-${String(visitedPage.visitOrder)}`);
     });
+    savedStructureSkeletons = [];
+    recordStructureSkeletons.mockImplementation((structureSkeletons) => {
+      savedStructureSkeletons.push(...structureSkeletons);
+      return Promise.resolve(true);
+    });
   });
 
   afterEach(() => {
@@ -230,12 +246,14 @@ describe("crawlWebsite", () => {
       "https://example.com/blog/post": {},
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome).toEqual({
       stopReason: "finished",
       visitedPageCount: 4,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -287,7 +305,7 @@ describe("crawlWebsite", () => {
   it("launches one headless browser with one page that refuses downloads, and closes it", async () => {
     installFakeSite({ "https://example.com/": {} });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(mockChromium.launch).toHaveBeenCalledWith({ headless: true });
     expect(mockBrowser.newPage).toHaveBeenCalledTimes(1);
@@ -301,7 +319,7 @@ describe("crawlWebsite", () => {
   it("waits for each page with the website's timing settings, then snapshots <body> with a timeout and reads only non-download links", async () => {
     installFakeSite({ "https://example.com/": {} });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(mockPage.goto).toHaveBeenCalledWith(START_URL, { waitUntil: "load", timeout: 30_000 });
     expect(mockPage.waitForLoadState).toHaveBeenCalledWith("networkidle", { timeout: 5000 });
@@ -320,7 +338,7 @@ describe("crawlWebsite", () => {
     const startUrlWithQuery = "https://example.com/?utm_source=easy-test";
     installFakeSite({ [startUrlWithQuery]: {} });
 
-    await crawlWebsite(startUrlWithQuery, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(startUrlWithQuery, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(mockPage.goto).toHaveBeenCalledWith(startUrlWithQuery, expect.any(Object));
     expect(recordedPages[0]).toMatchObject({
@@ -335,7 +353,7 @@ describe("crawlWebsite", () => {
       "https://example.com/search?q=shoes": {},
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(mockPage.goto).toHaveBeenCalledWith(
       "https://example.com/search?q=shoes",
@@ -356,7 +374,7 @@ describe("crawlWebsite", () => {
       "https://www.example.com/about": {},
     });
 
-    const outcome = await crawlWebsite("http://example.com/", TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite("http://example.com/", TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome.visitedPageCount).toBe(2);
     expect(recordedPages[0]).toMatchObject({
@@ -378,7 +396,7 @@ describe("crawlWebsite", () => {
       },
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(findRecordedPage("https://other.example/landing")).toMatchObject({
       requestedUrl: "https://example.com/out",
@@ -401,7 +419,7 @@ describe("crawlWebsite", () => {
       "https://example.com/next": {},
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(readVisitedUrls()).toEqual([
       "https://example.com/",
@@ -425,7 +443,7 @@ describe("crawlWebsite", () => {
       "https://example.com/ok": {},
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome.stopReason).toBe("finished");
     expect(findRecordedPage("https://example.com/report.pdf")).toEqual({
@@ -455,7 +473,7 @@ describe("crawlWebsite", () => {
       "https://example.com/home": {},
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(recordedPages[0]).toMatchObject({
       succeeded: false,
@@ -478,7 +496,7 @@ describe("crawlWebsite", () => {
         : Promise.resolve(),
     );
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(findRecordedPage("https://example.com/closing")).toMatchObject({
       succeeded: false,
@@ -501,7 +519,7 @@ describe("crawlWebsite", () => {
       new Error("locator.ariaSnapshot: Timeout 10000ms exceeded.\nCall log:"),
     );
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(recordedPages[0]).toMatchObject({
       succeeded: false,
@@ -519,7 +537,7 @@ describe("crawlWebsite", () => {
       new Error("locator.evaluateAll: Execution context was destroyed"),
     );
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(recordedPages[0]).toMatchObject({
       succeeded: false,
@@ -537,7 +555,7 @@ describe("crawlWebsite", () => {
     mockPage.title.mockResolvedValueOnce("   ");
     mockPage.title.mockRejectedValueOnce(new Error("Execution context was destroyed"));
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(recordedPages.map((recordedPage) => recordedPage.title)).toEqual([null, null]);
     expect(recordedPages[1].succeeded).toBe(true);
@@ -546,12 +564,14 @@ describe("crawlWebsite", () => {
   it("follows no links when the start page's final URL cannot be parsed", async () => {
     installFakeSite({ "https://example.com/": { finalUrl: "", hrefs: ["/next"] } });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome).toEqual({
       stopReason: "finished",
       visitedPageCount: 1,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -562,7 +582,7 @@ describe("crawlWebsite", () => {
   it("identifies a start URL it cannot normalize by the URL itself", async () => {
     installFakeSite({});
 
-    await crawlWebsite("not a url", TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite("not a url", TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(recordedPages[0]).toMatchObject({
       url: "not a url",
@@ -581,7 +601,7 @@ describe("crawlWebsite", () => {
       "https://example.com/schools": {},
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(readVisitedUrls()).toEqual([
       "https://example.com/calendar",
@@ -606,7 +626,7 @@ describe("crawlWebsite", () => {
       "https://example.com/other": {},
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(readVisitedUrls()).toEqual([
       "https://example.com/",
@@ -629,7 +649,7 @@ describe("crawlWebsite", () => {
       "https://example.com/old-account": { finalUrl: "https://example.com/account" },
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(readVisitedUrls()).toEqual([
       "https://example.com/",
@@ -650,7 +670,7 @@ describe("crawlWebsite", () => {
       "https://example.com/search?q=shoes": { finalUrl: "https://example.com/search?q=shoes&page=1" },
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(findRecordedPage("https://example.com/search")).toMatchObject({
       finalUrl: "https://example.com/search?q=shoes&page=1",
@@ -669,7 +689,7 @@ describe("crawlWebsite", () => {
         : Promise.resolve(undefined),
     );
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(findRecordedPage("https://example.com/slow-landing")).toMatchObject({
       requestedUrl: "https://example.com/slow",
@@ -687,12 +707,14 @@ describe("crawlWebsite", () => {
     }
     installFakeSite(site);
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome).toEqual({
       stopReason: "stoppedAtPageLimit",
       visitedPageCount: CRAWL_PAGE_LIMIT,
       waitingUrlCount: linkedPageCount + 1 - CRAWL_PAGE_LIMIT,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -714,12 +736,14 @@ describe("crawlWebsite", () => {
       return Promise.resolve(`page-${String(visitedPage.visitOrder)}`);
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome).toEqual({
       stopReason: "stoppedAtTimeLimit",
       visitedPageCount: 2,
       waitingUrlCount: 2,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -737,12 +761,14 @@ describe("crawlWebsite", () => {
       return Promise.resolve(runIsGone ? null : `page-${String(visitedPage.visitOrder)}`);
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome).toEqual({
       stopReason: "stoppedBecauseRunWasDeleted",
       visitedPageCount: 2,
       waitingUrlCount: 1,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -767,12 +793,14 @@ describe("crawlWebsite", () => {
       return Promise.resolve(buildMainResponse(200));
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome).toEqual({
       stopReason: "stoppedBecauseBrowserClosed",
       visitedPageCount: 1,
       waitingUrlCount: 3,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -797,12 +825,14 @@ describe("crawlWebsite", () => {
       return Promise.resolve();
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome).toEqual({
       stopReason: "stoppedBecauseBrowserClosed",
       visitedPageCount: 1,
       waitingUrlCount: 2,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -814,7 +844,7 @@ describe("crawlWebsite", () => {
     const databaseError = new Error("connection terminated");
     recordVisitedPage.mockRejectedValue(databaseError);
 
-    await expect(crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage)).rejects.toBe(
+    await expect(crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons)).rejects.toBe(
       databaseError,
     );
     expect(mockBrowser.close).toHaveBeenCalledTimes(1);
@@ -824,7 +854,7 @@ describe("crawlWebsite", () => {
     const launchError = new Error("Executable doesn't exist at /ms-playwright/chromium");
     mockChromium.launch.mockRejectedValue(launchError);
 
-    await expect(crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage)).rejects.toBe(
+    await expect(crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons)).rejects.toBe(
       launchError,
     );
     expect(recordVisitedPage).not.toHaveBeenCalled();
@@ -835,12 +865,151 @@ describe("crawlWebsite", () => {
     mockBrowser.close.mockRejectedValue(new Error("browser already gone"));
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(outcome.stopReason).toBe("finished");
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       "[playwright] could not close the browser: browser already gone",
     );
+  });
+
+  /** A start page linking to 5 product pages (an id pattern) and an About page that links one of them again. */
+  const SITE_WITH_PRODUCTS: Record<string, FakeSitePage> = {
+    "https://example.com/": {
+      hrefs: ["/products/1", "/products/2", "/products/3", "/products/4", "/products/5", "/about"],
+    },
+    "https://example.com/products/1": {},
+    "https://example.com/products/2": {},
+    "https://example.com/products/3": {},
+    "https://example.com/products/4": {},
+    "https://example.com/products/5": {},
+    "https://example.com/about": { hrefs: ["/products/4"] },
+  };
+
+  it("visits at most 3 pages of one URL pattern, counting the skipped links once each, and still lists them", async () => {
+    installFakeSite(SITE_WITH_PRODUCTS);
+
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+
+    expect(outcome).toEqual({
+      stopReason: "finished",
+      visitedPageCount: 5,
+      waitingUrlCount: 0,
+      skippedSimilarUrlCount: 2,
+      skippedSimilarUrlCountsByPattern: { "/products/{product}": 2 },
+      loginErrorMessage: null,
+      loginFailureScreenshotWasCaptured: false,
+    });
+    expect(readVisitedUrls()).toEqual([
+      "https://example.com/",
+      "https://example.com/products/1",
+      "https://example.com/products/2",
+      "https://example.com/products/3",
+      "https://example.com/about",
+    ]);
+    expect(findRecordedPage("https://example.com/").linkedUrls).toHaveLength(6);
+    expect(findRecordedPage("https://example.com/about").linkedUrls).toEqual(["https://example.com/products/4"]);
+    expect(recordedProgress[0]).toEqual({ visitedPageCount: 1, waitingUrlCount: 4 });
+  });
+
+  it("drops the queued pages of a slug pattern once 3 visited sibling pages built alike confirm it", async () => {
+    installFakeSite({
+      "https://example.com/": {
+        hrefs: ["/blog/a", "/blog/b", "/blog/c", "/blog/d", "/blog/e"],
+        ariaSnapshot: '- heading "Home" [level=1]\n- list:\n  - listitem: x',
+      },
+      "https://example.com/blog/a": { ariaSnapshot: '- heading "A" [level=1]\n- paragraph: a' },
+      "https://example.com/blog/b": { ariaSnapshot: '- heading "B" [level=1]\n- paragraph: b' },
+      "https://example.com/blog/c": { ariaSnapshot: '- heading "C" [level=1]\n- paragraph: c' },
+      "https://example.com/blog/d": {},
+      "https://example.com/blog/e": {},
+    });
+
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+
+    expect(readVisitedUrls()).toEqual([
+      "https://example.com/",
+      "https://example.com/blog/a",
+      "https://example.com/blog/b",
+      "https://example.com/blog/c",
+    ]);
+    expect(outcome).toMatchObject({
+      stopReason: "finished",
+      waitingUrlCount: 0,
+      skippedSimilarUrlCount: 2,
+      skippedSimilarUrlCountsByPattern: { "/blog/{blog}": 2 },
+    });
+    expect(recordedPages.some((recordedPage) => "structureSkeleton" in recordedPage)).toBe(false);
+    expect(recordStructureSkeletons).toHaveBeenCalledTimes(1);
+    expect(savedStructureSkeletons).toEqual(
+      ["page-1", "page-2", "page-3"].map((crawledPageId) => ({
+        crawledPageId,
+        structureSkeleton: "heading[level=1]\nparagraph",
+      })),
+    );
+  });
+
+  it("builds no structure skeleton for pages whose URL has too few siblings to be a slug", async () => {
+    installFakeSite({
+      "https://example.com/": { hrefs: ["/about", "/pricing", "/contact", "/blog/a", "/blog/b"] },
+      "https://example.com/about": {},
+      "https://example.com/pricing": {},
+      "https://example.com/contact": {},
+      "https://example.com/blog/a": {},
+      "https://example.com/blog/b": {},
+    });
+
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+
+    expect(outcome.visitedPageCount).toBe(6);
+    expect(recordStructureSkeletons).not.toHaveBeenCalled();
+  });
+
+  it("stops as soon as saving the structure skeletons finds the run deleted", async () => {
+    installFakeSite({
+      "https://example.com/": { hrefs: ["/blog/a", "/blog/b", "/blog/c", "/about"] },
+      "https://example.com/blog/a": {},
+      "https://example.com/blog/b": {},
+      "https://example.com/blog/c": {},
+      "https://example.com/about": {},
+    });
+    recordStructureSkeletons.mockResolvedValue(false);
+
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+
+    expect(outcome).toMatchObject({ stopReason: "stoppedBecauseRunWasDeleted", visitedPageCount: 4 });
+    expect(readVisitedUrls()).not.toContain("https://example.com/about");
+    expect(recordStructureSkeletons).toHaveBeenCalledTimes(1);
+  });
+
+  it("samples every crawl from scratch: a second crawl skips exactly what the first one did", async () => {
+    installFakeSite(SITE_WITH_PRODUCTS);
+
+    const firstOutcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+    const firstVisitedUrls = readVisitedUrls();
+    recordedPages = [];
+    const secondOutcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+
+    expect(secondOutcome).toEqual(firstOutcome);
+    expect(readVisitedUrls()).toEqual(firstVisitedUrls);
+  });
+
+  it("never skips the start page, even when it is a page of a pattern", async () => {
+    installFakeSite({
+      "https://example.com/products/1": { hrefs: ["/products/2", "/products/3", "/products/4"] },
+      "https://example.com/products/2": {},
+      "https://example.com/products/3": {},
+      "https://example.com/products/4": {},
+    });
+
+    const outcome = await crawlWebsite("https://example.com/products/1", TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+
+    expect(readVisitedUrls()).toEqual([
+      "https://example.com/products/1",
+      "https://example.com/products/2",
+      "https://example.com/products/3",
+    ]);
+    expect(outcome.skippedSimilarUrlCount).toBe(1);
   });
 });
 
@@ -904,6 +1073,11 @@ describe("crawlWebsite with a login", () => {
       recordedProgress.push(progress);
       return Promise.resolve(`page-${String(visitedPage.visitOrder)}`);
     });
+    savedStructureSkeletons = [];
+    recordStructureSkeletons.mockImplementation((structureSkeletons) => {
+      savedStructureSkeletons.push(...structureSkeletons);
+      return Promise.resolve(true);
+    });
     recordLoginSucceeded.mockResolvedValue(true);
     mockCrawlerLoginService.logInWithCredential.mockResolvedValue({ loggedIn: true });
     mockCrawlerLoginService.captureLoginFailureScreenshot.mockResolvedValue(true);
@@ -911,7 +1085,7 @@ describe("crawlWebsite with a login", () => {
   });
 
   it("logs in on the crawl's own page first, records the success, and only then visits and records pages", async () => {
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, crawlLogin);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, crawlLogin);
 
     expect(mockCrawlerLoginService.logInWithCredential).toHaveBeenCalledWith(
       mockPage,
@@ -929,6 +1103,8 @@ describe("crawlWebsite with a login", () => {
       stopReason: "finished",
       visitedPageCount: 3,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -936,7 +1112,7 @@ describe("crawlWebsite with a login", () => {
   });
 
   it("never follows logout links while logged in, but still lists them on the page", async () => {
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, crawlLogin);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, crawlLogin);
 
     expect(readVisitedUrls()).toEqual([
       "https://example.com/",
@@ -952,7 +1128,7 @@ describe("crawlWebsite with a login", () => {
   });
 
   it("follows logout links like any other when crawling logged out, and never tries to log in", async () => {
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, null);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null);
 
     expect(mockCrawlerLoginService.logInWithCredential).not.toHaveBeenCalled();
     expect(readVisitedUrls()).toContain("https://example.com/logout");
@@ -966,7 +1142,7 @@ describe("crawlWebsite with a login", () => {
       errorMessage: "Still on the login form after submitting - check the username and password",
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, crawlLogin);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, crawlLogin);
 
     expect(mockCrawlerLoginService.captureLoginFailureScreenshot).toHaveBeenCalledWith(
       mockPage,
@@ -976,6 +1152,8 @@ describe("crawlWebsite with a login", () => {
       stopReason: "loginFailed",
       visitedPageCount: 0,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: "Still on the login form after submitting - check the username and password",
       loginFailureScreenshotWasCaptured: true,
     });
@@ -992,7 +1170,7 @@ describe("crawlWebsite with a login", () => {
     });
     mockCrawlerLoginService.captureLoginFailureScreenshot.mockResolvedValue(false);
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, crawlLogin);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, crawlLogin);
 
     expect(outcome.stopReason).toBe("loginFailed");
     expect(outcome.loginFailureScreenshotWasCaptured).toBe(false);
@@ -1004,7 +1182,7 @@ describe("crawlWebsite with a login", () => {
       return Promise.resolve({ loggedIn: false, errorMessage: "Target page has been closed" });
     });
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, crawlLogin);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, crawlLogin);
 
     expect(outcome.stopReason).toBe("stoppedBecauseBrowserClosed");
     expect(outcome.loginErrorMessage).toBeNull();
@@ -1015,7 +1193,7 @@ describe("crawlWebsite with a login", () => {
   it("stops without visiting anything when the run is gone by the time the login worked", async () => {
     recordLoginSucceeded.mockResolvedValue(false);
 
-    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, crawlLogin);
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, crawlLogin);
 
     expect(outcome.stopReason).toBe("stoppedBecauseRunWasDeleted");
     expect(outcome.visitedPageCount).toBe(0);
@@ -1081,11 +1259,16 @@ describe("crawlWebsite with buttons", () => {
       recordedProgress.push(progress);
       return Promise.resolve(`page-${String(visitedPage.visitOrder)}`);
     });
+    savedStructureSkeletons = [];
+    recordStructureSkeletons.mockImplementation((structureSkeletons) => {
+      savedStructureSkeletons.push(...structureSkeletons);
+      return Promise.resolve(true);
+    });
     installFakeSite(SITE_WITH_BUTTONS);
   });
 
   it("never clicks buttons, nor watches for pop-ups, when no button mode is given (links only)", async () => {
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage);
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
 
     expect(mockCrawlerButtonService.followPageButtons).not.toHaveBeenCalled();
     expect(mockPage.on).not.toHaveBeenCalled();
@@ -1115,6 +1298,7 @@ describe("crawlWebsite with buttons", () => {
       START_URL,
       TIMING_SETTINGS,
       recordVisitedPage,
+      recordStructureSkeletons,
       crawlLogin,
       "linksOnly",
     );
@@ -1131,7 +1315,7 @@ describe("crawlWebsite with buttons", () => {
         "https://example.com/": { finalUrl: "https://example.com/home?tab=1", title: "Home" },
       });
 
-      await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, null, buttonMode);
+      await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null, buttonMode);
 
       expect(mockCrawlerButtonService.followPageButtons).toHaveBeenCalledTimes(1);
       expect(mockCrawlerButtonService.followPageButtons).toHaveBeenCalledWith(
@@ -1154,6 +1338,7 @@ describe("crawlWebsite with buttons", () => {
       START_URL,
       TIMING_SETTINGS,
       recordVisitedPage,
+      recordStructureSkeletons,
       null,
       "allButRisky",
     );
@@ -1200,7 +1385,7 @@ describe("crawlWebsite with buttons", () => {
       },
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, null, "allButRisky");
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null, "allButRisky");
 
     expect(readVisitedUrls()).toEqual(["https://example.com/", "https://example.com/sessions/yoga"]);
     expect(findRecordedPage("https://example.com/sessions/yoga").foundByButtonText).toBeNull();
@@ -1211,6 +1396,25 @@ describe("crawlWebsite with buttons", () => {
     expect(findRecordedPage("https://example.com/sessions/yoga").buttonUrls).toEqual([
       "https://example.com/",
     ]);
+  });
+
+  it("skips a button's page whose URL pattern already has 3 pages, but still lists it in buttonUrls", async () => {
+    installFakeSite({
+      "https://example.com/": {
+        hrefs: ["/orders/1", "/orders/2", "/orders/3"],
+        buttonLinks: [buildButtonLink("Open order", "https://example.com/orders/4")],
+      },
+      "https://example.com/orders/1": {},
+      "https://example.com/orders/2": {},
+      "https://example.com/orders/3": {},
+      "https://example.com/orders/4": {},
+    });
+
+    const outcome = await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null, "allButRisky");
+
+    expect(readVisitedUrls()).not.toContain("https://example.com/orders/4");
+    expect(findRecordedPage("https://example.com/").buttonUrls).toEqual(["https://example.com/orders/4"]);
+    expect(outcome.skippedSimilarUrlCountsByPattern).toEqual({ "/orders/{order}": 1 });
   });
 
   it("never follows a button to a logout-looking page while logged in, but still lists it", async () => {
@@ -1238,7 +1442,7 @@ describe("crawlWebsite with buttons", () => {
       recordLoginSucceeded: () => Promise.resolve(true),
     };
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, crawlLogin, "allButRisky");
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, crawlLogin, "allButRisky");
 
     expect(readVisitedUrls()).toEqual(["https://example.com/", "https://example.com/sessions/yoga"]);
     expect(findRecordedPage("https://example.com/").buttonUrls).toEqual([
@@ -1255,7 +1459,7 @@ describe("crawlWebsite with buttons", () => {
       "https://example.com/users/sign_out": {},
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, null, "allButRisky");
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null, "allButRisky");
 
     expect(findRecordedPage("https://example.com/users/sign_out").foundByButtonText).toBe("Leave");
   });
@@ -1281,7 +1485,7 @@ describe("crawlWebsite with buttons", () => {
         : Promise.resolve(`- text: ${currentUrl}`),
     );
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, null, "allButRisky");
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null, "allButRisky");
 
     expect(mockCrawlerButtonService.followPageButtons).toHaveBeenCalledTimes(1);
     expect(mockCrawlerButtonService.followPageButtons).toHaveBeenCalledWith(
@@ -1306,7 +1510,7 @@ describe("crawlWebsite with buttons", () => {
       },
     });
 
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, null, "openOnly");
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null, "openOnly");
 
     expect(findRecordedPage("https://example.com/report.pdf")).toMatchObject({
       foundByButtonText: "Open report",
@@ -1317,7 +1521,7 @@ describe("crawlWebsite with buttons", () => {
   });
 
   it("closes every pop-up window a click opens, without failing when one is already gone", async () => {
-    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, null, "openOnly");
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons, null, "openOnly");
 
     expect(mockPage.on).toHaveBeenCalledTimes(1);
     expect(mockPage.on).toHaveBeenCalledWith("popup", expect.any(Function));

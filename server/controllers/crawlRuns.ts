@@ -6,9 +6,12 @@ import {
   listCrawledPageSummariesForRun,
   findCrawledPageForRun,
   findCredentialWithPasswordForWebsite,
+  findWebObjectNamesForCrawlRun,
   type Credential,
+  type CrawledPageSummary,
 } from "../services/dbService.js";
 import { startCrawlRun } from "../services/crawlRunService.js";
+import { buildCrawlPageGrouping } from "../services/webObjectService.js";
 import { describeError } from "../utils/describeError.js";
 import { readSendErrorStatus } from "../utils/readSendErrorStatus.js";
 import { validateCrawlRunStartInput } from "../utils/validateRequestBodies.js";
@@ -27,6 +30,21 @@ const CREDENTIAL_HAS_NO_EFFECTIVE_LOGIN_URL_MESSAGE =
 const RUN_HAS_NO_LOGIN_FAILURE_SCREENSHOT_MESSAGE =
   "This crawl has no login failure screenshot";
 const SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Screenshot file not found";
+
+/**
+ * Leaves a page summary's structure skeleton out of the response: it is only
+ * read on the server, to group the pages, and the run is polled every 2
+ * seconds while it crawls.
+ * @param pageSummary - One page summary of the run
+ * @returns The same summary without `structureSkeleton`
+ */
+function omitStructureSkeleton(
+  pageSummary: CrawledPageSummary,
+): Omit<CrawledPageSummary, "structureSkeleton"> {
+  const pageWithoutSkeleton: Partial<CrawledPageSummary> = { ...pageSummary };
+  delete pageWithoutSkeleton.structureSkeleton;
+  return pageWithoutSkeleton as Omit<CrawledPageSummary, "structureSkeleton">;
+}
 
 /**
  * Registers the crawl routes: starting a background crawl of a website with a
@@ -149,14 +167,20 @@ export function registerCrawlRunRoutes(app: Express, screenshotDirectory: string
 
   /**
    * Reads one crawl run with its pages in visiting order - the page tree
-   * (`parentPageId`) without each page's aria snapshot or link list, so the
-   * UI can poll it while the crawl runs. The run carries
-   * `credential: { id, name }` (null for a logged-out crawl) and
+   * (`parentPageId`) without each page's aria snapshot, link list, or
+   * structure skeleton, so the UI can poll it while the crawl runs. The run
+   * carries `credential: { id, name }` (null for a logged-out crawl) and
    * `isLoggedIn`; every page of a logged-in run was viewed logged in.
+   *
+   * `pageGrouping` groups the run's pages into web objects by their URL
+   * patterns (see `buildCrawlPageGrouping`), worked out from THIS run's
+   * pages on every read, so it grows while the crawl runs. An object carries
+   * its saved `webObjectId` and the user's name only while this run's
+   * objects are the website's saved ones; otherwise `webObjectId` is null.
    * @route GET /api/websites/:websiteId/crawl-runs/:crawlRunId
    * @param websiteId - Path parameter: the owning website's cuid
    * @param crawlRunId - Path parameter: the crawl run's cuid
-   * @returns 200 with the crawl run plus `pages` (page summaries); 404 with `{ error }` when the website or the run does not exist or was deleted; 500 with `{ error }` when a query fails
+   * @returns 200 with the crawl run plus `pages` (page summaries) and `pageGrouping` (`{ webObjects, standalonePageIds }`); 404 with `{ error }` when the website or the run does not exist or was deleted; 500 with `{ error }` when a query fails
    */
   app.get("/api/websites/:websiteId/crawl-runs/:crawlRunId", async (req, res) => {
     try {
@@ -171,7 +195,13 @@ export function registerCrawlRunRoutes(app: Express, screenshotDirectory: string
         return;
       }
       const pages = await listCrawledPageSummariesForRun(website.id, crawlRun.id);
-      res.json({ ...crawlRun, pages });
+      const savedWebObjectNames = await findWebObjectNamesForCrawlRun(website.id, crawlRun.id);
+      const pageGrouping = buildCrawlPageGrouping(
+        pages,
+        crawlRun.skippedSimilarUrlCountsByPattern,
+        savedWebObjectNames,
+      );
+      res.json({ ...crawlRun, pages: pages.map(omitStructureSkeleton), pageGrouping });
     } catch (error: unknown) {
       res.status(500).json({ error: describeError(error) });
     }

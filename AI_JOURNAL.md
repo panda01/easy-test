@@ -4,6 +4,279 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-19 10:28 EDT — Structure skeletons are only built for pages whose URL could be a slug
+
+**Intent:**
+- The user asked whether the crawler strips the content from every page it visits. It did: every page with an aria snapshot also got a `structureSkeleton`. Only slug detection reads it (`clusterByStructure`), and only for URL sibling groups.
+- The user wants a skeleton only where the URL already says pages could be the same object, so the skeleton just confirms that match.
+- Now a page's skeleton is built only when slug detection compares it. That happens only when its URL is in a sibling group with at least `MIN_SLUG_SIBLING_COUNT` (3) values, like `/blog/a`, `/blog/b`, `/blog/c`.
+- Every other page keeps `structureSkeleton = null`.
+- The full `ariaSnapshot` is still stored on every page. Older crawl runs keep their skeletons. The grouping results don't change.
+- Planned and approved in Plannotator (plan v2).
+
+### Decisions
+- **Made by the user (in review):**
+  - **"Exact" timing:** a skeleton is built when slug detection needs it, from the snapshot kept in memory, and written onto that page's row, which may have been saved earlier. The rejected option was a one-time check at visit time against the URLs seen so far. It could miss a sibling found after the visit.
+  - The end-to-end check uses the Forge Gym site.
+- **Made by me:**
+  - Slug detection takes a skeleton reader, and the crawl's sampler passes one that builds skeletons lazily. The final grouping and the crawl run view still read stored skeletons.
+  - A sibling group with fewer than 3 values is skipped before any skeleton is read. A cluster is a subset of its group, so the results are the same.
+  - The new skeletons are collected per `recordVisitedPatternPage` call, in a local list, not in a sampler field as the plan suggested. Nothing else needs them.
+  - `saveCrawledPageStructureSkeletons` locks the run row first with `status: "running", deletedAt: null`, following `recordCrawledPage` and `replaceWebsiteWebObjects`. A false result stops the crawl with `stoppedBecauseRunWasDeleted`.
+
+### Files changed
+| File | Change |
+|---|---|
+| `server/utils/detectPagePatterns.ts` | **New:** exported type `ReadStructureSkeleton`, private `readStoredStructureSkeleton`. **Changed:** `clusterByStructure`, `collapseSlugsAtPosition`, `collapseSlugSegments` and `tokenizePages` take a `readStructureSkeleton`. `collapseSlugsAtPosition` skips groups with fewer than `MIN_SLUG_SIBLING_COUNT` values before clustering. `findConfirmedSlugPatterns` takes an optional reader, defaulting to the stored skeleton. `detectPagePatterns` passes the stored reader. JSDoc on `PatternPage.structureSkeleton` updated. |
+| `server/utils/crawlPatternSampling.ts` | **New:** `CrawlPatternSampler.ariaSnapshotsAwaitingSkeleton`, types `NewStructureSkeleton` and `VisitedPatternPageOutcome`, and private `readSamplerStructureSkeleton`, which builds the skeleton, keeps it on the page, drops the snapshot and reports it. **Changed:** `createCrawlPatternSampler` creates the map. `recordVisitedPatternPage` takes the page's `ariaSnapshot` and returns `{ slugPatternsChanged, newStructureSkeletons }`. Imports `summarizePageStructure`. |
+| `server/services/crawlerService.ts` | **New:** exported type `RecordStructureSkeletons` and `CrawlContext.recordStructureSkeletons`. **Changed:** `crawlWebsite` and `crawlWithPage` take a required `recordStructureSkeletons` right after `recordVisitedPage`. `sampleRecordedPage` is now async, passes the snapshot and saves any new skeletons. `crawlNextPage` stops with `stoppedBecauseRunWasDeleted` when that save returns false. `visitCrawlPage` and `buildUnreadablePageVisit` no longer set `structureSkeleton`, and the `summarizePageStructure` import is gone. JSDoc updated. |
+| `server/services/dbService.ts` | **New:** `saveCrawledPageStructureSkeletons(websiteId, crawlRunId, structureSkeletons)`. **Removed:** `CrawledPageInput.structureSkeleton`, since pages are created without one. Imports the `NewStructureSkeleton` type. |
+| `server/services/crawlRunService.ts` | **New:** the `recordStructureSkeletons` closure in `runCrawlInBackground`, which calls `saveCrawledPageStructureSkeletons` and is passed to `crawlWebsite`. JSDoc updated. |
+| `server/prisma/schema.prisma` | Doc comment on `CrawledPage.structureSkeleton` only. Ran `npx prisma db push`, which reported the DB already in sync, and `npx prisma generate`. |
+| `server/utils/summarizePageStructure.ts` | `MAX_STRUCTURE_SKELETON_CHARACTERS` doc: the skeleton is no longer stored on every page. |
+| `tests/backend/utils/detectPagePatterns.test.ts` | **New specs:** the reader is called only for `/blog/a`–`/blog/c`, never for `/about`, `/pricing`, `/contact`, `/news/x`, `/news/y` or `/websites/{id}/edit`, `/settings`, `/members`. A collapse one level up still reads every sibling. |
+| `tests/backend/utils/crawlPatternSampling.test.ts` | New return shape and snapshot argument. **New specs:** no skeleton until the 3rd sibling, then one for each sibling, each built once, with snapshots dropped. A sibling with no snapshot is never compared. |
+| `tests/backend/services/crawlerService.test.ts` | Every `crawlWebsite` call passes the new `recordStructureSkeletons` mock. Recorded pages carry no `structureSkeleton`. The slug spec asserts the saved skeletons for `page-1`…`page-3`. **New specs:** no skeleton when siblings are too few; the crawl stops when saving the skeletons finds the run deleted. |
+| `tests/backend/services/crawlRunService.test.ts` | Mocks `saveCrawledPageStructureSkeletons`. `CrawlWebsiteArguments` tuple, with the login now at index 4. New `readSkeletonRecorderPassedToCrawler`. **New spec:** the closure calls the DB and hands back true/false. |
+| `tests/backend/services/dbService.test.ts` | `structureSkeleton` moved from the input fixture to the row fixture. **New specs:** run lock, then one update per page, in one transaction; nothing written when the run is gone. |
+| `AI_JOURNAL.md` | This entry. |
+
+### Verification
+- **Manual end-to-end check** (manual-verifier agent, Playwright; it started `npm run dev`, and the health check and homepage sniff test passed):
+  - It crawled "Forge Gym management" as "Owner with a school" with "Buttons, except risky ones", the same settings as run `cmvfbkpd80000ue8oober394r`.
+  - New run `cmvfcc5o20000vk8ogqxk0bl4`: finished, 19 pages, 125.2 s.
+  - **Skeletons:** only `/owner/teachers`, `/owner/students` and `/owner/payouts` have one. They are the only URL sibling group with 3 values. The other 16 pages are null. The previous run had 18.
+  - **Snapshots:** all 18 successful pages still have their full `ariaSnapshot`. The failed `/document` API URL has none, as before.
+  - **Grouping:** web objects, patterns and skipped counts (`/schools/{school}`: 2, `/classes/sessions/{session}`: 17) are identical to the previous run. The Objects view and the website's Objects tab show them.
+  - **Errors:** no server errors. The only console error was the usual `favicon.ico` 404.
+  - **Cleanup:** the dev server it started on 5180/3010 was stopped. Port 6100, a different project, was not touched.
+  - The new crawl replaced Forge's saved web objects, as every crawl does. None had been renamed.
+- `npm run lint`, `npm run tsc` and `npm run tsc:client`: clean.
+- `npm run test:coverage`: 119 files and 2550 tests pass. All files are at 99.49% statements, 98.5% branches, 100% functions and 99.78% lines. Every changed server file is at 100%.
+- The verifier's temporary files (`claude_tmp/dev.log` and its two screenshots) were removed.
+
+---
+
+## 2026-10-17 09:19 EDT — Crawls tab: the "Buttons" picker is back, the button sits below the pickers, and History filters by both
+
+**Intent:**
+- The user asked what happened to the crawl's button-following choice. The redesign (2026-10-13, Q2) dropped the "Buttons" picker because the mockups didn't draw it, but the server kept supporting `buttonMode`.
+- The user asked for:
+  - the "Crawl website" button moved below the select;
+  - the button-following choice back, as a select on its own line;
+  - the crawl History filtered by both selects.
+- The Crawls tab is now a column: "Crawl as" (only when the login features show), then "Buttons", then "Crawl website".
+  - "Buttons" is always shown. It offers "Links only (no buttons)" (the default), "Buttons, except risky ones", and "Only “Open” buttons". These are the pre-redesign labels.
+  - A crawl start now sends the picked `buttonMode`.
+  - History lists only the ended runs that match the picked mode and, while "Crawl as" is shown, the picked credential. The running crawl's progress card is never filtered.
+  - The empty line names both picks, e.g. "No crawls as “Admin” with links only yet.". Without "Crawl as" it names only the mode: "No crawls with buttons except risky ones yet.".
+- Frontend only: no server or database change, so no `prisma db push` / `generate`.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/components/CrawlRunsSection.tsx` | **New:** `DEFAULT_CRAWL_BUTTON_MODE` (exported, `linksOnly`), `CrawlButtonModeOption`, `CRAWL_BUTTON_MODE_OPTIONS`, `EMPTY_HISTORY_BUTTON_MODE_PHRASES`, `BUTTON_MODE_LABEL_ID`, and inside the component `handleButtonModeChange` and `pickerLabelSx`. **New props:** `selectedButtonMode`, `onSelectedButtonModeChange`. **Renamed and changed:** `describeNoCrawlsForPick` became `describeNoCrawlsForPicks(historyIsFilteredByCrawlAs, pickedCredentialIdOrNullForLoggedOut, credentials, selectedButtonMode)`, which adds the mode phrase. **Changed:** `endedRunsShownInHistory` matches both the credential (while the picker is shown) and `run.buttonMode`. The layout is a column (Crawl as, Buttons, then the button in its own row), and the `crawlButton` const is gone. JSDoc updated. |
+| `src/pages/WebsiteDetailPage.tsx` | **New state:** `selectedButtonMode` / `setSelectedButtonMode` (starts at `DEFAULT_CRAWL_BUTTON_MODE`), passed to `CrawlRunsSection`. **Changed:** `startCrawl` POSTs `{ credentialId, buttonMode }`. Imports `DEFAULT_CRAWL_BUTTON_MODE` and `CrawlButtonModeRecord`. JSDoc on the page and on `startCrawl` updated. |
+| `tests/frontend/CrawlRunsSection.test.tsx` | `renderSection` passes the two new props. **Changed:** the hidden-Crawl-as spec expects only the Buttons combobox; the three empty-line specs expect the "with links only" wording. **New specs:** pickers then button order (each in its own row); the Buttons default and options; handing each mode to the page; the picked mode shown and Links only picked again; **new `describe("History filtered by Buttons")`** (8 specs: mode with credential, both picks needed, mode alone without Crawl as, three empty-line wordings, the mode-only wording, the running crawl of another mode still shown). |
+| `tests/frontend/WebsiteDetailPage.test.tsx` | Every crawl start's expected body adds `buttonMode: "linksOnly"`. The default-start spec is renamed to say "following links only by default". "No crawls as “Editor” with links only yet." **New specs:** crawls with the mode picked in Buttons (`openOnly` in the POST); History narrowed by the Buttons pick, with its empty line. The no-login spec also checks that Buttons is still shown. |
+| `README.md`, `src/components/README.md`, `src/pages/README.md` | Describe the Buttons dropdown, the column layout, and History filtered by both picks. The README no longer says the redesign has no picker. |
+
+### Verification
+- **Manual check (manual-verifier agent, Playwright, on the already-running dev server; health check and homepage sniff test OK):**
+  - Layout checked at 1440 px and 390 px, with and without Crawl as. No horizontal overflow on a phone.
+  - The Buttons default and option order are right.
+  - The POST bodies carried the picked `buttonMode`, and the stored runs matched.
+  - History counts matched the API data for every Crawl as × Buttons combination on a real website.
+  - The empty-line wording is right.
+  - No console errors.
+  - A temporary website pointing at a local static page (`claude_tmp/site`) got one crawl per mode. It was soft-deleted afterwards.
+  - Screenshots are in `claude_tmp/verify/`.
+- After the manual check, lint flagged an unnecessary `as CrawlButtonModeRecord` in `handleButtonModeChange`. It was removed; this is a type-only change with the same runtime behavior.
+- `npm run lint` and `npm run tsc:client` are clean.
+- `npm run test:coverage`: 119 files and 2540 tests pass. All files are at 99.49% statements, 98.49% branches, 100% functions, and 99.78% lines. `CrawlRunsSection.tsx` is at 100% of lines and branches.
+
+---
+
+## 2026-10-16 23:40 EDT — Crawls recognise URL patterns and group pages into web objects
+
+**Intent:**
+- The user wants crawling to recognise pages that share a URL pattern. In this app every website is `/websites/<id>` and each of its actions is `/websites/<id>/actions/<id>`.
+- Pages like that should be grouped, and each group identified as a kind of web object (Website, Action) by what its pages have in common.
+- Planned and approved in Plannotator (plan v4).
+
+### Decisions
+- **Made by the user (in review):**
+  - Group the pages AND sample: a crawl visits at most 3 pages per pattern.
+  - Web objects are saved per website and can be renamed.
+  - Patterns are detected from id shapes, plus slugs confirmed by 3+ sibling pages built alike.
+  - The view is a Tree / Objects toggle on the crawl run page's site map, plus an Objects tab on the website page.
+  - Every crawl is fresh: nothing from an earlier crawl is used.
+  - The latest crawl replaces the saved objects, renames included.
+  - Changing which pages Claude is shown is a follow-up, not part of this change.
+- **Made by me:**
+  - **`sortOrder` columns** on `web_objects` and `page_patterns`: every row of one replacement shares one `createdAt`, so detection order needs its own column.
+  - **`CrawlRun.skippedSimilarUrlCountsByPattern` (JSON)** next to the planned `skippedSimilarUrlCount`, so each object can show its own "N more skipped". Both are written when the crawl finishes, so they stay 0 / `{}` while it runs.
+  - **A slug is never the segment right after a variable**, as well as never the first segment. So `/projects/{id}/settings` and `/projects/{id}/members` stay different pages and are not sampled away.
+  - **The 3-page cap is per pattern key across the whole crawl**, not per parent instance.
+  - **`new`, `create`, and `add`** right after an object's list segment count as its create page.
+  - **`replaceWebsiteWebObjects` locks the crawl run row first** (it updates `updatedAt`), like `recordCrawledPage`, so it cannot write active rows for a run deleted with its website.
+  - **The Objects tab fetches its own data**, when it is opened.
+  - **Names that differ from the plan:**
+    - `validateWebObjectRenameInput` (the plan had `validateWebObjectInput`);
+    - `findWebObjectNamesForCrawlRun` (the plan had `findWebObjectsForCrawlRun`).
+  - **Modules the plan did not list:** `crawlPatternSampling.ts`, `webObjectService.ts`, `CrawledPageRow.tsx` (the page row, now shared by the Tree and Objects views), and `describeWebObject.ts`.
+
+### Files changed
+| File | What changed |
+|---|---|
+| `server/prisma/schema.prisma` | **New models** `WebObject` (`web_objects`) and `PagePattern` (`page_patterns`), each with a partial unique key among active rows and `sortOrder`. **New columns** `CrawledPage.structureSkeleton`, `CrawlRun.skippedSimilarUrlCount`, and `CrawlRun.skippedSimilarUrlCountsByPattern`. **Back-relations** on `Website` and `CrawlRun`. Doc comments updated. `prisma format` also realigned some existing columns. Ran `npx prisma db push` and `npx prisma generate`. |
+| `server/utils/classifyPathSegment.ts` | **New.** `classifyPathSegment` returns `uuid`, `number`, `ulid`, `cuid`, `hex`, `opaqueToken`, or null. Helpers `readsLikeDashedWords` and `looksLikeOpaqueToken`. Type `IdSegmentShape`. |
+| `server/utils/summarizePageStructure.ts` | **New.** `summarizePageStructure` reduces an aria snapshot to a role skeleton: roles plus heading levels, repeated sibling subtrees collapsed, capped at `MAX_STRUCTURE_SKELETON_CHARACTERS`. `compareStructureSkeletons` gives the Jaccard similarity of role paths. Helpers `readEntryLabel`, `readSnapshotEntries`, `buildStructureTree`, `renderCollapsedNodes`, `joinWithinTheCap`, `listRolePaths`. |
+| `server/utils/detectPagePatterns.ts` | **New.** `detectPagePatterns` groups pages into web objects with instance, view, collection, and create patterns, plus standalone pages. Also exported: `findConfirmedSlugPatterns`, `patternKeyForPath`, `matchPagePattern`, `readPathSegments`, `tokenizePathSegments`, `buildPathSegments`, `formatPatternKey`, `formatTokensAsPatternKey`, `parsePatternKey`, `singularizeWord`, `MIN_SLUG_SIBLING_COUNT`, `STRUCTURE_SIMILARITY_THRESHOLD`. Types `PathSegment`, `PathToken`, `PatternPage`, `DetectedPagePattern`, `DetectedWebObject`, `DetectedPageGrouping`, `PagePatternRole`, `PatternDetectionMethod`, `VariableValueShape`. |
+| `server/utils/crawlPatternSampling.ts` | **New.** Per-crawl sampling: `MAX_PAGES_PER_PATTERN` (3), `createCrawlPatternSampler`, `claimPatternSlot`, `recordVisitedPatternPage`, `dropOverSampledQueueEntries`, `summarizeSkippedLinks`. Types `CrawlPatternSampler` and `SkippedLinkSummary`. |
+| `server/services/crawlerService.ts` | `CrawlOutcome` gained `skippedSimilarUrlCount` and `skippedSimilarUrlCountsByPattern`. `CrawlState` gained `patternSampler`. `visitCrawlPage` and `buildUnreadablePageVisit` record `structureSkeleton`. **New** `claimSeenPageSlot` and `sampleRecordedPage`. `claimUnseenLinks`, `claimUnseenButtonLinks`, `crawlNextPage`, and `crawlWithPage` now sample (the start page is always visited). JSDoc on `crawlWebsite` updated. |
+| `server/services/dbService.ts` | `CrawledPageInput.structureSkeleton` and `CrawlRunFinish.skipped*`. `softDeleteWebsite` also stamps page patterns and web objects (twelve tables). **New:** `replaceWebsiteWebObjects`, `listWebObjectsForWebsite`, `findWebObjectNamesForCrawlRun`, `renameWebObject`, `WEB_OBJECT_INCLUDE`, and types `PagePatternInput`, `WebObjectInput`, `WebObjectCrawlRunSummary`, `WebObjectWithPatterns`, `WebObjectName`. `WebObject` and `PagePattern` are re-exported. |
+| `server/services/webObjectService.ts` | **New.** `buildCrawlPageGrouping` (detection joined with the same run's saved ids and names), `readSkippedLinkCounts`, `buildWebObjectInputs`, and `saveCrawlWebObjects` (never rejects). Types `CrawlPageGrouping`, `CrawlPageGroupingWebObject`, `CrawlPageGroupingPattern`. |
+| `server/services/crawlRunService.ts` | `runCrawlInBackground` passes the skipped counts to `finishCrawlRun`. When the run was finished and recorded at least one page, it then calls `saveCrawlWebObjects`. `recordCrawlFailure` writes zero skips. |
+| `server/controllers/crawlRuns.ts` | The GET run route adds `pageGrouping` and leaves `structureSkeleton` off the pages (new `omitStructureSkeleton`). JSDoc updated. |
+| `server/controllers/webObjects.ts` | **New** `registerWebObjectRoutes`: `GET /api/websites/:websiteId/web-objects` and `PUT /api/websites/:websiteId/web-objects/:webObjectId`. |
+| `server/utils/validateRequestBodies.ts` | **New** `validateWebObjectRenameInput`, `MAX_WEB_OBJECT_NAME_LENGTH` (100), and `WebObjectRenameInput`. |
+| `server/server.ts` | Registers the web object routes. |
+| `src/hooks/useCrawlRunProgress.ts` | **New types:** `PagePatternRoleRecord`, `PatternDetectionMethodRecord`, `CrawlPageGroupingPatternRecord`, `CrawlPageGroupingWebObjectRecord`, `CrawlPageGroupingRecord`. `CrawlRunWithPagesRecord.pageGrouping`. |
+| `src/hooks/useCrawlRuns.ts` | `CrawlRunRecord.skippedSimilarUrlCount` and `skippedSimilarUrlCountsByPattern`. |
+| `src/hooks/useWebObjects.ts` | **New.** `useWebObjects`, `useWebObjectRenaming`, and types `WebObjectRecord`, `PagePatternRecord`, `WebObjectCrawlRunRecord`, `WebObjectRenaming`. |
+| `src/utils/describeWebObject.ts` | **New.** `describePagePatternRole`, `describeWebObjectCounts`, `chooseWebObjectName`, `measureWebObjectDepths`, and type `WebObjectTreeFields`. |
+| `src/utils/routePaths.ts` | **New** `crawlRunObjectsPath`, `webObjectsApiUrl`, `webObjectApiUrl`. |
+| `src/components/icons.tsx` | Adds `EditOutlinedIcon` and `ExpandMoreIcon`. |
+| `src/components/CrawledPageRow.tsx` | **New.** The site map's page row, moved out of `CrawlSiteMap`, plus `INDENT_PER_TREE_LEVEL_PX`. |
+| `src/components/CrawlSiteMap.tsx` | Optional `objectsView` prop (type `CrawlSiteMapObjectsView`) with a Tree / Objects `ToggleButtonGroup`. Type `CrawlSiteMapView`. **New** `handleViewChange`. Rows drawn with `CrawledPageRow`. |
+| `src/components/CrawlWebObjectMap.tsx` | **New.** The Objects view: collapsible object groups indented under their parents, pattern labels, page rows, rename button, and "Other pages". Internal `GroupHeader`. |
+| `src/components/RenameWebObjectDialog.tsx` | **New.** Rename dialog with "Use detected name", Cancel, and Save. It shows an error only after this opening tried to save. `MAX_WEB_OBJECT_NAME_LENGTH`, internal `RenameWebObjectForm`. |
+| `src/components/WebObjectsSection.tsx` | **New.** The website page's Objects tab, with `measureSavedObjectDepths`. |
+| `src/pages/CrawlRunPage.tsx` | `?view=objects` (new `VIEW_QUERY_PARAMETER`, `chooseSiteMapView`, `changeSiteMapView`). `selectPage` keeps the other query parameters. Renames are applied at once (`applyRenames`, `EMPTY_PAGE_GROUPING`, `saveRename`, rename dialog). The ended status line adds "· N similar pages skipped". |
+| `src/pages/WebsiteDetailPage.tsx` | New `objects` tab (`WebsiteTab`, `TAB_LABELS`, `credentialsTabs`, `panelTabs`, `availableTabs`). Side panel label "Crawls, objects, screenshots, and credentials". |
+| Tests: **new** | `tests/backend/utils/{classifyPathSegment,summarizePageStructure,detectPagePatterns,crawlPatternSampling}.test.ts`, `tests/backend/services/webObjectService.test.ts`, `tests/backend/api/webObjects.test.ts`, `tests/frontend/{CrawlWebObjectMap,RenameWebObjectDialog,WebObjectsSection,useWebObjects,describeWebObject}.test.tsx`. |
+| Tests: **updated** | `crawlerService.test.ts` (new outcome fields and skeleton; sampling, slug-confirmation, fresh-crawl, start-page, and button-sampling cases), `crawlRunService.test.ts` (`webObjectService` mocked; save-after-finish cases), `dbService.test.ts` (web object and page pattern delegates, the twelve-table cascade, web object functions), `crawlRuns.test.ts` (`pageGrouping`), `validateRequestBodies.test.ts`, `CrawlRunPage.test.tsx`, `CrawlSiteMap.test.tsx`, `WebsiteDetailPage.test.tsx` (new tab lists and the Objects tab), `routePaths.test.tsx`, and `frontendTestHelpers.tsx` (new builders, plus the new fields in the defaults). No test was removed or skipped. |
+| `AI_JOURNAL.md` | This entry. |
+
+### Verification
+- **Manual end-to-end check** (manual-verifier agent, Playwright, dev servers on 5180 and 3010): it crawled the "easy-test dev" website, which is this app, twice, after adding 5 temporary `[verify]` actions.
+  - **Grouping:** Website, Action, Crawl run, and Use case were found with the right parents and the right instance, view, and create pages.
+  - **Sampling:** no pattern had more than 3 pages. 16 links were skipped and shown as "· 16 similar pages skipped".
+  - **Objects view:** works, and `?view=objects` / `?page=` survive selecting a page and a reload. Groups collapse and expand.
+  - **Renaming:** works from both the crawl run page and the Objects tab.
+  - **API validation:** 400 and 404 where expected.
+  - **Second crawl:** it replaced the objects and dropped the rename. The first run's view still groups its pages, without rename buttons, and its old rows are soft-deleted in Postgres.
+  - **Phone layout:** checked at 390 px.
+  - **Errors:** no console or server errors apart from an unrelated `favicon.ico` 404.
+  - **Cleanup:** the `[verify]` actions were soft deleted afterwards, and the dev servers were stopped.
+  - **Cosmetic note:** after saving a rename, MUI logs an "aria-hidden ... retained focus" warning while the dialog closes.
+- `npm run test:coverage`: 119 files, 2525 tests, all passing. All files: 99.49% lines, 98.49% branches, 100% functions.
+- `npm run lint`, `npm run tsc`, and `npm run tsc:client`: clean.
+- The temporary `claude_tmp/try-detect.mts`, plus the verifier's `run1.json` and `dev.log`, were removed. `claude_tmp/phone-objects.png` was kept.
+
+---
+
+## 2026-10-16 16:14 EDT — Droplet test harness moved to `~/Projects/helpers`, plus a one-command runner and a handoff note
+
+**Intent:**
+- The user moved `setup-droplet.sh` into its own repo, `~/Projects/helpers`. They asked for:
+  - the test files to move there too;
+  - a short handoff note so a future AI can use the script ("keep it simple": the script is already well commented).
+
+### Decisions
+- **Made by the user:** move the test harness to `~/Projects/helpers`, and add a simple handoff.
+- **Made by me:**
+  - The harness goes in `~/Projects/helpers/droplet-test/`.
+  - A new `run-test.sh` does the whole Docker routine in one command. Earlier entries ran those steps by hand.
+  - The handoff note is `HANDOFF.md` in the helpers root.
+  - The old run logs (`run1.log` to `run4.log`) stay in `claude_tmp/droplet-test/`, since the entries below refer to them.
+
+### Files changed
+| File | What changed |
+|---|---|
+| `claude_tmp/droplet-test/` (easy-test) | **Moved out** to `~/Projects/helpers/droplet-test/`: `Dockerfile`, `run-setup.exp`, `check.sh`, `net-check.sh`. Only the run logs remain (`run1.log` to `run7.log`). |
+| `~/Projects/helpers/droplet-test/run-test.sh` | **New**. Builds the image, starts the droplet and client containers and runs shellcheck on `setup-droplet.sh`. Then it does the first run and `check.sh`. Next it sets up a stand-in app behind nginx, waits for it to answer inside the droplet, and runs `net-check.sh` from the client. Finally it puts back the old `allow OpenSSH` rule, re-runs the script and runs `check.sh` again. An `EXIT` trap removes the containers, network and image. **Function:** `remove_test_containers()`. **Readonly settings:** `test_dir`, `setup_script`, `image_name`, `network_name`, `droplet_container`, `droplet_host_name`, `client_container`. **Variables:** `node_path`, `app_answers_through_nginx`. |
+| `~/Projects/helpers/droplet-test/check.sh` | Now ends with `[[ "$failures" -eq 0 ]]`, so it exits 1 when any check fails. |
+| `~/Projects/helpers/droplet-test/net-check.sh` | Same exit-code line. The unused loop variable `attempt_number` became `_` (shellcheck SC2034). |
+| `~/Projects/helpers/HANDOFF.md` | **New**. Covers how to run the script on a droplet, what the firewall lets in, how to test a change, what each test file does, and what the test doesn't cover. |
+| `AI_JOURNAL.md` | This entry. |
+
+`setup-droplet.sh` was not changed. The helpers copy is byte-identical (`cmp`) to the one tested at 16:01.
+
+### Verification
+- **shellcheck** (in the test image): `run-test.sh` is clean. `net-check.sh` shows only SC2016 "info" notes, about check strings in single quotes that `eval` expands later on purpose.
+- **First run of `run-test.sh`** (`run5.log`): exit 1. The outside `/app/` check failed and everything else passed.
+  - Cause: `systemctl reload nginx` returns before nginx loads the new config, and the outside request came in before that. The manual run had waited 1 second.
+  - Fix: `run-test.sh` waits up to 10 seconds for `/app/` to answer inside the droplet before `net-check.sh` runs.
+- **`run6.log`:** exit 0.
+- **`run7.log`, after the SC2034 fix, on the final files:** exit 0 and 61 PASS lines:
+  - `check.sh` 27/27 after the first run;
+  - `net-check.sh` 7/7: 7 quick SSH logins gave `ok ok ok ok ok refused refused`;
+  - `check.sh` 27/27 after the re-run, where ufw printed "Rule updated" for the old rule.
+- **Cleanup:** no `droplet` containers, network or image were left after each run. No servers were left running.
+
+---
+
+## 2026-10-16 16:01 EDT — `setup-droplet.sh`: ufw denies incoming by default, SSH is rate-limited
+
+**Intent:**
+- The user asked, following DigitalOcean's UFW tutorial, for these firewall changes without breaking nginx or SSH:
+  - ufw explicitly denies incoming connections by default;
+  - SSH is rate-limited ("limit ssh as well").
+- The user also asked for the change to be checked in the Docker container, including that SSH still logs in.
+
+### Decisions
+- **Made by the user:**
+  - `ufw default deny incoming`.
+  - SSH gets `ufw limit` instead of `ufw allow`.
+  - Verify in the Docker container, including SSH.
+- **Made by me:**
+  - Added `ufw default allow outgoing` too, as in the tutorial, so apt, nvm and git keep working.
+  - Order: the SSH and nginx rules come first, then the default policies, then `ufw --force enable`. If the script is re-run with ufw already on, SSH and nginx already have rules by the time incoming connections are denied.
+  - nginx stays `allow 'Nginx Full'` (80 and 443) with no rate limit.
+
+### Files changed
+| File | What changed |
+|---|---|
+| `setup-droplet.sh` | **Changed:** `run_new_user_phase()`, step 5 (firewall). `sudo ufw allow OpenSSH` is now `sudo ufw limit OpenSSH`. It turns away an address that opens 6 or more connections in 30 seconds. **Added** `sudo ufw default deny incoming` and `sudo ufw default allow outgoing`, after the SSH and nginx rules and before `ufw --force enable`. **Changed:** the header's step 5 description and the step's comments. These now explain the limit, the defaults, and that localhost traffic and replies are still let in. No functions or settings were added or removed. |
+| `AI_JOURNAL.md` | This entry. |
+
+No application code, tests or config were changed, so `npm run lint` and `npm run test:coverage` were not run.
+
+### Verification
+- `bash -n` passes, and `shellcheck` (inside the container) is clean.
+- **Setup:** a fresh `ubuntu:26.04` (arm64) container with systemd, `--privileged`, hostname `test-droplet`. A second container from the same image sat on the same Docker network as the "outside" computer. Harness: `claude_tmp/droplet-test/`.
+  - `check.sh` was updated. The SSH rule must be `LIMIT` (v4 and v6) with no `ALLOW` left. Nginx Full must be `ALLOW` (v4 and v6). The defaults must be `deny (incoming), allow (outgoing)`.
+  - `net-check.sh` is **new**. It runs from the outside container.
+  - Logs: `run3.log` (first run) and `run4.log` (re-run).
+- **First run:** exit 0.
+  - `ufw status verbose`:
+    - `Default: deny (incoming), allow (outgoing), deny (routed)`;
+    - `22/tcp (OpenSSH) LIMIT IN Anywhere` (and v6);
+    - `80,443/tcp (Nginx Full) ALLOW IN Anywhere` (and v6).
+  - `check.sh`: 27/27 pass.
+  - **Test-only setup:** a stand-in Node app on `0.0.0.0:3000`, and an nginx `location /app/` that proxies to `127.0.0.1:3000`. These were in the container only, not in the script.
+  - **From the outside container** (`net-check.sh`, 8/8 pass):
+    - Port 80 serves the nginx welcome page, and `/app/` reaches the app through nginx.
+    - Port 3000 directly times out.
+    - `ssh panda01@test-droplet` logs in with the key.
+    - Of 7 quick SSH logins, the first 5 work and the 6th and 7th are refused. Port 80 still works at that time.
+    - SSH logs in again after 30 seconds.
+  - **Control:** with `ufw disable`, port 3000 answered from outside. With ufw back on, it timed out. So the default deny is what blocks it.
+- **Re-run, upgrading a droplet set up by the old script:**
+  - The test first put back the old `ufw allow OpenSSH` rule, then re-ran the script. Exit 0, and no new-password prompt.
+  - ufw printed "Rule updated", which turned `ALLOW` into `LIMIT`.
+  - `check.sh` 27/27 and `net-check.sh` 8/8 pass again.
+- **Reboot** (`docker restart`): ufw is still active with the same defaults and rules. `ssh panda01@test-droplet` from outside works, and port 80 serves nginx.
+- **Not verified:**
+  - A real droplet, or x86_64.
+  - Port 443 is only checked as a rule. nginx has no certificate yet, so nothing listens on 443.
+  - DigitalOcean's cloud firewall, if one is attached, is separate and wasn't touched.
+- **Cleanup:** both containers, the `droplet-test-net` network and `droplet-test-image` were removed. No servers were left running.
+
+---
+
 ## 2026-10-16 14:24 EDT — `setup-droplet.sh`: undid the "no asterisks at sudo's prompt" change
 
 **Intent:**

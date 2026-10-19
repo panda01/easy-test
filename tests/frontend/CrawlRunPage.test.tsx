@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act, screen, within, type RenderResult } from "@testing-library/react";
+import { act, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { type ReactElement } from "react";
 import { Route, useLocation, useNavigationType } from "react-router-dom";
@@ -9,6 +9,7 @@ import { formatDayAndTime } from "../../src/utils/formatRelativeTime";
 import {
   buildCrawledPageRecord,
   buildCrawledPageSummaryRecord,
+  buildCrawlPageGroupingWebObjectRecord,
   buildCrawlRunWithPagesRecord,
   buildJsonResponse,
   buildWebsiteRecord,
@@ -461,6 +462,105 @@ describe("CrawlRunPage", () => {
         name: `Login failure screenshot of the crawl started ${startedAtText}`,
       }),
     ).toHaveAttribute("src", `${RUN_API_URL}/login-failure-screenshot`);
+  });
+});
+
+describe("CrawlRunPage's Objects view", () => {
+  const RENAME_API_URL = "/api/websites/website-1/web-objects/web-object-about";
+  const aboutObject = buildCrawlPageGroupingWebObjectRecord({
+    webObjectId: "web-object-about",
+    instancePatternKey: "/about/{about}",
+    displayName: "About",
+    detectedName: "About",
+    instanceValues: ["us"],
+    skippedLinkCount: 4,
+    patterns: [{ key: "/about/{about}", role: "instance", viewName: null, detectedBy: "siblingStructure", pageIds: ["about"] }],
+  });
+  const groupedRun = buildCrawlRunWithPagesRecord({
+    ...finishedRun,
+    skippedSimilarUrlCount: 4,
+    skippedSimilarUrlCountsByPattern: { "/about/{about}": 4 },
+    pageGrouping: { webObjects: [aboutObject], standalonePageIds: ["home"] },
+  });
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("says how many similar pages the crawl skipped, and opens the Objects view from ?view=objects", async () => {
+    stubFinishedRun({ [`GET ${RUN_API_URL}`]: { status: 200, body: groupedRun } });
+
+    renderCrawlRunPage(`${RUN_PATH}?view=objects`);
+
+    expect(await screen.findByRole("heading", { name: "About" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Finished · 2 pages · 6.4 s · 4 similar pages skipped");
+    expect(screen.getByText("1 instance · 4 more skipped")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Objects" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("list", { name: "Site map" })).not.toBeInTheDocument();
+  });
+
+  it("switches views in the query string (replaced), keeping the selected page, and the selection keeps the view", async () => {
+    const user = userEvent.setup();
+    stubFinishedRun({ [`GET ${RUN_API_URL}`]: { status: 200, body: groupedRun } });
+    renderCrawlRunPage(`${RUN_PATH}?page=home`);
+
+    await user.click(await screen.findByRole("button", { name: "Objects" }));
+
+    expect(screen.getByTestId("probe-search").textContent).toBe("?page=home&view=objects");
+    expect(screen.getByTestId("probe-navigation-type").textContent).toBe("REPLACE");
+    const webObjectList = screen.getByRole("list", { name: "Web objects" });
+    await user.click(within(webObjectList).getByRole("button", { name: "/about" }));
+
+    expect(await screen.findByLabelText("Aria snapshot")).toHaveTextContent('- heading "About" [level=1]');
+    expect(screen.getByTestId("probe-search").textContent).toBe("?page=about&view=objects");
+
+    await user.click(screen.getByRole("button", { name: "Tree" }));
+
+    expect(screen.getByTestId("probe-search").textContent).toBe("?page=about");
+    expect(screen.getByRole("list", { name: "Site map" })).toBeInTheDocument();
+  });
+
+  it("renames a saved object and shows the new name at once", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: { status: 200, body: groupedRun },
+      [`PUT ${RENAME_API_URL}`]: { status: 200, body: { id: "web-object-about", name: "Company page" } },
+    });
+    renderCrawlRunPage(`${RUN_PATH}?view=objects`);
+
+    await user.click(await screen.findByRole("button", { name: "Rename About" }));
+    const nameField = screen.getByRole("textbox", { name: "Name" });
+    await user.clear(nameField);
+    await user.type(nameField, "Company page");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("heading", { name: "Company page" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(countRequests(fetchStub, "PUT", RENAME_API_URL)).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "Rename Company page" }));
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Company page");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps the dialog open with the server's reason when the rename fails", async () => {
+    const user = userEvent.setup();
+    stubFinishedRun({
+      [`GET ${RUN_API_URL}`]: { status: 200, body: groupedRun },
+      [`PUT ${RENAME_API_URL}`]: { status: 404, body: { error: "Web object not found" } },
+    });
+    renderCrawlRunPage(`${RUN_PATH}?view=objects`);
+
+    await user.click(await screen.findByRole("button", { name: "Rename About" }));
+    await user.click(screen.getByRole("button", { name: "Use detected name" }));
+
+    expect(await screen.findByText("Web object not found")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });
 

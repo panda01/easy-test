@@ -22,6 +22,15 @@ import {
 } from "./crawlerLoginService.js";
 import { DEFAULT_CRAWL_BUTTON_MODE, type CrawlButtonMode } from "../utils/crawlButtonModes.js";
 import { followPageButtons, type ButtonLink } from "./crawlerButtonService.js";
+import {
+  claimPatternSlot,
+  createCrawlPatternSampler,
+  dropOverSampledQueueEntries,
+  recordVisitedPatternPage,
+  summarizeSkippedLinks,
+  type CrawlPatternSampler,
+  type NewStructureSkeleton,
+} from "../utils/crawlPatternSampling.js";
 
 /** The most pages one crawl visits (the user's choice). Failed pages count too. */
 export const CRAWL_PAGE_LIMIT = 50;
@@ -74,6 +83,10 @@ export interface CrawlOutcome {
   visitedPageCount: number;
   /** Links still queued when it stopped. */
   waitingUrlCount: number;
+  /** Links skipped because the crawl already had enough pages of their URL pattern (see `claimPatternSlot`). */
+  skippedSimilarUrlCount: number;
+  /** The same skipped links, counted per pattern key (`/websites/{website}`). */
+  skippedSimilarUrlCountsByPattern: Record<string, number>;
   /** Why the login failed when `stopReason` is `loginFailed`; null otherwise. */
   loginErrorMessage: string | null;
   /** True when the login failed AND a screenshot of it was written to `login.failureScreenshotPath`. */
@@ -108,6 +121,15 @@ export type RecordVisitedPage = (
   progress: CrawlProgress,
 ) => Promise<string | null>;
 
+/**
+ * Saves the structure skeletons the crawl's slug detection built for pages
+ * already recorded (see `sampleRecordedPage`). Pages are recorded without
+ * one; a page only gets one once its URL has enough siblings to be compared.
+ * @param structureSkeletons - Each recorded page's id and its new skeleton
+ * @returns True to go on crawling; false when the run is gone (deleted with its website), which stops the crawl
+ */
+export type RecordStructureSkeletons = (structureSkeletons: NewStructureSkeleton[]) => Promise<boolean>;
+
 /** One link waiting to be visited. */
 interface QueuedCrawlUrl {
   /** The page's identity (origin + path). */
@@ -139,6 +161,11 @@ interface CrawlState {
   visitedPageCount: number;
   /** Whether the crawl logged in first; logout links are never followed while it is. */
   isLoggedIn: boolean;
+  /**
+   * How many pages of each URL pattern the crawl has, and which links it
+   * skipped for having enough - built from this crawl alone.
+   */
+  patternSampler: CrawlPatternSampler;
 }
 
 /** The fixed inputs of one crawl. */
@@ -155,6 +182,8 @@ interface CrawlContext {
   browserIsStillOpen: () => boolean;
   /** Saves each visited page. */
   recordVisitedPage: RecordVisitedPage;
+  /** Saves the skeletons slug detection builds for recorded pages. */
+  recordStructureSkeletons: RecordStructureSkeletons;
   /** The `performance.now()` reading taken when the crawl began. */
   crawlStartedAt: number;
   /** Which buttons the crawl clicks on each page, on top of following links. */
@@ -488,7 +517,9 @@ async function followButtonsWhenAsked(
  * both its snapshot and its links were read; buttons are only clicked on a
  * page that succeeded. The page's `buttonUrls` are the identities its buttons
  * led to, de-duplicated, in click order, and `durationMs` includes the
- * clicks. Every failure is recorded on the page; none rejects.
+ * clicks. The page has no `structureSkeleton` yet: one is only built when
+ * slug detection compares the page (see `sampleRecordedPage`). Every failure
+ * is recorded on the page; none rejects.
  * @param page - The crawl's browser page
  * @param queuedUrl - What to visit
  * @param state - The crawl state (origin, seen URLs, visit order)
@@ -603,13 +634,28 @@ function isUnseenAndSafeToQueue(state: CrawlState, identityUrl: string): boolean
 }
 
 /**
+ * Marks a new, safe page seen, and decides whether it is queued: not when the
+ * crawl already has enough pages of its URL pattern (see `claimPatternSlot`),
+ * in which case it is counted as skipped instead. Either way it is seen, so
+ * another link to it is neither queued nor counted again.
+ * @param state - The crawl state to update
+ * @param identityUrl - The page's identity (origin + path)
+ * @returns True when the page is queued; false when sampling skipped it
+ */
+function claimSeenPageSlot(state: CrawlState, identityUrl: string): boolean {
+  state.seenIdentityUrls.add(identityUrl);
+  return claimPatternSlot(state.patternSampler, identityUrl);
+}
+
+/**
  * Picks the links that were neither visited nor queued yet, and marks them
  * seen so a later page cannot queue them again. While the crawl is logged in,
- * logout links are left out (see `isUnseenAndSafeToQueue`). They are still
- * listed in the page's `linkedUrls`.
+ * logout links are left out (see `isUnseenAndSafeToQueue`), and a link whose
+ * URL pattern already has enough pages is skipped (see `claimSeenPageSlot`).
+ * Both are still listed in the page's `linkedUrls`.
  * @param state - The crawl state to update
  * @param sameOriginLinks - A visited page's same-origin links
- * @returns The new links, in page order
+ * @returns The new links to queue, in page order
  */
 function claimUnseenLinks(
   state: CrawlState,
@@ -618,10 +664,7 @@ function claimUnseenLinks(
   const unseenLinks = sameOriginLinks.filter((link) =>
     isUnseenAndSafeToQueue(state, link.identityUrl),
   );
-  for (const unseenLink of unseenLinks) {
-    state.seenIdentityUrls.add(unseenLink.identityUrl);
-  }
-  return unseenLinks;
+  return unseenLinks.filter((unseenLink) => claimSeenPageSlot(state, unseenLink.identityUrl));
 }
 
 /**
@@ -630,23 +673,63 @@ function claimUnseenLinks(
  * reachable both ways counts as found by the link - and marks them seen.
  * When two buttons led to the same page, the first one's label is kept.
  * While the crawl is logged in, logout-looking pages are left out, as for
- * links (see `isUnseenAndSafeToQueue`). They are still listed in the page's
- * `buttonUrls`.
+ * links (see `isUnseenAndSafeToQueue`), and so is a page whose URL pattern
+ * already has enough pages (see `claimSeenPageSlot`). They are still listed
+ * in the page's `buttonUrls`.
  * @param state - The crawl state to update
  * @param buttonLinks - The pages a visited page's buttons led to, in click order
- * @returns The new button links, in click order
+ * @returns The new button links to queue, in click order
  */
 function claimUnseenButtonLinks(state: CrawlState, buttonLinks: ButtonLink[]): ButtonLink[] {
   const unseenButtonLinks: ButtonLink[] = [];
   for (const buttonLink of buttonLinks) {
     const { identityUrl } = buttonLink.link;
     const buttonLinkIsNew = isUnseenAndSafeToQueue(state, identityUrl);
-    if (buttonLinkIsNew) {
-      state.seenIdentityUrls.add(identityUrl);
+    if (buttonLinkIsNew && claimSeenPageSlot(state, identityUrl)) {
       unseenButtonLinks.push(buttonLink);
     }
   }
   return unseenButtonLinks;
+}
+
+/**
+ * Hands a page the crawl just recorded to its sampling. When the page
+ * confirms a new slug pattern (`/blog/{post}`), the queued links that
+ * pattern now has too many of are taken off the queue and counted as skipped
+ * (see `dropOverSampledQueueEntries`).
+ *
+ * The page goes in with its aria snapshot and no skeleton. Slug detection
+ * builds a page's skeleton only when its URL has enough siblings to be a
+ * slug, to compare them - for this page, or for earlier ones this page is a
+ * sibling of (see `recordVisitedPatternPage`). The skeletons it built are
+ * saved on their recorded pages.
+ * @param state - The crawl state to update
+ * @param context - Holds the recorder that saves the new skeletons
+ * @param crawledPageId - The recorded page's id
+ * @param visitedPage - The page as it was recorded
+ * @returns True to go on crawling; false when saving the skeletons found the run gone
+ */
+async function sampleRecordedPage(
+  state: CrawlState,
+  context: CrawlContext,
+  crawledPageId: string,
+  visitedPage: CrawledPageInput,
+): Promise<boolean> {
+  const { slugPatternsChanged, newStructureSkeletons } = recordVisitedPatternPage(
+    state.patternSampler,
+    { id: crawledPageId, url: visitedPage.url, title: visitedPage.title, structureSkeleton: null },
+    visitedPage.ariaSnapshot,
+  );
+  if (slugPatternsChanged) {
+    state.queue = dropOverSampledQueueEntries(
+      state.patternSampler,
+      state.recordedIdentityUrls,
+      state.queue,
+    );
+  }
+  const noSkeletonWasBuilt = newStructureSkeletons.length === 0;
+  if (noSkeletonWasBuilt) return true;
+  return context.recordStructureSkeletons(newStructureSkeletons);
 }
 
 /**
@@ -687,9 +770,13 @@ function decideWhetherToStop(state: CrawlState, crawlStartedAt: number): CrawlSt
  * the saved progress already counts them as waiting; they are queued after,
  * because their parent is the saved page's id. Links are claimed first, so a
  * page reachable both by a link and by a button counts as found by the link.
+ * A link whose URL pattern already has `MAX_PAGES_PER_PATTERN` pages is not
+ * queued (see `claimSeenPageSlot`), and once the page is queued the saved
+ * page is handed to sampling (see `sampleRecordedPage`), which saves any
+ * structure skeletons it built - the crawl stops when that finds the run gone.
  * @param page - The crawl's browser page
  * @param state - The crawl state to update
- * @param context - The timing settings, the button mode, the recorder, and the crawl's start time
+ * @param context - The timing settings, the button mode, the recorders, and the crawl's start time
  * @returns Why the crawl stops now, or null to keep crawling
  */
 async function crawlNextPage(
@@ -740,6 +827,10 @@ async function crawlNextPage(
       parentPageId: crawledPageId,
       foundByButtonText: newChild.foundByButtonText,
     });
+  }
+  const runIsStillActive = await sampleRecordedPage(state, context, crawledPageId, visit.visitedPage);
+  if (!runIsStillActive) {
+    return "stoppedBecauseRunWasDeleted";
   }
   return decideWhetherToStop(state, context.crawlStartedAt);
 }
@@ -835,6 +926,7 @@ function closePopupQuietly(popup: Page): void {
  * @param startUrl - The website's URL
  * @param timingSettings - The website's network idle cap and minimum wait
  * @param recordVisitedPage - Saves each visited page
+ * @param recordStructureSkeletons - Saves the skeletons slug detection builds for recorded pages
  * @param login - What to log in as before the first page, or null to crawl logged out
  * @param buttonMode - Which buttons to click on each page, on top of following links
  * @returns How the crawl ended
@@ -845,6 +937,7 @@ async function crawlWithPage(
   startUrl: string,
   timingSettings: ScreenshotTimingSettings,
   recordVisitedPage: RecordVisitedPage,
+  recordStructureSkeletons: RecordStructureSkeletons,
   login: CrawlLogin | null,
   buttonMode: CrawlButtonMode,
 ): Promise<CrawlOutcome> {
@@ -852,6 +945,7 @@ async function crawlWithPage(
     timingSettings,
     browserIsStillOpen: () => browser.isConnected() && !page.isClosed(),
     recordVisitedPage,
+    recordStructureSkeletons,
     crawlStartedAt: performance.now(),
     buttonMode,
   };
@@ -868,6 +962,8 @@ async function crawlWithPage(
       stopReason: loginStopReason,
       visitedPageCount: 0,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: loginStep.loginErrorMessage,
       loginFailureScreenshotWasCaptured: loginStep.loginFailureScreenshotWasCaptured,
     };
@@ -881,7 +977,10 @@ async function crawlWithPage(
     crawlOrigin: null,
     visitedPageCount: 0,
     isLoggedIn: loginStep.isLoggedIn,
+    patternSampler: createCrawlPatternSampler(),
   };
+  // The start page is always visited; it only counts toward its pattern.
+  claimPatternSlot(state.patternSampler, startEntry.identityUrl);
 
   let stopReason = decideWhetherToStop(state, context.crawlStartedAt);
   while (stopReason === null) {
@@ -891,6 +990,7 @@ async function crawlWithPage(
     stopReason,
     visitedPageCount: state.visitedPageCount,
     waitingUrlCount: state.queue.length,
+    ...summarizeSkippedLinks(state.patternSampler),
     loginErrorMessage: null,
     loginFailureScreenshotWasCaptured: false,
   };
@@ -914,6 +1014,16 @@ async function crawlWithPage(
  * Pop-up windows a click opens are closed, and `alert`/`confirm` dialogs are
  * dismissed (Playwright's default), never accepted.
  *
+ * SAMPLING: the crawl visits at most `MAX_PAGES_PER_PATTERN` (3) pages of one
+ * URL pattern - `/websites/{website}/actions/{action}` - and skips the rest
+ * of its links, counting them per pattern (see `claimPatternSlot`). Patterns
+ * come from this crawl alone: id-shaped segments are recognised on sight, and
+ * slugs once 3 visited sibling pages built alike confirm them (see
+ * `sampleRecordedPage`). Nothing from an earlier crawl is used. A page is
+ * recorded without a structure skeleton; one is built only when its URL has
+ * enough siblings to be a slug, to compare it with them, and handed to
+ * `recordStructureSkeletons` to be saved on the recorded page.
+ *
  * Two links are the same page when their origin + path match (query string
  * and hash ignored); a page is loaded with the first link that reached it,
  * and recorded under where it LANDED - a redirected page is recorded as the
@@ -928,8 +1038,8 @@ async function crawlWithPage(
  * `succeeded: false`, not a failed crawl. If the browser itself closes
  * mid-crawl (e.g. the server is restarting), the crawl stops with
  * `stoppedBecauseBrowserClosed`. This only rejects when the browser cannot be
- * launched or open a page, or when `recordVisitedPage` or
- * `login.recordLoginSucceeded` rejects.
+ * launched or open a page, or when `recordVisitedPage`,
+ * `recordStructureSkeletons`, or `login.recordLoginSucceeded` rejects.
  *
  * LOGGING IN: with a `login`, the crawler first logs in on the same browser
  * page (see `logInWithCredential`), so its session carries over, and records
@@ -942,15 +1052,17 @@ async function crawlWithPage(
  * @param startUrl - The website's URL; loaded exactly as given
  * @param timingSettings - The website's network idle cap and minimum wait, applied to every page
  * @param recordVisitedPage - Saves each visited page; returning null stops the crawl
+ * @param recordStructureSkeletons - Saves the skeletons slug detection builds for recorded pages; returning false stops the crawl
  * @param login - What to log in as before the first page; null (the default) crawls as a logged-out visitor
  * @param buttonMode - Which buttons to click on each page, on top of following links; links only by default
- * @returns Why the crawl stopped, how many pages it visited, how many links were still waiting, and why the login failed (when it did)
- * @throws When the browser cannot be launched or open a page, or `recordVisitedPage` or `login.recordLoginSucceeded` rejects
+ * @returns Why the crawl stopped, how many pages it visited, how many links were still waiting or skipped by sampling, and why the login failed (when it did)
+ * @throws When the browser cannot be launched or open a page, or `recordVisitedPage`, `recordStructureSkeletons`, or `login.recordLoginSucceeded` rejects
  */
 export async function crawlWebsite(
   startUrl: string,
   timingSettings: ScreenshotTimingSettings,
   recordVisitedPage: RecordVisitedPage,
+  recordStructureSkeletons: RecordStructureSkeletons,
   login: CrawlLogin | null = null,
   buttonMode: CrawlButtonMode = DEFAULT_CRAWL_BUTTON_MODE,
 ): Promise<CrawlOutcome> {
@@ -963,6 +1075,7 @@ export async function crawlWebsite(
       startUrl,
       timingSettings,
       recordVisitedPage,
+      recordStructureSkeletons,
       login,
       buttonMode,
     );

@@ -10,6 +10,7 @@ import {
   crawledPageApiUrl,
   crawlRunApiUrl,
   crawlRunDetailPath,
+  crawlRunObjectsPath,
   crawlRunsApiUrl,
   crawlRunLoginFailureScreenshotApiUrl,
   credentialApiUrl,
@@ -29,6 +30,8 @@ import {
   websiteItemDetailPath,
   websiteItemEditPath,
   websiteItemsApiUrl,
+  webObjectApiUrl,
+  webObjectsApiUrl,
 } from "../../src/utils/routePaths";
 import { ACTION_KIND, USE_CASE_KIND } from "../../src/utils/websiteItemKinds";
 
@@ -257,6 +260,30 @@ describe("routePaths: credentials", () => {
     );
     expect(credentialApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/credentials/${ENCODED_UNSAFE_ID}`,
+    );
+  });
+});
+
+describe("routePaths: web objects", () => {
+  it("builds a crawl run page opened on its Objects view", () => {
+    expect(crawlRunObjectsPath("website-1", "crawl-run-1")).toBe(
+      "/websites/website-1/crawl-runs/crawl-run-1?view=objects",
+    );
+  });
+
+  it("builds a website's web object collection url and one web object's url", () => {
+    expect(webObjectsApiUrl("website-1")).toBe("/api/websites/website-1/web-objects");
+    expect(webObjectApiUrl("website-1", "web-object-1")).toBe(
+      "/api/websites/website-1/web-objects/web-object-1",
+    );
+  });
+
+  it("encodes every id in web object paths and urls", () => {
+    expect(crawlRunObjectsPath(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/websites/${ENCODED_UNSAFE_ID}/crawl-runs/${ENCODED_UNSAFE_ID}?view=objects`,
+    );
+    expect(webObjectApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/web-objects/${ENCODED_UNSAFE_ID}`,
     );
   });
 });

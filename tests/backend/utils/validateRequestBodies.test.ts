@@ -11,6 +11,8 @@ import {
   MAX_REFINE_NOTE_LENGTH,
   validateCredentialInput,
   validateCrawlRunStartInput,
+  validateWebObjectRenameInput,
+  MAX_WEB_OBJECT_NAME_LENGTH,
 } from "../../../server/utils/validateRequestBodies.js";
 import { CRAWL_BUTTON_MODES } from "../../../server/utils/crawlButtonModes.js";
 
@@ -997,6 +999,50 @@ describe("validateCrawlRunStartInput", () => {
     expect(validateCrawlRunStartInput({ credentialId })).toEqual({
       isValid: false,
       errorMessage: "The credential id must be a non-blank string, or null to crawl logged out",
+    });
+  });
+});
+
+describe("validateWebObjectRenameInput", () => {
+  it("accepts a name, trimmed", () => {
+    expect(validateWebObjectRenameInput({ name: "  Test step  " })).toEqual({
+      isValid: true,
+      input: { name: "Test step" },
+    });
+  });
+
+  it.each([
+    ["a null name", { name: null }],
+    ["a blank name", { name: "   " }],
+    ["no name at all", {}],
+  ])("resets to the detected name for %s", (_label, body) => {
+    expect(validateWebObjectRenameInput(body)).toEqual({ isValid: true, input: { name: null } });
+  });
+
+  it(`accepts a name of exactly ${String(MAX_WEB_OBJECT_NAME_LENGTH)} characters and refuses a longer one`, () => {
+    const longestName = "n".repeat(MAX_WEB_OBJECT_NAME_LENGTH);
+
+    expect(validateWebObjectRenameInput({ name: longestName })).toEqual({
+      isValid: true,
+      input: { name: longestName },
+    });
+    expect(validateWebObjectRenameInput({ name: `${longestName}n` })).toEqual({
+      isValid: false,
+      errorMessage: "The name must be at most 100 characters",
+    });
+  });
+
+  it("refuses a name that is not text", () => {
+    expect(validateWebObjectRenameInput({ name: 5 })).toEqual({
+      isValid: false,
+      errorMessage: "The name must be text, or null to use the detected name",
+    });
+  });
+
+  it.each([undefined, null, [], "Test step"])("refuses a body that is not a JSON object (%j)", (body) => {
+    expect(validateWebObjectRenameInput(body)).toEqual({
+      isValid: false,
+      errorMessage: "The request body must be a JSON object",
     });
   });
 });

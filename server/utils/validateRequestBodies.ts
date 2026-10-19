@@ -643,3 +643,38 @@ export function validateCrawlRunStartInput(body: unknown): ValidationResult<Craw
 
   return { isValid: true, input: { credentialId, buttonMode } };
 }
+
+/** The longest name a web object may be given. */
+export const MAX_WEB_OBJECT_NAME_LENGTH = 100;
+
+/** What a "rename a web object" request asks for, as validated. */
+export interface WebObjectRenameInput {
+  /** The new name, or null to show the detected name again. */
+  name: string | null;
+}
+
+/**
+ * Validates the body of a "rename a web object" request: `{ name }`, where
+ * `name` is text of at most `MAX_WEB_OBJECT_NAME_LENGTH` characters once
+ * trimmed. A null, missing, or blank name resets the object to its detected
+ * name.
+ * @param body - The parsed request body
+ * @returns The cleaned input, or the first problem found as a message
+ */
+export function validateWebObjectRenameInput(body: unknown): ValidationResult<WebObjectRenameInput> {
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object" };
+  }
+  const name = readOptionalTrimmedText(body, "name");
+  if (!name.isText) {
+    return { isValid: false, errorMessage: "The name must be text, or null to use the detected name" };
+  }
+  const nameIsTooLong = name.value !== null && name.value.length > MAX_WEB_OBJECT_NAME_LENGTH;
+  if (nameIsTooLong) {
+    return {
+      isValid: false,
+      errorMessage: `The name must be at most ${MAX_WEB_OBJECT_NAME_LENGTH} characters`,
+    };
+  }
+  return { isValid: true, input: { name: name.value } };
+}

@@ -3,7 +3,10 @@ import { render, screen, within, type RenderResult } from "@testing-library/reac
 import { userEvent } from "@testing-library/user-event";
 import CrawlSiteMap, { type CrawlSiteMapProps } from "../../src/components/CrawlSiteMap";
 import { statusColors } from "../../src/theme/nocturneTheme";
-import { buildCrawledPageSummaryRecord } from "./support/frontendTestHelpers";
+import {
+  buildCrawledPageSummaryRecord,
+  buildCrawlPageGroupingWebObjectRecord,
+} from "./support/frontendTestHelpers";
 
 const homePage = buildCrawledPageSummaryRecord({
   id: "home",
@@ -182,5 +185,86 @@ describe("CrawlSiteMap", () => {
     const desktopRows = within(screen.getByRole("list", { name: "Site map" })).getAllByRole("button");
     expect(desktopRows[0]).toHaveStyle({ minHeight: "34px" });
     expect(screen.getByRole("list", { name: "Site map" })).toHaveStyle({ maxHeight: "640px" });
+  });
+
+  it("draws only the tree, with no view switch, when no Objects view is given", () => {
+    renderSiteMap();
+
+    expect(screen.queryByRole("group", { name: "Site map view" })).not.toBeInTheDocument();
+  });
+});
+
+describe("CrawlSiteMap with its Objects view", () => {
+  const blogObject = buildCrawlPageGroupingWebObjectRecord({
+    instancePatternKey: "/blog/{blog}",
+    displayName: "Blog post",
+    detectedName: "Blog",
+    patterns: [{ key: "/blog/{blog}", role: "instance", viewName: null, detectedBy: "siblingStructure", pageIds: ["blog"] }],
+  });
+
+  /**
+   * Renders the site map with its Objects view in the given view.
+   * @param siteMapView - Which view is shown
+   * @param overrides - Props to replace
+   * @returns The Testing Library render result and the view change handler
+   */
+  function renderSiteMapWithObjects(
+    siteMapView: "tree" | "objects",
+    overrides: Partial<CrawlSiteMapProps> = {},
+  ): { onSiteMapViewChange: ReturnType<typeof vi.fn>; onRenameWebObject: ReturnType<typeof vi.fn> } {
+    const onSiteMapViewChange = vi.fn();
+    const onRenameWebObject = vi.fn();
+    renderSiteMap({
+      objectsView: {
+        siteMapView,
+        onSiteMapViewChange,
+        pageGrouping: { webObjects: [blogObject], standalonePageIds: ["home", "about", "missing"] },
+        onRenameWebObject,
+      },
+      ...overrides,
+    });
+    return { onSiteMapViewChange, onRenameWebObject };
+  }
+
+  it("shows a Tree / Objects switch with the shown view pressed", () => {
+    renderSiteMapWithObjects("tree");
+
+    const viewSwitch = screen.getByRole("group", { name: "Site map view" });
+    expect(within(viewSwitch).getByRole("button", { name: "Tree" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(viewSwitch).getByRole("button", { name: "Objects" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("list", { name: "Site map" })).toBeInTheDocument();
+  });
+
+  it("asks for the view picked, and ignores a click on the view already shown", async () => {
+    const { onSiteMapViewChange } = renderSiteMapWithObjects("tree");
+
+    await userEvent.click(screen.getByRole("button", { name: "Tree" }));
+    expect(onSiteMapViewChange).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Objects" }));
+    expect(onSiteMapViewChange).toHaveBeenCalledWith("objects");
+  });
+
+  it("draws the pages grouped into web objects in the Objects view, scrolling inside its panel on desktop", async () => {
+    const onSelectPage = vi.fn();
+    const { onRenameWebObject } = renderSiteMapWithObjects("objects", { onSelectPage });
+
+    expect(screen.queryByRole("list", { name: "Site map" })).not.toBeInTheDocument();
+    const webObjectList = screen.getByRole("list", { name: "Web objects" });
+    expect(within(webObjectList).getByRole("heading", { name: "Blog post" })).toBeInTheDocument();
+    expect(webObjectList.parentElement).toHaveStyle({ maxHeight: "640px" });
+
+    await userEvent.click(screen.getByRole("button", { name: "/blog" }));
+    await userEvent.click(screen.getByRole("button", { name: "Rename Blog post" }));
+
+    expect(onSelectPage).toHaveBeenCalledWith("blog");
+    expect(onRenameWebObject).toHaveBeenCalledWith(blogObject);
+  });
+
+  it("says so when the crawl has no pages yet, in either view", () => {
+    renderSiteMapWithObjects("objects", { pages: [] });
+
+    expect(screen.getByText("No pages yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Web objects" })).not.toBeInTheDocument();
   });
 });

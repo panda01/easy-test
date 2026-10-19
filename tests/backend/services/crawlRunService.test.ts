@@ -7,6 +7,7 @@ import type {
 import type {
   CrawlLogin,
   CrawlOutcome,
+  RecordStructureSkeletons,
   RecordVisitedPage,
 } from "../../../server/services/crawlerService.js";
 
@@ -16,26 +17,35 @@ import type {
  * whose outcome each test controls; `measureElapsedMs` is pinned so recorded
  * durations are predictable.
  */
-const { mockDbService, mockCrawlerService, mockPlaywrightService, mockCredentialEncryption } =
-  vi.hoisted(() => ({
-    mockDbService: {
-      adoptWebsiteLoginUrl: vi.fn(),
-      createCrawlRunForWebsite: vi.fn(),
-      recordCrawledPage: vi.fn(),
-      markCrawlRunLoggedIn: vi.fn(),
-      finishCrawlRun: vi.fn(),
-      markRunningCrawlRunsInterrupted: vi.fn(),
-    },
-    mockCrawlerService: { CRAWL_PAGE_LIMIT: 50, crawlWebsite: vi.fn() },
-    mockPlaywrightService: { measureElapsedMs: vi.fn() },
-    /** Decryption is replaced: its own spec covers the cryptography. */
-    mockCredentialEncryption: { decryptCredentialPassword: vi.fn() },
-  }));
+const {
+  mockDbService,
+  mockCrawlerService,
+  mockPlaywrightService,
+  mockCredentialEncryption,
+  mockWebObjectService,
+} = vi.hoisted(() => ({
+  mockDbService: {
+    adoptWebsiteLoginUrl: vi.fn(),
+    createCrawlRunForWebsite: vi.fn(),
+    recordCrawledPage: vi.fn(),
+    saveCrawledPageStructureSkeletons: vi.fn(),
+    markCrawlRunLoggedIn: vi.fn(),
+    finishCrawlRun: vi.fn(),
+    markRunningCrawlRunsInterrupted: vi.fn(),
+  },
+  mockCrawlerService: { CRAWL_PAGE_LIMIT: 50, crawlWebsite: vi.fn() },
+  mockPlaywrightService: { measureElapsedMs: vi.fn() },
+  /** Decryption is replaced: its own spec covers the cryptography. */
+  mockCredentialEncryption: { decryptCredentialPassword: vi.fn() },
+  /** Saving the web objects is replaced: its own spec covers the grouping and the write. */
+  mockWebObjectService: { saveCrawlWebObjects: vi.fn() },
+}));
 
 vi.mock("../../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../../server/services/crawlerService.js", () => mockCrawlerService);
 vi.mock("../../../server/services/playwrightService.js", () => mockPlaywrightService);
 vi.mock("../../../server/utils/credentialEncryption.js", () => mockCredentialEncryption);
+vi.mock("../../../server/services/webObjectService.js", () => mockWebObjectService);
 
 import {
   startCrawlRun,
@@ -66,6 +76,8 @@ const createdCrawlRun = {
   pageLimit: 50,
   visitedPageCount: 0,
   waitingUrlCount: 0,
+  skippedSimilarUrlCount: 0,
+  skippedSimilarUrlCountsByPattern: {},
   errorMessage: null,
   durationMs: null,
   finishedAt: null,
@@ -122,18 +134,31 @@ const SCREENSHOT_DIRECTORY = "/tmp/easy-test-screenshots";
 /** The duration `measureElapsedMs` reports for every crawl. */
 const PINNED_DURATION_MS = 4321;
 
+/** The arguments `startCrawlRun` hands to `crawlWebsite`, up to the login. */
+type CrawlWebsiteArguments = [
+  string,
+  unknown,
+  RecordVisitedPage,
+  RecordStructureSkeletons,
+  CrawlLogin | null,
+];
+
 /**
  * Reads the recorder `startCrawlRun` handed to `crawlWebsite`.
  * @returns The recorder function
  */
 function readRecorderPassedToCrawler(): RecordVisitedPage {
-  const crawlWebsiteArguments = mockCrawlerService.crawlWebsite.mock.calls[0] as [
-    string,
-    unknown,
-    RecordVisitedPage,
-    CrawlLogin | null,
-  ];
+  const crawlWebsiteArguments = mockCrawlerService.crawlWebsite.mock.calls[0] as CrawlWebsiteArguments;
   return crawlWebsiteArguments[2];
+}
+
+/**
+ * Reads the structure skeleton saver `startCrawlRun` handed to `crawlWebsite`.
+ * @returns The saver function
+ */
+function readSkeletonRecorderPassedToCrawler(): RecordStructureSkeletons {
+  const crawlWebsiteArguments = mockCrawlerService.crawlWebsite.mock.calls[0] as CrawlWebsiteArguments;
+  return crawlWebsiteArguments[3];
 }
 
 /**
@@ -141,13 +166,8 @@ function readRecorderPassedToCrawler(): RecordVisitedPage {
  * @returns The login, or null for a logged-out crawl
  */
 function readLoginPassedToCrawler(): CrawlLogin | null {
-  const crawlWebsiteArguments = mockCrawlerService.crawlWebsite.mock.calls[0] as [
-    string,
-    unknown,
-    RecordVisitedPage,
-    CrawlLogin | null,
-  ];
-  return crawlWebsiteArguments[3];
+  const crawlWebsiteArguments = mockCrawlerService.crawlWebsite.mock.calls[0] as CrawlWebsiteArguments;
+  return crawlWebsiteArguments[4];
 }
 
 /**
@@ -181,6 +201,8 @@ describe("startCrawlRun", () => {
       stopReason: "finished",
       visitedPageCount: 3,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     };
@@ -212,6 +234,7 @@ describe("startCrawlRun", () => {
       "https://example.com/",
       { networkIdleTimeoutMs: 4000, screenshotMinimumWaitMs: 250 },
       expect.any(Function),
+      expect.any(Function),
       null,
       "linksOnly",
     );
@@ -222,6 +245,8 @@ describe("startCrawlRun", () => {
       stopReason: "finished",
       visitedPageCount: 1,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -247,6 +272,7 @@ describe("startCrawlRun", () => {
       expect(mockCrawlerService.crawlWebsite).toHaveBeenCalledWith(
         "https://example.com/",
         { networkIdleTimeoutMs: 4000, screenshotMinimumWaitMs: 250 },
+        expect.any(Function),
         expect.any(Function),
         null,
         buttonMode,
@@ -288,6 +314,26 @@ describe("startCrawlRun", () => {
     expect(savedPageId).toBeNull();
   });
 
+  it.each([true, false])(
+    "saves the structure skeletons the crawl built on the run's pages, and hands back %s from the database",
+    async (skeletonsWereSaved) => {
+      mockDbService.saveCrawledPageStructureSkeletons.mockResolvedValue(skeletonsWereSaved);
+      const { crawlCompletion } = await startCrawlThatMustStart();
+      await crawlCompletion;
+      const recordStructureSkeletons = readSkeletonRecorderPassedToCrawler();
+      const structureSkeletons = [{ crawledPageId: "crawled-page-1", structureSkeleton: "heading[level=1]" }];
+
+      const runIsStillActive = await recordStructureSkeletons(structureSkeletons);
+
+      expect(runIsStillActive).toBe(skeletonsWereSaved);
+      expect(mockDbService.saveCrawledPageStructureSkeletons).toHaveBeenCalledWith(
+        "website-1",
+        "crawl-run-1",
+        structureSkeletons,
+      );
+    },
+  );
+
   it.each([
     { stopReason: "finished" as const, waitingUrlCount: 0 },
     { stopReason: "stoppedAtPageLimit" as const, waitingUrlCount: 17 },
@@ -299,6 +345,8 @@ describe("startCrawlRun", () => {
         stopReason,
         visitedPageCount: 50,
         waitingUrlCount,
+        skippedSimilarUrlCount: 0,
+        skippedSimilarUrlCountsByPattern: {},
         loginErrorMessage: null,
         loginFailureScreenshotWasCaptured: false,
       });
@@ -309,6 +357,8 @@ describe("startCrawlRun", () => {
       expect(mockDbService.finishCrawlRun).toHaveBeenCalledWith("website-1", "crawl-run-1", {
         status: stopReason,
         waitingUrlCount,
+        skippedSimilarUrlCount: 0,
+        skippedSimilarUrlCountsByPattern: {},
         errorMessage: null,
         loginFailureScreenshotFileName: null,
         durationMs: PINNED_DURATION_MS,
@@ -316,11 +366,82 @@ describe("startCrawlRun", () => {
     },
   );
 
+  it("finishes the run with the links sampling skipped, then saves the web objects the crawl found", async () => {
+    mockCrawlerService.crawlWebsite.mockResolvedValue({
+      stopReason: "finished",
+      visitedPageCount: 12,
+      waitingUrlCount: 0,
+      skippedSimilarUrlCount: 6,
+      skippedSimilarUrlCountsByPattern: { "/websites/{website}": 4, "/blog/{blog}": 2 },
+      loginErrorMessage: null,
+      loginFailureScreenshotWasCaptured: false,
+    });
+
+    const { crawlCompletion } = await startCrawlThatMustStart();
+    await crawlCompletion;
+
+    expect(mockDbService.finishCrawlRun).toHaveBeenCalledWith("website-1", "crawl-run-1", {
+      status: "finished",
+      waitingUrlCount: 0,
+      skippedSimilarUrlCount: 6,
+      skippedSimilarUrlCountsByPattern: { "/websites/{website}": 4, "/blog/{blog}": 2 },
+      errorMessage: null,
+      loginFailureScreenshotFileName: null,
+      durationMs: PINNED_DURATION_MS,
+    });
+    expect(mockWebObjectService.saveCrawlWebObjects).toHaveBeenCalledTimes(1);
+    expect(mockWebObjectService.saveCrawlWebObjects).toHaveBeenCalledWith("website-1", "crawl-run-1", {
+      "/websites/{website}": 4,
+      "/blog/{blog}": 2,
+    });
+    const finishOrder = mockDbService.finishCrawlRun.mock.invocationCallOrder[0];
+    const saveOrder = mockWebObjectService.saveCrawlWebObjects.mock.invocationCallOrder[0];
+    expect(finishOrder).toBeLessThan(saveOrder);
+  });
+
+  it("saves no web objects when the crawl recorded no page, so the previous ones stay", async () => {
+    mockCrawlerService.crawlWebsite.mockResolvedValue({
+      stopReason: "finished",
+      visitedPageCount: 0,
+      waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
+      loginErrorMessage: null,
+      loginFailureScreenshotWasCaptured: false,
+    });
+
+    const { crawlCompletion } = await startCrawlThatMustStart();
+    await crawlCompletion;
+
+    expect(mockDbService.finishCrawlRun).toHaveBeenCalledTimes(1);
+    expect(mockWebObjectService.saveCrawlWebObjects).not.toHaveBeenCalled();
+  });
+
+  it("saves no web objects when the run could not be finished (it was deleted meanwhile)", async () => {
+    mockDbService.finishCrawlRun.mockResolvedValue(false);
+
+    const { crawlCompletion } = await startCrawlThatMustStart();
+    await crawlCompletion;
+
+    expect(mockWebObjectService.saveCrawlWebObjects).not.toHaveBeenCalled();
+  });
+
+  it("saves no web objects when the crawl itself breaks", async () => {
+    mockCrawlerService.crawlWebsite.mockRejectedValue(new Error("crawl broke"));
+
+    const { crawlCompletion } = await startCrawlThatMustStart();
+    await crawlCompletion;
+
+    expect(mockWebObjectService.saveCrawlWebObjects).not.toHaveBeenCalled();
+  });
+
   it("writes nothing more when the run was deleted with its website mid-crawl", async () => {
     mockCrawlerService.crawlWebsite.mockResolvedValue({
       stopReason: "stoppedBecauseRunWasDeleted",
       visitedPageCount: 2,
       waitingUrlCount: 3,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -336,6 +457,8 @@ describe("startCrawlRun", () => {
       stopReason: "stoppedBecauseBrowserClosed",
       visitedPageCount: 4,
       waitingUrlCount: 9,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -346,6 +469,8 @@ describe("startCrawlRun", () => {
     expect(mockDbService.finishCrawlRun).toHaveBeenCalledWith("website-1", "crawl-run-1", {
       status: "interrupted",
       waitingUrlCount: 9,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       errorMessage: "The browser closed mid-crawl - most likely the server restarted.",
       loginFailureScreenshotFileName: null,
       durationMs: PINNED_DURATION_MS,
@@ -363,6 +488,8 @@ describe("startCrawlRun", () => {
     expect(mockDbService.finishCrawlRun).toHaveBeenCalledWith("website-1", "crawl-run-1", {
       status: "failed",
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       errorMessage: "browserType.launch: Executable doesn't exist",
       loginFailureScreenshotFileName: null,
       durationMs: PINNED_DURATION_MS,
@@ -400,6 +527,8 @@ describe("startCrawlRun", () => {
       stopReason: "finished",
       visitedPageCount: 1,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -467,6 +596,8 @@ describe("startCrawlRun with a credential", () => {
       stopReason: "finished",
       visitedPageCount: 3,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: false,
     });
@@ -596,6 +727,8 @@ describe("startCrawlRun with a credential", () => {
       stopReason: "loginFailed",
       visitedPageCount: 0,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: "Still on the login form after submitting - check the username and password",
       loginFailureScreenshotWasCaptured: false,
     });
@@ -642,6 +775,8 @@ describe("startCrawlRun with a credential", () => {
       stopReason: "loginFailed",
       visitedPageCount: 0,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: "Still on the login form after submitting - check the username and password",
       loginFailureScreenshotWasCaptured: true,
     });
@@ -658,6 +793,8 @@ describe("startCrawlRun with a credential", () => {
     expect(mockDbService.finishCrawlRun).toHaveBeenCalledWith("website-1", "crawl-run-1", {
       status: "failed",
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       errorMessage:
         'Login as "Admin" failed: Still on the login form after submitting - check the username and password',
       loginFailureScreenshotFileName: expectedFileName,
@@ -671,6 +808,8 @@ describe("startCrawlRun with a credential", () => {
       stopReason: "loginFailed",
       visitedPageCount: 0,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: "No visible password field was found on the login page (found automatically)",
       loginFailureScreenshotWasCaptured: false,
     });
@@ -690,6 +829,8 @@ describe("startCrawlRun with a credential", () => {
       stopReason: "loginFailed",
       visitedPageCount: 0,
       waitingUrlCount: 0,
+      skippedSimilarUrlCount: 0,
+      skippedSimilarUrlCountsByPattern: {},
       loginErrorMessage: null,
       loginFailureScreenshotWasCaptured: true,
     });

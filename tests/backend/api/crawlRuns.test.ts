@@ -13,6 +13,7 @@ const mockDbService = vi.hoisted(() => ({
   listCrawledPageSummariesForRun: vi.fn(),
   findCrawledPageForRun: vi.fn(),
   findCredentialWithPasswordForWebsite: vi.fn(),
+  findWebObjectNamesForCrawlRun: vi.fn(),
 }));
 
 /** Starting a crawl is replaced outright: no spec ever launches Chromium. */
@@ -481,13 +482,24 @@ describe("Crawl run routes", () => {
   });
 
   describe("GET /api/websites/:websiteId/crawl-runs/:crawlRunId", () => {
-    it("returns 200 with the run and its page summaries, looked up by the found rows' ids", async () => {
-      mockDbService.listCrawledPageSummariesForRun.mockResolvedValue([crawledPageSummary]);
+    it("returns 200 with the run, its page summaries without their structure skeletons, and their grouping, looked up by the found rows' ids", async () => {
+      mockDbService.listCrawledPageSummariesForRun.mockResolvedValue([
+        { ...crawledPageSummary, structureSkeleton: "heading[level=1]" },
+      ]);
+      mockDbService.findWebObjectNamesForCrawlRun.mockResolvedValue([]);
 
       const res = await request(createCrawlRunApp()).get(CRAWL_RUN_PATH);
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ...runningCrawlRun, pages: [crawledPageSummary] });
+      expect(res.body).toEqual({
+        ...runningCrawlRun,
+        pages: [crawledPageSummary],
+        pageGrouping: { webObjects: [], standalonePageIds: [crawledPageSummary.id] },
+      });
+      expect(mockDbService.findWebObjectNamesForCrawlRun).toHaveBeenCalledWith(
+        foundWebsite.id,
+        runningCrawlRun.id,
+      );
       expect(mockDbService.findCrawlRunForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         REQUESTED_CRAWL_RUN_ID,
@@ -496,6 +508,57 @@ describe("Crawl run routes", () => {
         foundWebsite.id,
         runningCrawlRun.id,
       );
+    });
+
+    it("groups the run's pages into web objects, with the links it skipped and the saved object's id and name", async () => {
+      const websitePageIds = ["page-website-1", "page-website-2"];
+      const websitePages = websitePageIds.map((pageId, pageIndex) => ({
+        ...crawledPageSummary,
+        id: pageId,
+        url: `http://localhost:5180/websites/cmurhdofb000c93uhb9b32qk${String(pageIndex)}`,
+        visitOrder: pageIndex + 1,
+        structureSkeleton: "main",
+      }));
+      mockDbService.findCrawlRunForWebsite.mockResolvedValue({
+        ...runningCrawlRun,
+        status: "finished",
+        skippedSimilarUrlCount: 4,
+        skippedSimilarUrlCountsByPattern: { "/websites/{website}": 4 },
+      });
+      mockDbService.listCrawledPageSummariesForRun.mockResolvedValue([
+        { ...crawledPageSummary, structureSkeleton: "heading[level=1]" },
+        ...websitePages,
+      ]);
+      mockDbService.findWebObjectNamesForCrawlRun.mockResolvedValue([
+        { id: "web-object-1", instancePatternKey: "/websites/{website}", detectedName: "Website", name: "Site" },
+      ]);
+
+      const res = await request(createCrawlRunApp()).get(CRAWL_RUN_PATH);
+
+      expect(res.status).toBe(200);
+      expect(res.body.pageGrouping).toEqual({
+        webObjects: [
+          {
+            webObjectId: "web-object-1",
+            instancePatternKey: "/websites/{website}",
+            displayName: "Site",
+            detectedName: "Website",
+            parentInstancePatternKey: null,
+            instanceValues: ["cmurhdofb000c93uhb9b32qk0", "cmurhdofb000c93uhb9b32qk1"],
+            skippedLinkCount: 4,
+            patterns: [
+              {
+                key: "/websites/{website}",
+                role: "instance",
+                viewName: null,
+                detectedBy: "idShape",
+                pageIds: websitePageIds,
+              },
+            ],
+          },
+        ],
+        standalonePageIds: [crawledPageSummary.id],
+      });
     });
 
     it("returns 404 Website not found when the website does not exist or was deleted", async () => {
