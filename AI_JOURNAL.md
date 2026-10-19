@@ -4,6 +4,30 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-19 15:49 EDT — Vite's dev watcher skips coverage/ and claude_tmp/
+
+**Intent:**
+- The user asked to stop `npm run dev` from watching the test coverage folder.
+- Vite watches the whole project root. Each `npm run test:coverage` rewrites or cleans about 50 HTML files in `coverage/lcov-report/`, and Vite logs a `page reload coverage/...` line for each one in the `[vite]` output. `claude_tmp/forge-html/` holds HTML that scripts write, so it behaves the same way.
+- The browser does not actually reload: Vite's client only reloads when the changed HTML file is the page being viewed. The visible problem was the log noise.
+
+### Decisions
+- **Made by the user:** ignore only `coverage` and `claude_tmp`, with plain `**/` patterns. The user turned down two alternatives: root-anchored absolute paths (too much for this) and `root: "src"` (it would mean moving `index.html`).
+- **Made by me:** no other folders. The others (`server/`, `tests/`, `dist-server/`, …) never trigger anything in Vite because nothing in `src/` imports from them. `dist/`, `node_modules/`, `.git/` and `test-results/` are already ignored by Vite's defaults.
+
+### Files changed
+| File | Change |
+|---|---|
+| `vite.config.ts` | **Added:** `server.watch.ignored: ["**/coverage/**", "**/claude_tmp/**"]`, with a comment explaining why. Vite adds these to its default ignores rather than replacing them (`resolveChokidarOptions`). |
+
+### Verification
+- Ran two extra Vite instances side by side on spare ports, with the user's own dev servers on 5180/3010 left running: 5181 with the new config, 5182 with the `HEAD` config. Both served the homepage (HTTP 200), and `/api/health` returned `{"status":"ok"}`, directly and through the 5181 proxy.
+- With both pages open in Playwright, ran `npm run test:coverage`. The original config logged 46 `page reload coverage/lcov-report/...` lines. The new config logged none.
+- `npm run tsc:client` passes.
+- The coverage run had 1 failure out of 2550 tests: `ActionDetailPage.test.tsx` "refines a failed run…" timed out at 5000 ms. The file passes on its own (55/55), so it looks like a timeout under load (the full suite ran alongside four Vite servers). Vitest uses `vitest.config.ts`, not `vite.config.ts`. Because of the failure, Vitest wrote no coverage report, so the threshold check is still outstanding.
+
+---
+
 ## 2026-10-19 12:23 EDT — Pin Node to 26.12.0, the version used locally
 
 **Intent:**

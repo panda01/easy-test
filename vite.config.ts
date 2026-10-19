@@ -29,6 +29,11 @@ export default defineConfig({
     // strictPort so a collision is a loud failure instead of Vite silently
     // moving to the next free port and breaking every bookmark and script.
     strictPort: true,
+    // Both folders get regenerated HTML (`npm run test:coverage` rewrites
+    // coverage/lcov-report, scripts write claude_tmp/forge-html), and Vite
+    // answers any changed .html file with a full page reload. The `**/` prefix
+    // is needed because the watcher matches against absolute paths.
+    watch: { ignored: ["**/coverage/**", "**/claude_tmp/**"] },
     proxy: {
       // This proxy is the reason there is no `cors` package in the project:
       // the browser only ever talks to the Vite origin.
