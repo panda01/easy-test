@@ -1,6 +1,22 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { render, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 import { userEvent, type UserEvent } from "@testing-library/user-event";
+
+/**
+ * The step limit the editor sees in this file. The real one (100) is checked
+ * by actionPlanSteps.test.tsx and the server's actionPlanSchema.test.ts; here
+ * a plan one step short of it would mean ~100 MUI step cards, and rendering
+ * them plus querying them by role took over 30s on CI. Everything else in the
+ * module is the real code. Hoisted because vi.mock's factory runs before the
+ * rest of the file.
+ */
+const TEST_MAX_PLAN_STEPS = vi.hoisted(() => 5);
+
+vi.mock("../../src/utils/actionPlanSteps", async (importOriginal) => {
+  const actualActionPlanSteps = await importOriginal<typeof import("../../src/utils/actionPlanSteps")>();
+  return { ...actualActionPlanSteps, MAX_PLAN_STEPS: TEST_MAX_PLAN_STEPS };
+});
+
 import ActionPlanEditor, { type ActionPlanEditorProps } from "../../src/components/ActionPlanEditor";
 import { MAX_PLAN_STEPS, type ActionPlan, type PlanStep } from "../../src/utils/actionPlanSteps";
 
@@ -250,7 +266,7 @@ describe("ActionPlanEditor", () => {
     expect(screen.getByRole("listitem", { name: `Step ${String(MAX_PLAN_STEPS)}` })).toBeInTheDocument();
     expect(addStepButton).toBeDisabled();
     expect(getSaveButton()).toBeEnabled();
-  }, 30_000);
+  });
 
   it("lists what would make the server refuse the plan, and blocks Save until it is fixed", async () => {
     const user = userEvent.setup();

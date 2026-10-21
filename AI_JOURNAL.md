@@ -4,6 +4,50 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-19 18:12 EDT — The step-limit spec builds 4 cards instead of 99
+
+**Intent:**
+- CI run 39321039221 (and 39314357562 before it) failed on one spec: `ActionPlanEditor.test.tsx` "stops adding steps at the most a plan may have" timed out at 30 s (33.2 s) under `test:coverage`. It started from a plan of `MAX_PLAN_STEPS - 1` = 99 steps.
+- The user asked to render fewer steps. The spec now runs against a step limit of 5, so it builds 4 cards and adds the 5th.
+
+### Decisions
+- **Made by the user:** render fewer steps.
+- **Made by me:**
+  - Mocked `MAX_PLAN_STEPS` to 5 for this file with `vi.mock` + `importOriginal`, the same pattern as `tests/backend/api/scriptModels.test.ts`. The rest of `src/utils/actionPlanSteps` stays real. The component imports the same module, so it sees 5 too. The spec would fail if it didn't, because "Add step" would stay enabled.
+  - Picked 5 because the most steps any other spec in the file reaches is 4 ("appends a click step with Add step"), so none of them hit the limit.
+  - Removed the spec's `30_000` timeout. It was only there for the 99-card plan.
+  - The real limit (100) is still checked by `tests/frontend/actionPlanSteps.test.tsx` (`findPlanProblems` at 100 / 101) and `tests/backend/utils/actionPlanSchema.test.ts` ("accepts 100 steps but not one more"). `findPlanProblems` reads its own module's binding, so the mock does not change it.
+  - No app code changed. The user asked whether the step fields cause `getComputedStyle` work or need memoizing; that is answered under Result, and nothing was memoized.
+
+### Files changed
+| File | Change |
+|---|---|
+| `tests/frontend/ActionPlanEditor.test.tsx` | **Added:** `TEST_MAX_PLAN_STEPS` (5, via `vi.hoisted`) with a JSDoc saying why, and a `vi.mock("../../src/utils/actionPlanSteps", …)` that overrides only `MAX_PLAN_STEPS`. **Changed:** "stops adding steps at the most a plan may have" no longer passes a `30_000` timeout. Its body is unchanged; it already reads `MAX_PLAN_STEPS`, so it now starts from 4 steps. |
+
+### Result
+- A throwaway probe in `claude_tmp/` (deleted afterwards) timed each phase of the old spec at 99 steps, locally, and counted `window.getComputedStyle` calls:
+
+| Phase | Time | `getComputedStyle` calls |
+|---|---|---|
+| render | 1.4 s | 0 |
+| `getByRole("button", { name: "Add step" })` | 1.45 s | 408 |
+| `user.click(Add step)` | 0.48 s (4 React commits) | 2 |
+| `getByRole("listitem", { name: "Step 100" })` | 0.16 s | 107 |
+| `getByRole("button", { name: "Save as new version" })` | 1.25 s | 413 |
+
+- The step fields make no `getComputedStyle` calls when they render. They are single-line selects and text fields, so there is no autosize measuring like the refine note had. The calls come from Testing Library's `getByRole`, which reads each candidate's computed style to skip hidden elements. Every card has 4 icon buttons (drag, up, down, delete), so a button query checks about 400 of them.
+- Memoizing would only touch the click: none of the 100 `ActionPlanStepFields` cards are memoized, and their handlers are new on every render, so adding a step re-renders all of them. That was about 0.5 s of the ~4.8 s locally.
+
+### Verification
+- The spec file alone: 15/15. The step-limit spec now takes 148 ms in the verbose reporter. Before, it took about 6.4 s alone and 33 s on CI.
+- `npm run tsc:client` passes (it includes `tests/`).
+- `npx eslint tests/frontend/ActionPlanEditor.test.tsx` passes. `npm run lint` passes (it covers only `server` and `src`).
+- `npm run test:coverage`: 119/119 files and 2550/2550 tests. Statements 99.49 %, branches 98.5 %, functions 100 %, lines 99.78 %, all above the 80/70/80/80 thresholds.
+- Coverage of `src/components/ActionPlanEditor.tsx` with only this spec file run is the same before and after the change: 98.33 / 89.28 / 100 / 100, uncovered `153,179-190`. The baseline was measured with the edit stashed, then restored.
+- No Playwright check, because no app code changed.
+
+---
+
 ## 2026-10-19 16:35 EDT — The refine spec pastes its note instead of typing it
 
 **Intent:**
