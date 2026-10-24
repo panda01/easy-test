@@ -56,6 +56,10 @@ const {
     scrollIntoViewIfNeeded: vi.fn(),
     waitFor: vi.fn(),
     ariaSnapshot: vi.fn(),
+    first: vi.fn(),
+    evaluate: vi.fn(),
+    evaluateHandle: vi.fn(),
+    allInnerTexts: vi.fn(),
   },
   /** What `page.waitForEvent("filechooser")` resolves with. */
   mockFileChooser: { setFiles: vi.fn() },
@@ -76,12 +80,14 @@ vi.mock("../../../server/services/crawlerLoginService.js", () => ({
 
 import {
   FAILURE_SCREENSHOT_FILE_NAME,
+  NO_PARAMETER_RUN,
   PLAN_NAVIGATION_TIMEOUT_MS,
   PLAN_OUTPUT_CHARACTER_LIMIT,
   PLAN_RUN_SLOW_MO_MS,
   PLAN_RUN_TIMEOUT_MS,
   PLAN_STEP_TIMEOUT_MS,
   TYPING_DELAY_MS,
+  alertReadsAsAnError,
   describePlanStep,
   describePlanTarget,
   runActionPlan,
@@ -183,6 +189,7 @@ function buildRunRequest(overrides: Partial<ActionPlanRunRequest> = {}): ActionP
     allowedOrigins: ALLOWED_ORIGINS,
     runDirectory: RUN_DIRECTORY,
     uploadsDirectory: UPLOADS_DIRECTORY,
+    parameterRun: NO_PARAMETER_RUN,
     ...overrides,
   };
 }
@@ -292,6 +299,8 @@ beforeEach(() => {
   for (const locatorMethod of Object.values(mockLocator)) {
     locatorMethod.mockResolvedValue(undefined);
   }
+  mockLocator.first.mockReturnValue(mockLocator);
+  mockLocator.allInnerTexts.mockResolvedValue([]);
   mockLocator.ariaSnapshot.mockResolvedValue(FAILING_PAGE_SNAPSHOT);
   mockPage.keyboard.press.mockResolvedValue(undefined);
   mockPage.mouse.wheel.mockResolvedValue(undefined);
@@ -343,6 +352,10 @@ describe("runActionPlan", () => {
       failureScreenshotWasCaptured: false,
       failingPageUrl: null,
       failingPageAriaSnapshot: null,
+      fieldReadings: [],
+      confirmStepSucceeded: null,
+      pageUrlAfterConfirm: null,
+      finalPageUrl: FAILING_PAGE_URL,
     });
     expect(mockLocator.ariaSnapshot).not.toHaveBeenCalled();
     expect(mockLogInWithCredential).toHaveBeenCalledWith(mockPage, LOGIN.details, TIMING_SETTINGS);
@@ -597,7 +610,9 @@ describe("runActionPlan", () => {
         failingPageAriaSnapshot: null,
       });
       expect(mockPage.screenshot).not.toHaveBeenCalled();
-      expect(mockPage.url).not.toHaveBeenCalled();
+      // The address is read once, as the run's final address - not as evidence.
+      expect(mockPage.url).toHaveBeenCalledTimes(1);
+      expect(result.finalPageUrl).toBe(FAILING_PAGE_URL);
       expect(mockPage.locator).not.toHaveBeenCalled();
       expect(mockLocator.ariaSnapshot).not.toHaveBeenCalled();
     });
@@ -857,6 +872,222 @@ describe("runActionPlan", () => {
       expect(result.succeeded).toBe(true);
       expect(vi.getTimerCount()).toBe(0);
     });
+  });
+});
+
+describe("runActionPlan with parameters", () => {
+  /** A plan that types a name, clicks Create, then checks the heading. */
+  const CREATE_PLAN = buildPlan([
+    buildStep("fill", { target: { label: "Project name" }, value: "Apollo 7" }),
+    buildStep("click", { target: { role: "button", name: "Create project" } }),
+    buildStep("expectVisible", { target: { role: "heading", name: "Apollo 7" } }),
+  ]);
+
+  /**
+   * Builds a fake handle on the form the confirm button sits in.
+   * @param formStates - What each look at the form reports, in order (the last one repeats)
+   * @returns The handle
+   */
+  function buildFormHandle(...formStates: { formIsGone: boolean; formShowsAnInvalidField: boolean }[]): {
+    evaluate: Mock;
+  } {
+    const evaluate = vi.fn();
+    for (const formState of formStates) evaluate.mockResolvedValueOnce(formState);
+    evaluate.mockResolvedValue(formStates.at(-1));
+    return { evaluate };
+  }
+
+  it("skips the steps of a blank optional parameter, and logs them as skipped", async () => {
+    const result = await runActionPlan(
+      buildRunRequest({
+        plan: TWO_CLICK_PLAN,
+        login: null,
+        parameterRun: { ...NO_PARAMETER_RUN, skippedStepNumbers: [1] },
+      }),
+    );
+
+    expect(result.succeeded).toBe(true);
+    expect(readOutputLines(result.output)).toContain('Step 1: skipped (its parameter was left blank) - Click link "Shoes"');
+    expect(mockPage.getByRole).toHaveBeenCalledTimes(1);
+    expect(mockPage.getByRole).toHaveBeenCalledWith("button", { name: "Pay" });
+  });
+
+  it("types an added field right after the step it follows, and reports a failure there", async () => {
+    const addedField = {
+      afterStepNumber: 1,
+      step: buildStep("fill", { target: { label: "Notes" }, value: "Some notes" }),
+      parameterKey: "notes",
+    };
+    const result = await runActionPlan(
+      buildRunRequest({ plan: TWO_CLICK_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, insertedSteps: [addedField] } }),
+    );
+    expect(readOutputLines(result.output)).toContain('Step 1 (added field): Type into the field labelled "Notes"');
+    expect(mockLocator.pressSequentially).toHaveBeenCalledWith("Some notes", expect.any(Object));
+
+    mockLocator.pressSequentially.mockRejectedValue(new Error("element is not editable"));
+    const failedResult = await runActionPlan(
+      buildRunRequest({ plan: TWO_CLICK_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, insertedSteps: [addedField] } }),
+    );
+    expect(failedResult).toMatchObject({
+      succeeded: false,
+      failedStepNumber: 1,
+      errorMessage: "The added field after step 1 could not be filled in: element is not editable",
+    });
+  });
+
+  it("reads the fields around each parameter step, and goes on without a reading that fails", async () => {
+    mockLocator.evaluate.mockResolvedValueOnce({
+      fields: [
+        {
+          tagName: "input",
+          typeAttribute: null,
+          roleAttribute: null,
+          allowsMultiple: false,
+          label: "Project name *",
+          placeholder: null,
+          isRequired: true,
+          containerNumber: 1,
+          containerName: "New project",
+        },
+      ],
+      startFieldIndex: 0,
+    });
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, readFieldsAfterStepNumbers: [1] } }),
+    );
+
+    expect(result.fieldReadings).toEqual([
+      {
+        stepNumber: 1,
+        pageUrl: FAILING_PAGE_URL,
+        fields: [
+          {
+            role: "textbox",
+            inputType: "text",
+            label: "Project name",
+            placeholder: null,
+            isRequired: true,
+            containerNumber: 1,
+            containerName: "New project",
+          },
+        ],
+        targetFieldIndex: 0,
+      },
+    ]);
+
+    mockLocator.evaluate.mockRejectedValueOnce(new Error("Timeout 2000ms exceeded"));
+    const unreadResult = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, readFieldsAfterStepNumbers: [1] } }),
+    );
+    expect(unreadResult.succeeded).toBe(true);
+    expect(unreadResult.fieldReadings).toEqual([]);
+  });
+
+  it("scrubs secret parameter values from errors and the log", async () => {
+    mockLocator.click.mockRejectedValue(new Error('Could not click "s3cret value"'));
+    const result = await runActionPlan(
+      buildRunRequest({
+        plan: TWO_CLICK_PLAN,
+        login: null,
+        parameterRun: { ...NO_PARAMETER_RUN, secretValues: ["s3cret value"] },
+      }),
+    );
+    expect(result.errorMessage).toBe('Could not click "••••••"');
+    expect(result.output).not.toContain("s3cret value");
+  });
+
+  it("records a confirm step that showed no error - the form went away", async () => {
+    mockLocator.evaluateHandle.mockResolvedValue(buildFormHandle({ formIsGone: true, formShowsAnInvalidField: false }));
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+
+    expect(result).toMatchObject({ succeeded: true, confirmStepSucceeded: true, pageUrlAfterConfirm: FAILING_PAGE_URL });
+    expect(readOutputLines(result.output)).toContain("✔ Confirmed - no error showed, so the new object is recorded");
+  });
+
+  it("records a confirm step that moved the page on, even with no form found around the button", async () => {
+    mockLocator.evaluateHandle.mockRejectedValue(new Error("no element"));
+    mockPage.url.mockReturnValueOnce("https://shop.example.com/projects/new").mockReturnValue("https://shop.example.com/projects/abc");
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+    expect(result.confirmStepSucceeded).toBe(true);
+    expect(result.pageUrlAfterConfirm).toBe("https://shop.example.com/projects/abc");
+  });
+
+  it("does not record a confirm step that showed a new error alert, and goes on with the run", async () => {
+    mockLocator.allInnerTexts.mockResolvedValueOnce(["Welcome"]).mockResolvedValue(["Welcome", "That name is already taken\nTry another"]);
+    mockLocator.evaluateHandle.mockResolvedValue(buildFormHandle({ formIsGone: false, formShowsAnInvalidField: false }));
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+
+    expect(result).toMatchObject({ succeeded: true, confirmStepSucceeded: false });
+    expect(readOutputLines(result.output)).toContain(
+      '✘ The confirm step showed an error (the page showed "That name is already taken"), so no new object is recorded',
+    );
+  });
+
+  it("does not record a confirm step whose form shows an invalid field", async () => {
+    mockLocator.evaluateHandle.mockResolvedValue(buildFormHandle({ formIsGone: false, formShowsAnInvalidField: true }));
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+    expect(result.confirmStepSucceeded).toBe(false);
+    expect(readOutputLines(result.output)).toContain(
+      "✘ The confirm step showed an error (the form still shows a field marked invalid), so no new object is recorded",
+    );
+  });
+
+  it("records a confirm step - Enter, with no button - after watching a page that shows nothing new", async () => {
+    mockLocator.allInnerTexts.mockRejectedValue(new Error("page closed"));
+    const pressEnterPlan = buildPlan([
+      buildStep("fill", { target: { label: "Project name" }, value: "Apollo 7" }),
+      buildStep("press", { value: "Enter" }),
+    ]);
+    const result = await runActionPlan(
+      buildRunRequest({ plan: pressEnterPlan, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+    expect(result.confirmStepSucceeded).toBe(true);
+    expect(mockLocator.evaluateHandle).not.toHaveBeenCalled();
+  });
+
+  it("treats a form check that fails as no news", async () => {
+    mockLocator.evaluateHandle.mockResolvedValue({ evaluate: vi.fn().mockRejectedValue(new Error("context destroyed")) });
+    mockPage.url.mockReturnValueOnce("https://shop.example.com/projects/new").mockReturnValue("https://shop.example.com/projects/abc");
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+    expect(result.confirmStepSucceeded).toBe(true);
+  });
+
+  it("fails the run at a confirm step that cannot be clicked, and records no object", async () => {
+    mockLocator.evaluateHandle.mockResolvedValue(buildFormHandle({ formIsGone: false, formShowsAnInvalidField: false }));
+    // Typing into the name field clicks it first; the confirm button is the second click.
+    mockLocator.click.mockResolvedValueOnce(undefined).mockRejectedValue(new Error("element is disabled"));
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+    expect(result).toMatchObject({ succeeded: false, failedStepNumber: 2, confirmStepSucceeded: false });
+  });
+
+  it("leaves the confirm check empty when the run never reaches the confirm step", async () => {
+    mockLocator.pressSequentially.mockRejectedValue(new Error("no such field"));
+    const result = await runActionPlan(
+      buildRunRequest({ plan: CREATE_PLAN, login: null, parameterRun: { ...NO_PARAMETER_RUN, confirmStepNumber: 2 } }),
+    );
+    expect(result).toMatchObject({ succeeded: false, failedStepNumber: 1, confirmStepSucceeded: null, pageUrlAfterConfirm: null });
+  });
+});
+
+describe("alertReadsAsAnError", () => {
+  it("reads an alert as an error unless it reads as a success with no error word", () => {
+    expect(alertReadsAsAnError("That name is already taken")).toBe(true);
+    expect(alertReadsAsAnError("Project created")).toBe(false);
+    expect(alertReadsAsAnError("Saved successfully")).toBe(false);
+    expect(alertReadsAsAnError("Created, but the upload failed")).toBe(true);
+    expect(alertReadsAsAnError("Heads up: maintenance tonight")).toBe(true);
   });
 });
 

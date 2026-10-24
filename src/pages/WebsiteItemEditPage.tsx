@@ -5,6 +5,7 @@ import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import TitleDescriptionForm from "../components/TitleDescriptionForm";
 import { useCredentials } from "../hooks/useCredentials";
+import { useWebObjects } from "../hooks/useWebObjects";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnNavigation } from "../hooks/useReturnNavigation";
@@ -22,7 +23,9 @@ import { type WebsiteItemPageProps } from "../utils/websiteItemKinds";
  * The edit page for a use case or an action
  * (`/websites/:websiteId/<use-cases|actions>/:itemId/edit`). An action's form
  * also asks which of the website's credentials it logs in as (or none), and
- * waits for the credential list before it appears.
+ * what it does with an object (Kind, Object type, Deletes the object - each
+ * showing what "Detect" picks now), and waits for the credential list before
+ * it appears.
  *
  * Loads the item first and only then mounts the form, keyed by kind and id,
  * so the fields always start from the saved values. Save and Cancel both
@@ -48,6 +51,11 @@ export default function WebsiteItemEditPage(props: WebsiteItemPageProps): ReactE
   // show (and save) the action's credential as "Logged out".
   const formIsReady = !itemTakesACredential || credentials !== null;
   const credentialOptions = itemTakesACredential ? (credentials ?? []) : undefined;
+  const webObjects = useWebObjects(websiteId).data ?? [];
+  const objectTypes = webObjects.map((webObject) => ({
+    key: webObject.instancePatternKey,
+    name: webObject.name ?? webObject.detectedName,
+  }));
 
   /**
    * PUTs the edited item and, when the server accepts it, returns to the
@@ -114,6 +122,10 @@ export default function WebsiteItemEditPage(props: WebsiteItemPageProps): ReactE
             title: item.title,
             description: item.description,
             credentialId: item.credentialId ?? null,
+            userActionKind: item.userActionKind ?? null,
+            userObjectTypeKey: item.userObjectTypeKey ?? null,
+            userNameParameterKey: item.userNameParameterKey ?? null,
+            userDeletesObject: item.userDeletesObject ?? null,
           }}
           submitLabel="Save changes"
           isSubmitting={isSubmitting}
@@ -121,6 +133,9 @@ export default function WebsiteItemEditPage(props: WebsiteItemPageProps): ReactE
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           credentialOptions={credentialOptions}
+          objectRoleChoices={
+            itemTakesACredential ? { objectTypes, detectedRole: item.objectRole ?? null } : undefined
+          }
         />
       )}
     </Container>

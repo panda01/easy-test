@@ -13,6 +13,12 @@ import {
   validateCrawlRunStartInput,
   validateWebObjectRenameInput,
   MAX_WEB_OBJECT_NAME_LENGTH,
+  MAX_OBJECT_TYPE_KEY_LENGTH,
+  MAX_PARAMETER_TEXT_LENGTH,
+  MAX_RUN_PARAMETER_VALUES,
+  validateRunParameterValuesInput,
+  validateActionParameterChoicesInput,
+  validateNewActionParameterInput,
 } from "../../../server/utils/validateRequestBodies.js";
 import { CRAWL_BUTTON_MODES } from "../../../server/utils/crawlButtonModes.js";
 
@@ -409,6 +415,9 @@ describe("validateTitleDescriptionInput", () => {
   });
 });
 
+/** What an action body leaves as "detect" when it names no object role choice. */
+const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null, userDeletesObject: null };
+
 describe("validateActionInput", () => {
   const CREDENTIAL_ID_INVALID_MESSAGE =
     "The credential id must be a non-blank string, or null to run logged out";
@@ -449,7 +458,7 @@ describe("validateActionInput", () => {
       validateActionInput({ title: " Log in ", description: " Enter credentials ", credentialId }),
     ).toEqual({
       isValid: true,
-      input: { title: "Log in", description: "Enter credentials", credentialId: null },
+      input: { title: "Log in", description: "Enter credentials", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE },
     });
   });
 
@@ -462,7 +471,7 @@ describe("validateActionInput", () => {
       }),
     ).toEqual({
       isValid: true,
-      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1" },
+      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1", ...DETECT_EVERY_ROLE_CHOICE },
     });
   });
 
@@ -493,7 +502,7 @@ describe("validateActionInput", () => {
       }),
     ).toEqual({
       isValid: true,
-      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1" },
+      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1", ...DETECT_EVERY_ROLE_CHOICE },
     });
   });
 });
@@ -1044,5 +1053,185 @@ describe("validateWebObjectRenameInput", () => {
       isValid: false,
       errorMessage: "The request body must be a JSON object",
     });
+  });
+});
+
+describe("validateActionInput: object role choices", () => {
+  const BASE_ACTION = { title: "Create a project", description: "Adds one", credentialId: null };
+
+  it("takes each choice, and treats detect, null, and left out as detect", () => {
+    expect(
+      validateActionInput({
+        ...BASE_ACTION,
+        userActionKind: "create",
+        userObjectTypeKey: " /projects/{project} ",
+        userNameParameterKey: " projectName ",
+        userDeletesObject: false,
+      }),
+    ).toEqual({
+      isValid: true,
+      input: {
+        title: "Create a project",
+        description: "Adds one",
+        credentialId: null,
+        userActionKind: "create",
+        userObjectTypeKey: "/projects/{project}",
+        userNameParameterKey: "projectName",
+        userDeletesObject: false,
+      },
+    });
+    expect(validateActionInput({ ...BASE_ACTION, userActionKind: "detect", userObjectTypeKey: "  " })).toMatchObject({
+      isValid: true,
+      input: DETECT_EVERY_ROLE_CHOICE,
+    });
+  });
+
+  it.each([
+    [{ userActionKind: "destroy" }, "The action kind must be one of: detect, parameters, object, create"],
+    [{ userObjectTypeKey: 5 }, "The object type must be text, or null"],
+    [{ userObjectTypeKey: "k".repeat(MAX_OBJECT_TYPE_KEY_LENGTH + 1) }, "The object type must be at most 500 characters"],
+    [{ userNameParameterKey: ["a"] }, "The name parameter must be text, or null"],
+    [{ userDeletesObject: "yes" }, '"Deletes the object" must be true, false, or null to detect it'],
+  ])("refuses a bad choice (%j)", (badChoice, errorMessage) => {
+    expect(validateActionInput({ ...BASE_ACTION, ...badChoice })).toEqual({ isValid: false, errorMessage });
+  });
+});
+
+describe("validateRunParameterValuesInput", () => {
+  it("treats no body, and no values, as running with the version's own values", () => {
+    expect(validateRunParameterValuesInput(undefined)).toEqual({ isValid: true, input: { parameterValues: {} } });
+    expect(validateRunParameterValuesInput({})).toEqual({ isValid: true, input: { parameterValues: {} } });
+    expect(validateRunParameterValuesInput({ parameterValues: null })).toEqual({ isValid: true, input: { parameterValues: {} } });
+  });
+
+  it("takes text values as typed - spaces and blanks included", () => {
+    expect(validateRunParameterValuesInput({ parameterValues: { projectName: " Apollo 7 ", notes: "" } })).toEqual({
+      isValid: true,
+      input: { parameterValues: { projectName: " Apollo 7 ", notes: "" } },
+    });
+  });
+
+  it.each([
+    [[], "The request body must be a JSON object"],
+    [{ parameterValues: ["a"] }, "The parameter values must be an object of text values, by key"],
+    [{ parameterValues: { projectName: 7 } }, 'The value for "projectName" must be text'],
+    [{ parameterValues: { projectName: "x".repeat(1001) } }, 'The value for "projectName" must be at most 1000 characters'],
+    [{ parameterValues: { password: "{{credential.password}}" } }, 'The value for "password" may not contain {{'],
+  ])("refuses %j", (body, errorMessage) => {
+    expect(validateRunParameterValuesInput(body)).toEqual({ isValid: false, errorMessage });
+  });
+
+  it(`refuses more than ${String(MAX_RUN_PARAMETER_VALUES)} values`, () => {
+    const tooManyValues = Object.fromEntries(
+      Array.from({ length: MAX_RUN_PARAMETER_VALUES + 1 }, (_unused, index) => [`key${String(index)}`, "x"]),
+    );
+    expect(validateRunParameterValuesInput({ parameterValues: tooManyValues })).toEqual({
+      isValid: false,
+      errorMessage: "A run may have at most 100 parameter values",
+    });
+  });
+});
+
+describe("validateActionParameterChoicesInput", () => {
+  it("takes a trimmed label and a required choice, and null for either", () => {
+    expect(validateActionParameterChoicesInput({ userLabel: " Name ", userRequiredChoice: "optional" })).toEqual({
+      isValid: true,
+      input: { userLabel: "Name", userRequiredChoice: "optional" },
+    });
+    expect(validateActionParameterChoicesInput({ userLabel: "  " })).toEqual({
+      isValid: true,
+      input: { userLabel: null, userRequiredChoice: null },
+    });
+  });
+
+  it.each([
+    [null, "The request body must be a JSON object"],
+    [{ userLabel: 3 }, "The label must be text, or null"],
+    [{ userLabel: "l".repeat(MAX_PARAMETER_TEXT_LENGTH + 1) }, "The label must be at most 100 characters"],
+    [{ userRequiredChoice: "sometimes" }, "Required must be one of: required, optional, or null to let the page decide"],
+  ])("refuses %j", (body, errorMessage) => {
+    expect(validateActionParameterChoicesInput(body)).toEqual({ isValid: false, errorMessage });
+  });
+});
+
+describe("validateNewActionParameterInput", () => {
+  it("takes a value in the steps, required by default, and an object one always required", () => {
+    expect(validateNewActionParameterInput({ addKind: "value", label: " Code ", matchText: "AP7" })).toEqual({
+      isValid: true,
+      input: {
+        addKind: "value",
+        label: "Code",
+        requiredChoice: "required",
+        valueKind: "text",
+        objectTypeKey: null,
+        matchText: "AP7",
+      },
+    });
+    expect(
+      validateNewActionParameterInput({
+        addKind: "value",
+        label: "Project",
+        requiredChoice: "optional",
+        valueKind: "object",
+        objectTypeKey: "/projects/{project}",
+        matchText: "Mercury",
+      }),
+    ).toMatchObject({ isValid: true, input: { requiredChoice: "required", valueKind: "object", objectTypeKey: "/projects/{project}" } });
+    expect(
+      validateNewActionParameterInput({ addKind: "value", label: "Code", requiredChoice: "optional", objectTypeKey: "/x", matchText: "AP7" }),
+    ).toMatchObject({ isValid: true, input: { requiredChoice: "optional", objectTypeKey: null } });
+  });
+
+  it("takes a field the steps don't fill, optional by default", () => {
+    expect(
+      validateNewActionParameterInput({
+        addKind: "field",
+        label: "Notes",
+        fieldTarget: { role: "textbox", name: "Notes" },
+        fillAfterKey: " projectName ",
+      }),
+    ).toEqual({
+      isValid: true,
+      input: {
+        addKind: "field",
+        label: "Notes",
+        requiredChoice: "optional",
+        fieldTarget: { role: "textbox", name: "Notes" },
+        stepAction: "fill",
+        fillAfterKey: "projectName",
+      },
+    });
+    expect(
+      validateNewActionParameterInput({
+        addKind: "field",
+        label: "Size",
+        requiredChoice: "required",
+        fieldTarget: { placeholder: "Size" },
+        stepAction: "selectOption",
+        fillAfterKey: "projectName",
+      }),
+    ).toMatchObject({ isValid: true, input: { requiredChoice: "required", stepAction: "selectOption" } });
+  });
+
+  it.each([
+    [undefined, "The request body must be a JSON object"],
+    [{ addKind: "value", matchText: "x" }, "A label is required"],
+    [{ addKind: "value", label: 5 }, "The label must be text, or null"],
+    [{ addKind: "value", label: "L", requiredChoice: "maybe" }, "Required must be one of: required, optional"],
+    [{ addKind: "value", label: "L", valueKind: "number", matchText: "x" }, "The value kind must be text or object"],
+    [{ addKind: "value", label: "L", objectTypeKey: 5, matchText: "x" }, "The object type must be text, or null"],
+    [{ addKind: "value", label: "L", valueKind: "object", matchText: "x" }, "An object parameter needs its object type"],
+    [{ addKind: "value", label: "L", matchText: "  " }, "Pick the value in the steps to make a parameter of"],
+    [{ addKind: "value", label: "L", matchText: "{{x" }, "The value may not contain {{"],
+    [{ addKind: "field", label: "L", fieldTarget: { css: "#x" }, fillAfterKey: "a" }, "The field must be found by its label, its placeholder, or its role and name"],
+    [{ addKind: "field", label: "L", fieldTarget: { text: "x" }, fillAfterKey: "a" }, "The field must be found by its label, its placeholder, or its role and name"],
+    [{ addKind: "field", label: "L", fieldTarget: { label: " " }, fillAfterKey: "a" }, "The field's label, placeholder, or name may not be blank"],
+    [{ addKind: "field", label: "L", fieldTarget: { label: "{{x" }, fillAfterKey: "a" }, "The field's label, placeholder, or name may not contain {{"],
+    [{ addKind: "field", label: "L", fieldTarget: { label: "N" }, stepAction: "click", fillAfterKey: "a" }, "The field must be filled in (fill) or picked from (selectOption)"],
+    [{ addKind: "field", label: "L", fieldTarget: { label: "N" }, fillAfterKey: 4 }, "The parameter to fill it after must be text, or null"],
+    [{ addKind: "field", label: "L", fieldTarget: { label: "N" } }, "Pick the parameter this field is filled in after"],
+    [{ addKind: "other", label: "L" }, "The parameter kind must be value or field"],
+  ])("refuses %j", (body, errorMessage) => {
+    expect(validateNewActionParameterInput(body)).toEqual({ isValid: false, errorMessage });
   });
 });

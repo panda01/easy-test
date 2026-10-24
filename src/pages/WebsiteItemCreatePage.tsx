@@ -5,6 +5,7 @@ import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import TitleDescriptionForm from "../components/TitleDescriptionForm";
 import { useCredentials } from "../hooks/useCredentials";
+import { useWebObjects } from "../hooks/useWebObjects";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnNavigation } from "../hooks/useReturnNavigation";
@@ -24,7 +25,9 @@ const EMPTY_ITEM_VALUES: WebsiteItemRequestBody = { title: "", description: "" }
 /**
  * The create page for a use case or an action
  * (`/websites/:websiteId/<use-cases|actions>/new`). An action's form also
- * asks which of the website's credentials it logs in as (or none).
+ * asks which of the website's credentials it logs in as (or none), and what
+ * it does with an object (Kind, Object type, Deletes the object - each on
+ * "Detect" to start).
  *
  * Loads the owning website first - for the breadcrumb, and so a deleted or
  * unknown website shows "Website not found" instead of a form that cannot be
@@ -50,6 +53,11 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
   // starts out missing a credential the user could pick.
   const formIsReady = !itemTakesACredential || credentials !== null;
   const credentialOptions = itemTakesACredential ? (credentials ?? []) : undefined;
+  const webObjects = useWebObjects(websiteId).data ?? [];
+  const objectTypes = webObjects.map((webObject) => ({
+    key: webObject.instancePatternKey,
+    name: webObject.name ?? webObject.detectedName,
+  }));
 
   /**
    * POSTs the new item and, when the server accepts it, moves on to the
@@ -116,6 +124,7 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           credentialOptions={credentialOptions}
+          objectRoleChoices={itemTakesACredential ? { objectTypes, detectedRole: null } : undefined}
         />
       )}
     </Container>

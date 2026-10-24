@@ -1,6 +1,18 @@
 import { useRecordListWithAdditions } from "./useRecordListWithAdditions";
 import { actionScriptRunsApiUrl } from "../utils/routePaths";
 
+/** An object a run created or deleted, as the run list names it. */
+export interface RunObjectSummary {
+  /** The created object's record id. */
+  id: string;
+  /** Its name. */
+  name: string;
+  /** Its own page, or null. */
+  url: string | null;
+  /** Its type's name, or null. */
+  objectTypeName: string | null;
+}
+
 /**
  * One recorded run of a script, as the API returns it. Dates arrive as ISO
  * strings because they travel as JSON. Declared here rather than imported from
@@ -33,6 +45,18 @@ export interface ActionScriptRunRecord {
   failingPageAriaSnapshot: string | null;
   /** How long the run took, in milliseconds. */
   durationMs: number;
+  /** The values the run used (secrets left out; "" for a blank one) - read with `readUsedParameterValues`; empty for older runs. */
+  parameterValues: unknown;
+  /** The address the browser was on when the run ended, or null. */
+  finalPageUrl: string | null;
+  /** A Create run's confirm step, or null. */
+  confirmStepNumber: number | null;
+  /** Whether the confirm step ran with no error showing; null when it was never reached (or the run has none). */
+  confirmStepSucceeded: boolean | null;
+  /** The object a Create run made (still in the record), or null. */
+  createdObject: RunObjectSummary | null;
+  /** The created objects a deleting run deleted on the site. */
+  deletedObjects: RunObjectSummary[];
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;

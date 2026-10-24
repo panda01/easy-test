@@ -31,6 +31,10 @@ import {
   websiteItemEditPath,
   websiteItemsApiUrl,
   webObjectApiUrl,
+  actionScriptParametersApiUrl,
+  actionParameterApiUrl,
+  createdObjectsApiUrl,
+  createdObjectApiUrl,
   webObjectsApiUrl,
 } from "../../src/utils/routePaths";
 import { ACTION_KIND, USE_CASE_KIND } from "../../src/utils/websiteItemKinds";
@@ -284,6 +288,33 @@ describe("routePaths: web objects", () => {
     );
     expect(webObjectApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/web-objects/${ENCODED_UNSAFE_ID}`,
+    );
+  });
+});
+
+describe("routePaths: parameter and created object API urls", () => {
+  it("builds a version's parameters url and one parameter's url", () => {
+    expect(actionScriptParametersApiUrl("website-1", "action-1", "script-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/parameters",
+    );
+    expect(actionParameterApiUrl("website-1", "action-1", "projectName")).toBe(
+      "/api/websites/website-1/actions/action-1/parameters/projectName",
+    );
+  });
+
+  it("builds the created objects urls", () => {
+    expect(createdObjectsApiUrl("website-1")).toBe("/api/websites/website-1/created-objects");
+    expect(createdObjectApiUrl("website-1", "created-object-1")).toBe(
+      "/api/websites/website-1/created-objects/created-object-1",
+    );
+  });
+
+  it("encodes every id and key", () => {
+    expect(actionParameterApiUrl(UNSAFE_ID, UNSAFE_ID, "a/b")).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/parameters/a%2Fb`,
+    );
+    expect(createdObjectApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/created-objects/${ENCODED_UNSAFE_ID}`,
     );
   });
 });

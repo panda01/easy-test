@@ -31,6 +31,12 @@ import {
   type CrawlPatternSampler,
   type NewStructureSkeleton,
 } from "../utils/crawlPatternSampling.js";
+import {
+  FORM_FIELD_SELECTORS,
+  cleanRawFormFields,
+  readRawFormFields,
+  type FormField,
+} from "../utils/formFields.js";
 
 /** The most pages one crawl visits (the user's choice). Failed pages count too. */
 export const CRAWL_PAGE_LIMIT = 50;
@@ -333,6 +339,26 @@ async function takeAriaSnapshot(
 }
 
 /**
+ * Reads the page's visible form fields in the browser (see
+ * `readRawFormFields`) - the aria snapshot cannot say which are REQUIRED, the
+ * fields' own `required` / `aria-required` attributes can. The fields are a
+ * bonus, so a read that fails (the page's context was destroyed, or it has
+ * no `<body>`) gives none rather than failing the page.
+ * @param page - The page that is ready
+ * @returns The tidied fields, in page order; empty when none could be read
+ */
+async function readPageFormFields(page: Page): Promise<FormField[]> {
+  try {
+    const rawFieldRead = await page
+      .locator("body")
+      .evaluate(readRawFormFields, FORM_FIELD_SELECTORS, { timeout: ARIA_SNAPSHOT_TIMEOUT_MS });
+    return cleanRawFormFields(rawFieldRead.fields);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Reads the page's `<title>`. A late client-side navigation can destroy the
  * page's context mid-read; the title is optional, so that is reported as no
  * title rather than as a failed page.
@@ -457,6 +483,7 @@ function buildUnreadablePageVisit(
       title: null,
       ariaSnapshot: null,
       linkedUrls: [],
+      formFields: [],
       durationMs: measureElapsedMs(visitStartedAt),
     },
     sameOriginLinks: [],
@@ -507,7 +534,8 @@ async function followButtonsWhenAsked(
 /**
  * Visits one queued URL: navigate, wait until ready (the website's timing
  * settings, as for screenshots), then read the final URL, the aria snapshot,
- * the title, and the same-origin links - and, LAST, because every click moves
+ * the form fields (see `readPageFormFields`), the title, and the same-origin
+ * links - and, LAST, because every click moves
  * the browser away from the page, follow its buttons when the crawl's button
  * mode asks for it (see `followButtonsWhenAsked`).
  *
@@ -557,6 +585,7 @@ async function visitCrawlPage(
   rememberCrawlOriginOnce(state, finalUrl);
   markFinalUrlAsSeen(state, finalUrl);
   const snapshot = await takeAriaSnapshot(page);
+  const formFields = await readPageFormFields(page);
   const title = await readPageTitle(page);
   const linkRead = await readLinksWhenOnOrigin(page, state, finalUrl);
 
@@ -595,6 +624,7 @@ async function visitCrawlPage(
       title,
       ariaSnapshot: snapshot.ariaSnapshot,
       linkedUrls: linkRead.links.map((link) => link.identityUrl),
+      formFields,
       durationMs: measureElapsedMs(visitStartedAt),
     },
     sameOriginLinks: linkRead.links,

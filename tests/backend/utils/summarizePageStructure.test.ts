@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
+import { readAriaSnapshotLines,
   MAX_STRUCTURE_SKELETON_CHARACTERS,
   compareStructureSkeletons,
   summarizePageStructure,
@@ -116,5 +116,15 @@ describe("compareStructureSkeletons", () => {
 
   it("compares a role by where it sits, not just by its name", () => {
     expect(compareStructureSkeletons("banner\n  link", "main\n  link")).toBe(0);
+  });
+});
+
+describe("readAriaSnapshotLines", () => {
+  it("reads each entry line with its depth, property lines included, and skips continuation lines", () => {
+    expect(readAriaSnapshotLines('- link "Home":\n  - /url: /\n  continued text\n    - text: deep')).toEqual([
+      { depth: 0, entryText: 'link "Home":' },
+      { depth: 1, entryText: "/url: /" },
+      { depth: 2, entryText: "text: deep" },
+    ]);
   });
 });

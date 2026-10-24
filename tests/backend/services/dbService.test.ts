@@ -20,6 +20,8 @@ const {
   mockCredentialDelegate,
   mockWebObjectDelegate,
   mockPagePatternDelegate,
+  mockActionParameterDelegate,
+  mockCreatedObjectDelegate,
   mockTransaction,
 } = vi.hoisted(
   () => {
@@ -57,6 +59,8 @@ const {
     const credentialDelegate = createMockModelDelegate();
     const webObjectDelegate = createMockModelDelegate();
     const pagePatternDelegate = createMockModelDelegate();
+    const actionParameterDelegate = createMockModelDelegate();
+    const createdObjectDelegate = createMockModelDelegate();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
@@ -72,6 +76,8 @@ const {
       credential: credentialDelegate,
       webObject: webObjectDelegate,
       pagePattern: pagePatternDelegate,
+      actionParameter: actionParameterDelegate,
+      createdObject: createdObjectDelegate,
     };
 
     return {
@@ -87,6 +93,8 @@ const {
       mockCredentialDelegate: credentialDelegate,
       mockWebObjectDelegate: webObjectDelegate,
       mockPagePatternDelegate: pagePatternDelegate,
+      mockActionParameterDelegate: actionParameterDelegate,
+      mockCreatedObjectDelegate: createdObjectDelegate,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
@@ -120,8 +128,12 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     credential = mockCredentialDelegate;
     webObject = mockWebObjectDelegate;
     pagePattern = mockPagePatternDelegate;
+    actionParameter = mockActionParameterDelegate;
+    createdObject = mockCreatedObjectDelegate;
     $transaction = mockTransaction;
   },
+  // dbService writes Prisma.DbNull to clear a JSON column; a stand-in proves it was used.
+  Prisma: { DbNull: "Prisma.DbNull" },
 }));
 
 import {
@@ -175,8 +187,29 @@ import {
   listWebObjectsForWebsite,
   findWebObjectNamesForCrawlRun,
   renameWebObject,
+  findActionScriptRunWithObjects,
+  readCrawlRunPagesMatching,
+  findLatestCrawlPagesMatching,
+  toActionParameterRecord,
+  listActionParametersForAction,
+  findActionParameterSyncInputs,
+  findNewestActionPlan,
+  saveSyncedActionParameters,
+  setActionParameterChoices,
+  addUserActionParameter,
+  removeUserActionParameter,
+  listActionIdsForWebsite,
+  createCreatedObject,
+  listCreatedObjectsForWebsite,
+  listChoosableCreatedObjects,
+  removeCreatedObject,
+  markCreatedObjectDeletedByRun,
+  listCreatedObjectsToCheck,
+  saveCreatedObjectChecks,
+  type ActionParameter,
   type WebObjectInput,
 } from "../../../server/services/dbService.js";
+import type { DetectedParameter } from "../../../server/utils/detectActionParameters.js";
 
 const sampleWebsite = {
   id: "cuid-1",
@@ -220,6 +253,14 @@ const sampleLinkedAction = {
 
 /** What every action read includes: the id and name of the credential it runs as. */
 const ACTION_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true } } };
+
+/** An action's object role choices all left on "detect", as every action write carries them. */
+const DETECT_EVERY_ROLE_CHOICE = {
+  userActionKind: null,
+  userObjectTypeKey: null,
+  userNameParameterKey: null,
+  userDeletesObject: null,
+};
 
 const sampleScreenshotRun = {
   id: "screenshot-run-1",
@@ -533,6 +574,17 @@ const sampleCrawledPageInput = {
   title: "About",
   ariaSnapshot: '- heading "About" [level=1]',
   linkedUrls: ["https://example.com/"],
+  formFields: [
+    {
+      role: "textbox" as const,
+      inputType: "email",
+      label: "Email",
+      placeholder: null,
+      isRequired: true,
+      containerNumber: 1,
+      containerName: "Contact us",
+    },
+  ],
   durationMs: 950,
 };
 
@@ -545,6 +597,12 @@ const sampleCrawledPage = {
   createdAt: new Date("2026-01-07T00:00:01.000Z"),
   updatedAt: new Date("2026-01-07T00:00:01.000Z"),
   deletedAt: null,
+};
+
+/** What the run reads include: the object a run created and the created objects it deleted. */
+const ACTION_SCRIPT_RUN_OBJECTS_INCLUDE = {
+  createdObject: { where: { deletedAt: null }, select: { id: true, name: true, url: true, objectTypeName: true } },
+  deletedObjects: { where: { deletedAt: null }, select: { id: true, name: true, url: true, objectTypeName: true } },
 };
 
 /** What every crawl run read includes: the credential's id and name, deleted or not. */
@@ -1202,6 +1260,7 @@ describe("dbService", () => {
         title: "Log in",
         description: "Enter credentials and submit",
         credentialId: "credential-1",
+        ...DETECT_EVERY_ROLE_CHOICE,
       });
 
       expect(mockActionDelegate.create).toHaveBeenCalledWith({
@@ -1209,6 +1268,7 @@ describe("dbService", () => {
           title: "Log in",
           description: "Enter credentials and submit",
           credentialId: "credential-1",
+          ...DETECT_EVERY_ROLE_CHOICE,
           websiteId: "cuid-1",
         },
         include: ACTION_CREDENTIAL_INCLUDE,
@@ -1223,6 +1283,7 @@ describe("dbService", () => {
         title: "Log in",
         description: "Enter credentials and submit",
         credentialId: null,
+        ...DETECT_EVERY_ROLE_CHOICE,
       });
 
       expect(mockActionDelegate.create).toHaveBeenCalledWith({
@@ -1230,6 +1291,7 @@ describe("dbService", () => {
           title: "Log in",
           description: "Enter credentials and submit",
           credentialId: null,
+          ...DETECT_EVERY_ROLE_CHOICE,
           websiteId: "cuid-1",
         },
         include: ACTION_CREDENTIAL_INCLUDE,
@@ -1244,6 +1306,7 @@ describe("dbService", () => {
         title: "Log out",
         description: "Open the menu and log out",
         credentialId: "credential-1",
+        ...DETECT_EVERY_ROLE_CHOICE,
       };
 
       const updated = await updateActionForWebsite("cuid-1", "action-1", replacement);
@@ -1258,13 +1321,13 @@ describe("dbService", () => {
 
     it("updateActionForWebsite writes a null credential to unlink it", async () => {
       mockActionDelegate.update.mockResolvedValue(sampleAction);
-      const replacement = { title: "Log in", description: "Enter credentials", credentialId: null };
+      const replacement = { title: "Log in", description: "Enter credentials", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE };
 
       await updateActionForWebsite("cuid-1", "action-1", replacement);
 
       expect(mockActionDelegate.update).toHaveBeenCalledWith({
         where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
-        data: { title: "Log in", description: "Enter credentials", credentialId: null },
+        data: { title: "Log in", description: "Enter credentials", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE },
         include: ACTION_CREDENTIAL_INCLUDE,
       });
     });
@@ -1276,6 +1339,7 @@ describe("dbService", () => {
         title: "t",
         description: "d",
         credentialId: null,
+        ...DETECT_EVERY_ROLE_CHOICE,
       });
 
       expect(updated).toBeNull();
@@ -1290,6 +1354,7 @@ describe("dbService", () => {
           title: "t",
           description: "d",
           credentialId: null,
+          ...DETECT_EVERY_ROLE_CHOICE,
         }),
       ).rejects.toBe(connectionError);
     });
@@ -1736,6 +1801,7 @@ describe("dbService", () => {
           deletedAt: null,
         },
         orderBy: { createdAt: "desc" },
+        include: ACTION_SCRIPT_RUN_OBJECTS_INCLUDE,
       });
       expect(runs).toEqual([sampleActionScriptRun]);
     });
@@ -1784,6 +1850,10 @@ describe("dbService", () => {
         failingPageUrl: "https://example.com/login",
         failingPageAriaSnapshot: '- button "Log in"',
         durationMs: 305000,
+        parameterValues: [{ key: "projectName", label: "Project name", value: "Apollo 7" }],
+        finalPageUrl: "https://example.com/projects/1",
+        confirmStepNumber: 3,
+        confirmStepSucceeded: true,
       };
 
       const created = await createActionScriptRunForScript(
@@ -2015,6 +2085,7 @@ describe("dbService", () => {
         ariaSnapshot: _ariaSnapshot,
         linkedUrls: _linkedUrls,
         buttonUrls: _buttonUrls,
+        formFields: _formFields,
         ...pageSummary
       } = sampleCrawledPage;
       mockCrawledPageDelegate.findMany.mockResolvedValue([pageSummary]);
@@ -2024,7 +2095,7 @@ describe("dbService", () => {
       expect(mockCrawledPageDelegate.findMany).toHaveBeenCalledWith({
         where: { websiteId: "cuid-1", crawlRunId: "crawl-run-1", deletedAt: null },
         orderBy: { visitOrder: "asc" },
-        omit: { ariaSnapshot: true, linkedUrls: true, buttonUrls: true },
+        omit: { ariaSnapshot: true, linkedUrls: true, buttonUrls: true, formFields: true },
       });
       expect(pageSummaries).toEqual([pageSummary]);
     });
@@ -2568,6 +2639,567 @@ describe("dbService", () => {
       await expect(softDeleteCredentialForWebsite("cuid-1", "credential-1")).rejects.toBe(
         unlinkError,
       );
+    });
+  });
+
+  describe("soft deletes and parameters", () => {
+    it("softDeleteWebsite also stamps the website's action parameters and created objects with the same deletedAt", async () => {
+      mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
+      for (const delegate of [
+        mockUseCaseDelegate,
+        mockActionDelegate,
+        mockScreenshotRunDelegate,
+        mockActionScriptDelegate,
+        mockActionScriptRunDelegate,
+        mockActionScriptRefinementDelegate,
+        mockCrawlRunDelegate,
+        mockCrawledPageDelegate,
+        mockCredentialDelegate,
+        mockPagePatternDelegate,
+        mockWebObjectDelegate,
+        mockActionParameterDelegate,
+        mockCreatedObjectDelegate,
+      ]) {
+        delegate.updateMany.mockResolvedValue({ count: 0 });
+      }
+
+      await softDeleteWebsite("cuid-1");
+
+      const websiteDeletedAt = readDeletedAtWrittenBy(mockWebsiteDelegate.updateMany);
+      expect(mockActionParameterDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: websiteDeletedAt },
+      });
+      expect(mockCreatedObjectDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: websiteDeletedAt },
+      });
+    });
+
+    it("softDeleteActionForWebsite also stamps the action's parameters, but keeps its created objects", async () => {
+      for (const delegate of [mockActionDelegate, mockActionScriptDelegate, mockActionScriptRunDelegate, mockActionScriptRefinementDelegate, mockActionParameterDelegate]) {
+        delegate.updateMany.mockResolvedValue({ count: 1 });
+      }
+
+      await softDeleteActionForWebsite("cuid-1", "action-1");
+
+      expect(mockActionParameterDelegate.updateMany).toHaveBeenCalledWith({
+        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: readDeletedAtWrittenBy(mockActionDelegate.updateMany) },
+      });
+      expect(mockCreatedObjectDelegate.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("findActionScriptRunWithObjects reads one active run with the objects it created and deleted", async () => {
+      mockActionScriptRunDelegate.findFirst.mockResolvedValue(sampleActionScriptRun);
+
+      const found = await findActionScriptRunWithObjects("cuid-1", "action-script-run-1");
+
+      expect(mockActionScriptRunDelegate.findFirst).toHaveBeenCalledWith({
+        where: { id: "action-script-run-1", websiteId: "cuid-1", deletedAt: null },
+        include: ACTION_SCRIPT_RUN_OBJECTS_INCLUDE,
+      });
+      expect(found).toBe(sampleActionScriptRun);
+    });
+  });
+
+  describe("crawled pages for parameters", () => {
+    it("readCrawlRunPagesMatching reads every address first, then only the kept pages' snapshots and fields", async () => {
+      mockCrawledPageDelegate.findMany
+        .mockResolvedValueOnce([
+          { id: "page-1", url: "https://example.com/projects" },
+          { id: "page-2", url: "https://example.com/about" },
+        ])
+        .mockResolvedValueOnce([
+          { url: "https://example.com/projects", title: "Projects", ariaSnapshot: "- heading", formFields: [{ junk: true }] },
+        ]);
+
+      const pages = await readCrawlRunPagesMatching("cuid-1", "crawl-run-1", (pageUrl) => pageUrl.endsWith("/projects"));
+
+      expect(mockCrawledPageDelegate.findMany).toHaveBeenNthCalledWith(1, {
+        where: { websiteId: "cuid-1", crawlRunId: "crawl-run-1", deletedAt: null, succeeded: true },
+        orderBy: { visitOrder: "asc" },
+        select: { id: true, url: true },
+      });
+      expect(mockCrawledPageDelegate.findMany).toHaveBeenNthCalledWith(2, {
+        where: { id: { in: ["page-1"] }, websiteId: "cuid-1", deletedAt: null },
+        orderBy: { visitOrder: "asc" },
+        select: { url: true, title: true, ariaSnapshot: true, formFields: true },
+      });
+      expect(pages).toEqual([{ url: "https://example.com/projects", title: "Projects", ariaSnapshot: "- heading", formFields: [] }]);
+    });
+
+    it("readCrawlRunPagesMatching reads no snapshots when no page is kept", async () => {
+      mockCrawledPageDelegate.findMany.mockResolvedValueOnce([{ id: "page-2", url: "https://example.com/about" }]);
+
+      const pages = await readCrawlRunPagesMatching("cuid-1", "crawl-run-1", () => false);
+
+      expect(pages).toEqual([]);
+      expect(mockCrawledPageDelegate.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("findLatestCrawlPagesMatching reads the crawl done the way the action runs, with when it ran", async () => {
+      mockCrawlRunDelegate.findFirst
+        .mockResolvedValueOnce({ id: "crawl-run-7" })
+        .mockResolvedValueOnce({ id: "crawl-run-7", createdAt: new Date("2026-02-02T00:00:00.000Z") });
+      mockCrawledPageDelegate.findMany.mockResolvedValueOnce([]);
+
+      const crawl = await findLatestCrawlPagesMatching("cuid-1", "credential-1", () => true);
+
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        where: expect.objectContaining({ credentialId: "credential-1", isLoggedIn: true }),
+      }));
+      expect(crawl).toEqual({ crawlRunId: "crawl-run-7", crawledAt: new Date("2026-02-02T00:00:00.000Z"), pages: [] });
+    });
+
+    it("findLatestCrawlPagesMatching falls back to any crawl, and reads nothing when the website was never crawled", async () => {
+      mockCrawlRunDelegate.findFirst.mockResolvedValue(null);
+
+      const crawl = await findLatestCrawlPagesMatching("cuid-1", null, () => true);
+
+      expect(mockCrawlRunDelegate.findFirst).toHaveBeenCalledTimes(2);
+      expect(crawl).toEqual({ crawlRunId: null, crawledAt: null, pages: [] });
+      expect(mockCrawledPageDelegate.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("action parameters", () => {
+    /** A stored detected row: the project's name, typed by a step. */
+    const storedParameterRow: ActionParameter = {
+      id: "parameter-1",
+      websiteId: "cuid-1",
+      actionId: "action-1",
+      key: "projectName",
+      kind: "text",
+      source: "steps",
+      foundBy: ["plan", "crawl"],
+      isSecret: false,
+      label: "Project name",
+      userLabel: null,
+      fieldTarget: { label: "Project name" },
+      fieldRole: "textbox",
+      inputType: "text",
+      placeholder: null,
+      stepAction: "fill",
+      pageUrl: "https://example.com/projects/new",
+      containerName: "New project",
+      besideKeys: [],
+      fillAfterKey: null,
+      userRequiredChoice: null,
+      runIsRequired: null,
+      runReadAt: null,
+      crawlIsRequired: true,
+      crawlReadAt: new Date("2026-02-02T00:00:00.000Z"),
+      objectTypeKey: null,
+      matchText: null,
+      matchFields: [],
+      createdAt: new Date("2026-02-02T00:00:00.000Z"),
+      updatedAt: new Date("2026-02-02T00:00:00.000Z"),
+      deletedAt: null,
+    };
+
+    /** A detected row as the sync hands it over. */
+    const detectedRow: DetectedParameter = {
+      key: "projectName",
+      kind: "text",
+      source: "steps",
+      foundBy: ["plan"],
+      isSecret: false,
+      label: "Project name",
+      fieldTarget: { label: "Project name" },
+      fieldRole: null,
+      inputType: null,
+      placeholder: null,
+      stepAction: "fill",
+      pageUrl: null,
+      containerName: null,
+      besideKeys: [],
+      fillAfterKey: null,
+      crawlIsRequired: true,
+      runIsRequired: undefined,
+      objectTypeKey: null,
+    };
+
+    const READ_TIMES = { crawlReadAt: new Date("2026-03-03T00:00:00.000Z"), runReadAt: new Date("2026-03-04T00:00:00.000Z") };
+
+    it("toActionParameterRecord parses the target and narrows every value column", () => {
+      expect(toActionParameterRecord(storedParameterRow)).toMatchObject({
+        key: "projectName",
+        kind: "text",
+        source: "steps",
+        foundBy: ["plan", "crawl"],
+        fieldTarget: { label: "Project name" },
+        stepAction: "fill",
+        userRequiredChoice: null,
+        matchFields: [],
+      });
+      expect(
+        toActionParameterRecord({
+          ...storedParameterRow,
+          kind: "weird",
+          source: "weird",
+          foundBy: ["plan", "weird"],
+          fieldTarget: { nonsense: true },
+          stepAction: "weird",
+          userRequiredChoice: "optional",
+          matchFields: ["value", "weird"],
+        }),
+      ).toMatchObject({
+        kind: "text",
+        source: "steps",
+        foundBy: ["plan"],
+        fieldTarget: null,
+        stepAction: null,
+        userRequiredChoice: "optional",
+        matchFields: ["value"],
+      });
+    });
+
+    it("listActionParametersForAction lists the action's active rows, oldest first, as records", async () => {
+      mockActionParameterDelegate.findMany.mockResolvedValue([storedParameterRow]);
+
+      const records = await listActionParametersForAction("cuid-1", "action-1");
+
+      expect(mockActionParameterDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", actionId: "action-1", deletedAt: null },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(records).toEqual([toActionParameterRecord(storedParameterRow)]);
+    });
+
+    it("findActionParameterSyncInputs reads the live versions (dropping unparseable plans), failed-run snapshots, and the user's keys", async () => {
+      mockActionScriptDelegate.findMany.mockResolvedValue([
+        { id: "script-2", plan: samplePlan, contextPageUrls: ["https://example.com/"] },
+        { id: "script-1", plan: { broken: true }, contextPageUrls: [] },
+      ]);
+      mockActionScriptRunDelegate.findMany.mockResolvedValue([
+        { failingPageUrl: "https://example.com/new", failingPageAriaSnapshot: "- dialog" },
+        { failingPageUrl: null, failingPageAriaSnapshot: null },
+      ]);
+      mockActionParameterDelegate.findMany.mockResolvedValue([{ key: "notes" }]);
+
+      const inputs = await findActionParameterSyncInputs("cuid-1", "action-1");
+
+      expect(inputs).toEqual({
+        versions: [{ id: "script-2", plan: samplePlan, contextPageUrls: ["https://example.com/"] }],
+        failingPageSnapshots: [{ url: "https://example.com/new", ariaSnapshot: "- dialog" }],
+        reservedKeys: ["notes"],
+      });
+      expect(mockActionScriptRunDelegate.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 10, where: expect.objectContaining({ failingPageAriaSnapshot: { not: null } }) }),
+      );
+      expect(mockActionParameterDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", actionId: "action-1", source: "you" },
+        select: { key: true },
+      });
+    });
+
+    it("findNewestActionPlan reads the newest version's plan, or null", async () => {
+      mockActionScriptDelegate.findFirst
+        .mockResolvedValueOnce({ plan: samplePlan })
+        .mockResolvedValueOnce({ plan: { broken: true } })
+        .mockResolvedValueOnce(null);
+
+      expect(await findNewestActionPlan("cuid-1", "action-1")).toEqual(samplePlan);
+      expect(await findNewestActionPlan("cuid-1", "action-1")).toBeNull();
+      expect(await findNewestActionPlan("cuid-1", "action-1")).toBeNull();
+      expect(mockActionScriptDelegate.findFirst).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", actionId: "action-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        select: { plan: true },
+      });
+    });
+
+    it("saveSyncedActionParameters writes nothing when the action is no longer active", async () => {
+      mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      const saved = await saveSyncedActionParameters("cuid-1", "action-1", [detectedRow], READ_TIMES);
+
+      expect(saved).toBe(false);
+      expect(mockActionParameterDelegate.findMany).not.toHaveBeenCalled();
+    });
+
+    it("saveSyncedActionParameters creates new rows, updates existing ones without the user's columns, and keeps the user's rows", async () => {
+      mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionParameterDelegate.findMany.mockResolvedValue([
+        { ...storedParameterRow, foundBy: ["plan", "run"], deletedAt: new Date("2026-01-01T00:00:00.000Z") },
+        { ...storedParameterRow, id: "parameter-yours", key: "code", source: "you" },
+      ]);
+      const objectRow: DetectedParameter = {
+        ...detectedRow,
+        key: "object",
+        kind: "object",
+        fieldTarget: null,
+        stepAction: null,
+        crawlIsRequired: null,
+        runIsRequired: true,
+        objectTypeKey: "/projects/{project}",
+      };
+
+      const saved = await saveSyncedActionParameters(
+        "cuid-1",
+        "action-1",
+        [detectedRow, { ...detectedRow, key: "code" }, objectRow],
+        READ_TIMES,
+      );
+
+      expect(saved).toBe(true);
+      expect(mockActionDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
+        data: { parametersSyncedAt: expect.any(Date) },
+      });
+      expect(mockActionParameterDelegate.update).toHaveBeenCalledTimes(1);
+      const [updateArguments] = mockActionParameterDelegate.update.mock.calls[0] as [{ where: unknown; data: Record<string, unknown> }];
+      expect(updateArguments.where).toEqual({ id: "parameter-1" });
+      expect(updateArguments.data).toMatchObject({
+        foundBy: ["plan", "run"],
+        crawlIsRequired: true,
+        crawlReadAt: READ_TIMES.crawlReadAt,
+        deletedAt: null,
+      });
+      expect(updateArguments.data).not.toHaveProperty("userLabel");
+      expect(updateArguments.data).not.toHaveProperty("runIsRequired");
+      expect(mockActionParameterDelegate.create).toHaveBeenCalledTimes(1);
+      expect(mockActionParameterDelegate.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          websiteId: "cuid-1",
+          actionId: "action-1",
+          key: "object",
+          kind: "object",
+          fieldTarget: "Prisma.DbNull",
+          crawlReadAt: null,
+          runIsRequired: true,
+          runReadAt: READ_TIMES.runReadAt,
+          objectTypeKey: "/projects/{project}",
+        }),
+      });
+      expect(mockActionParameterDelegate.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("saveSyncedActionParameters soft deletes detected rows nothing produces, but keeps page fields a run found", async () => {
+      mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionParameterDelegate.findMany.mockResolvedValue([
+        { ...storedParameterRow, id: "parameter-gone", key: "gone" },
+        { ...storedParameterRow, id: "parameter-run-page", key: "tagline", source: "page", foundBy: ["run"] },
+        { ...storedParameterRow, id: "parameter-crawl-page", key: "size", source: "page", foundBy: ["crawl"] },
+        { ...storedParameterRow, id: "parameter-yours", key: "code", source: "you" },
+        { ...storedParameterRow, id: "parameter-already-gone", key: "older", deletedAt: new Date() },
+      ]);
+
+      await saveSyncedActionParameters("cuid-1", "action-1", [], READ_TIMES);
+
+      expect(mockActionParameterDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ["parameter-gone", "parameter-crawl-page"] } },
+        data: { deletedAt: expect.any(Date) },
+      });
+    });
+
+    it("setActionParameterChoices saves the user's choices on an active row, or reports none", async () => {
+      mockActionParameterDelegate.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+      mockActionParameterDelegate.findFirst.mockResolvedValueOnce(storedParameterRow).mockResolvedValueOnce(null);
+      const choices = { userLabel: "Name", userRequiredChoice: "optional" as const };
+
+      expect(await setActionParameterChoices("cuid-1", "action-1", "projectName", choices)).toEqual(
+        toActionParameterRecord(storedParameterRow),
+      );
+      expect(mockActionParameterDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", actionId: "action-1", key: "projectName", deletedAt: null },
+        data: choices,
+      });
+      expect(await setActionParameterChoices("cuid-1", "action-1", "gone", choices)).toBeNull();
+
+      mockActionParameterDelegate.updateMany.mockResolvedValueOnce({ count: 1 });
+      expect(await setActionParameterChoices("cuid-1", "action-1", "raced", choices)).toBeNull();
+    });
+
+    it("addUserActionParameter keys a value or a field after its label, numbered when taken", async () => {
+      mockActionParameterDelegate.findMany.mockResolvedValue([{ key: "code" }]);
+      mockActionParameterDelegate.create.mockResolvedValue({ ...storedParameterRow, key: "code2", source: "you" });
+
+      await addUserActionParameter("cuid-1", "action-1", {
+        addKind: "value",
+        label: "Code",
+        requiredChoice: "optional",
+        valueKind: "text",
+        objectTypeKey: null,
+        matchText: "AP7",
+        matchFields: ["value"],
+      });
+      expect(mockActionParameterDelegate.create).toHaveBeenLastCalledWith({
+        data: expect.objectContaining({
+          key: "code2",
+          source: "you",
+          foundBy: ["you"],
+          kind: "text",
+          userRequiredChoice: "optional",
+          objectTypeKey: null,
+          matchText: "AP7",
+          matchFields: ["value"],
+        }),
+      });
+
+      await addUserActionParameter("cuid-1", "action-1", {
+        addKind: "value",
+        label: "Project",
+        requiredChoice: "optional",
+        valueKind: "object",
+        objectTypeKey: "/projects/{project}",
+        matchText: "Mercury",
+        matchFields: ["targetName"],
+      });
+      expect(mockActionParameterDelegate.create).toHaveBeenLastCalledWith({
+        data: expect.objectContaining({ kind: "object", userRequiredChoice: "required", objectTypeKey: "/projects/{project}" }),
+      });
+
+      await addUserActionParameter("cuid-1", "action-1", {
+        addKind: "field",
+        label: "Size",
+        requiredChoice: "optional",
+        fieldTarget: { label: "Size" },
+        stepAction: "selectOption",
+        fillAfterKey: "projectName",
+      });
+      expect(mockActionParameterDelegate.create).toHaveBeenLastCalledWith({
+        data: expect.objectContaining({
+          key: "size",
+          kind: "option",
+          fieldTarget: { label: "Size" },
+          stepAction: "selectOption",
+          fillAfterKey: "projectName",
+        }),
+      });
+      await addUserActionParameter("cuid-1", "action-1", {
+        addKind: "field",
+        label: "Notes",
+        requiredChoice: "required",
+        fieldTarget: { label: "Notes" },
+        stepAction: "fill",
+        fillAfterKey: "projectName",
+      });
+      expect(mockActionParameterDelegate.create).toHaveBeenLastCalledWith({
+        data: expect.objectContaining({ kind: "text", userRequiredChoice: "required" }),
+      });
+    });
+
+    it("removeUserActionParameter removes only the user's own rows", async () => {
+      mockActionParameterDelegate.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: "parameter-1", source: "steps" })
+        .mockResolvedValueOnce({ id: "parameter-yours", source: "you" });
+
+      expect(await removeUserActionParameter("cuid-1", "action-1", "gone")).toBe("notFound");
+      expect(await removeUserActionParameter("cuid-1", "action-1", "projectName")).toBe("notYours");
+      expect(await removeUserActionParameter("cuid-1", "action-1", "code")).toBe("removed");
+      expect(mockActionParameterDelegate.update).toHaveBeenCalledWith({
+        where: { id: "parameter-yours" },
+        data: { deletedAt: expect.any(Date) },
+      });
+    });
+
+    it("listActionIdsForWebsite lists the website's active actions' ids", async () => {
+      mockActionDelegate.findMany.mockResolvedValue([{ id: "action-1" }, { id: "action-2" }]);
+
+      expect(await listActionIdsForWebsite("cuid-1")).toEqual(["action-1", "action-2"]);
+      expect(mockActionDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        select: { id: true },
+      });
+    });
+  });
+
+  describe("created objects", () => {
+    const CREATED_OBJECT_INCLUDE = {
+      action: { select: { id: true, title: true, deletedAt: true } },
+      deletedByActionScriptRun: {
+        select: { id: true, actionId: true, actionScriptId: true, createdAt: true, action: { select: { title: true } } },
+      },
+    };
+
+    it("createCreatedObject records one object under the website", async () => {
+      const createdObjectInput = {
+        actionId: "action-1",
+        actionScriptId: "action-script-1",
+        actionScriptRunId: "action-script-run-1",
+        objectTypeKey: "/projects/{project}",
+        objectTypeName: "Project",
+        name: "Apollo 7",
+        url: null,
+      };
+      mockCreatedObjectDelegate.create.mockResolvedValue({ id: "created-object-1" });
+
+      expect(await createCreatedObject("cuid-1", createdObjectInput)).toEqual({ id: "created-object-1" });
+      expect(mockCreatedObjectDelegate.create).toHaveBeenCalledWith({ data: { ...createdObjectInput, websiteId: "cuid-1" } });
+    });
+
+    it("lists the record, and the choosable objects of one type", async () => {
+      mockCreatedObjectDelegate.findMany.mockResolvedValue([{ id: "created-object-1" }]);
+
+      await listCreatedObjectsForWebsite("cuid-1");
+      expect(mockCreatedObjectDelegate.findMany).toHaveBeenLastCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        include: CREATED_OBJECT_INCLUDE,
+      });
+
+      await listChoosableCreatedObjects("cuid-1", "/projects/{project}");
+      expect(mockCreatedObjectDelegate.findMany).toHaveBeenLastCalledWith({
+        where: {
+          websiteId: "cuid-1",
+          objectTypeKey: "/projects/{project}",
+          deletedAt: null,
+          notSeenSince: null,
+          deletedOnSiteAt: null,
+        },
+        orderBy: { createdAt: "desc" },
+        include: CREATED_OBJECT_INCLUDE,
+      });
+
+      await listCreatedObjectsToCheck("cuid-1");
+      expect(mockCreatedObjectDelegate.findMany).toHaveBeenLastCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null, deletedOnSiteAt: null, objectTypeKey: { not: null } },
+      });
+    });
+
+    it("removes an object from the record, and marks one a run deleted", async () => {
+      mockCreatedObjectDelegate.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+
+      expect(await removeCreatedObject("cuid-1", "created-object-1")).toBe(true);
+      expect(mockCreatedObjectDelegate.updateMany).toHaveBeenLastCalledWith({
+        where: { id: "created-object-1", websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(await markCreatedObjectDeletedByRun("cuid-1", "created-object-1", "run-9")).toBe(false);
+      expect(mockCreatedObjectDelegate.updateMany).toHaveBeenLastCalledWith({
+        where: { id: "created-object-1", websiteId: "cuid-1", deletedAt: null, deletedOnSiteAt: null },
+        data: { deletedOnSiteAt: expect.any(Date), deletedByActionScriptRunId: "run-9" },
+      });
+    });
+
+    it("saveCreatedObjectChecks marks listed objects seen and the others Not seen, keeping the first miss", async () => {
+      mockCreatedObjectDelegate.updateMany.mockResolvedValue({ count: 1 });
+      const checkedAt = new Date("2026-05-05T00:00:00.000Z");
+
+      await saveCreatedObjectChecks(
+        "cuid-1",
+        [
+          { createdObjectId: "created-object-1", isListed: true },
+          { createdObjectId: "created-object-2", isListed: false },
+        ],
+        checkedAt,
+      );
+
+      expect(mockCreatedObjectDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ["created-object-1"] }, websiteId: "cuid-1", deletedAt: null },
+        data: { lastSeenAt: checkedAt, notSeenSince: null },
+      });
+      expect(mockCreatedObjectDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ["created-object-2"] }, websiteId: "cuid-1", deletedAt: null, notSeenSince: null },
+        data: { notSeenSince: checkedAt },
+      });
+
+      mockCreatedObjectDelegate.updateMany.mockClear();
+      await saveCreatedObjectChecks("cuid-1", [], checkedAt);
+      expect(mockCreatedObjectDelegate.updateMany).not.toHaveBeenCalled();
     });
   });
 });

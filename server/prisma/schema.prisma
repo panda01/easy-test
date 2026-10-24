@@ -39,8 +39,8 @@ generator client {
 /// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
 /// timestamp on the website's active use cases, actions, screenshot runs,
 /// action scripts, action script runs, action script refinements, crawl runs,
-/// crawled pages, credentials, web objects, and page patterns) instead of
-/// removing the row. Every dbService query filters `deletedAt: null`.
+/// crawled pages, credentials, web objects, page patterns, action parameters,
+/// and created objects) instead of removing the row. Every dbService query filters `deletedAt: null`.
 ///
 /// Two per-website settings control WHEN the Playwright controller takes a
 /// screenshot, after the page's `load` event:
@@ -79,6 +79,8 @@ model Website {
   credentials             Credential[]
   webObjects              WebObject[]
   pagePatterns            PagePattern[]
+  actionParameters        ActionParameter[]
+  createdObjects          CreatedObject[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -104,27 +106,48 @@ model UseCase {
 
 /// A reusable step on a website, e.g. "Log in". Belongs to exactly one
 /// website. Soft deleted like `Website`; deleting an action also stamps the
-/// same `deletedAt` on its active scripts, script runs, and script
-/// refinements.
+/// same `deletedAt` on its active scripts, script runs, script refinements,
+/// and parameters. Its created objects are kept (they are still on the site).
 ///
 /// `credentialId` is the credential the action runs AS, or null for a
 /// logged-out visitor. With one, every run first logs in with the crawler's
 /// login routine (see `logInWithCredential`) and only then runs the plan.
 /// Soft deleting the credential unlinks it here (sets this back to null).
+///
+/// PARAMETERS (see `ActionParameter`): the user's choices about what the
+/// action does with an object. Each is null for "detect" - worked out on read
+/// from the title and description (`resolveActionObjectRole`), so it follows
+/// edits to them:
+/// - `userActionKind`: `parameters` (only typed values), `object` (acts on an
+///   existing object, which is then always required), or `create` (makes a
+///   new object, recorded as a `CreatedObject`).
+/// - `userObjectTypeKey`: the web object (its `instancePatternKey`) the
+///   action acts on or creates.
+/// - `userNameParameterKey`: the parameter that names a created object.
+/// - `userDeletesObject`: true when an `object` action deletes its object.
+/// `parametersSyncedAt` is when the action's `ActionParameter` rows were last
+/// synced; null means never, so the first read syncs them.
 model Action {
-  id                String                   @id @default(cuid())
-  websiteId         String
-  credentialId      String?
-  title             String
-  description       String
-  createdAt         DateTime                 @default(now())
-  updatedAt         DateTime                 @updatedAt
-  deletedAt         DateTime?
-  website           Website                  @relation(fields: [websiteId], references: [id])
-  credential        Credential?              @relation(fields: [credentialId], references: [id])
-  scripts           ActionScript[]
-  scriptRuns        ActionScriptRun[]
-  scriptRefinements ActionScriptRefinement[]
+  id                   String                   @id @default(cuid())
+  websiteId            String
+  credentialId         String?
+  title                String
+  description          String
+  userActionKind       String?
+  userObjectTypeKey    String?
+  userNameParameterKey String?
+  userDeletesObject    Boolean?
+  parametersSyncedAt   DateTime?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  deletedAt            DateTime?
+  website              Website                  @relation(fields: [websiteId], references: [id])
+  credential           Credential?              @relation(fields: [credentialId], references: [id])
+  scripts              ActionScript[]
+  scriptRuns           ActionScriptRun[]
+  scriptRefinements    ActionScriptRefinement[]
+  parameters           ActionParameter[]
+  createdObjects       CreatedObject[]
 
   @@index([websiteId])
   @@index([credentialId])
@@ -226,6 +249,7 @@ model ActionScript {
   runs                     ActionScriptRun[]
   refinement               ActionScriptRefinement?  @relation("RefinementResultScript")
   refinementsOfThisVersion ActionScriptRefinement[] @relation("RefinementSourceScript")
+  createdObjects           CreatedObject[]
 
   @@index([websiteId])
   @@index([actionId])
@@ -258,6 +282,20 @@ model ActionScript {
 /// username and password scrubbed out, and both are null when the run passed,
 /// when they could not be read, or for runs recorded before they existed.
 /// `refinements` are the "Refine" requests made from this (failed) run.
+///
+/// PARAMETERS: `parameterValues` is what the run typed for each parameter, as
+/// `[{ key, label, value }]` - `""` means the parameter was left blank (its
+/// steps were skipped), and secret parameters (passwords) are left out. The
+/// label is copied so the history reads the same after a rename. It is `[]`
+/// for runs recorded before parameters existed. `finalPageUrl` is the address
+/// the browser was on when the run ended (credential values scrubbed), or
+/// null when it could not be read.
+///
+/// For a Create action, `confirmStepNumber` is the step that submits the
+/// create form (null when the version has none, and for other actions), and
+/// `confirmStepSucceeded` whether it ran without an error showing (null when
+/// the run never reached it). A `CreatedObject` is recorded exactly when it
+/// is true - see `createdObject`.
 model ActionScriptRun {
   id                        String                   @id @default(cuid())
   websiteId                 String
@@ -274,6 +312,10 @@ model ActionScriptRun {
   failingPageUrl            String?
   failingPageAriaSnapshot   String?
   durationMs                Int
+  parameterValues           Json                     @default("[]")
+  finalPageUrl              String?
+  confirmStepNumber         Int?
+  confirmStepSucceeded      Boolean?
   createdAt                 DateTime                 @default(now())
   updatedAt                 DateTime                 @updatedAt
   deletedAt                 DateTime?
@@ -281,6 +323,8 @@ model ActionScriptRun {
   action                    Action                   @relation(fields: [actionId], references: [id])
   actionScript              ActionScript             @relation(fields: [actionScriptId], references: [id])
   refinements               ActionScriptRefinement[]
+  createdObject             CreatedObject?           @relation("CreatedObjectRun")
+  deletedObjects            CreatedObject[]          @relation("CreatedObjectDeletingRun")
 
   @@index([websiteId])
   @@index([actionId])
@@ -473,6 +517,12 @@ model CrawlRun {
 /// `/blog/c`), when the crawl compares them - so it is often filled in after
 /// the page was saved. Null for every other page, and when there is no aria
 /// snapshot.
+///
+/// `formFields` is every visible text, number, and select field on the page,
+/// read in the browser because the aria snapshot cannot say whether a field
+/// is REQUIRED: `[{ role, inputType, label, placeholder, isRequired,
+/// containerNumber, containerName }]` (see `server/utils/formFields.ts`).
+/// `[]` for pages crawled before it existed.
 model CrawledPage {
   id                String        @id @default(cuid())
   crawlRunId        String
@@ -492,6 +542,7 @@ model CrawledPage {
   structureSkeleton String?
   linkedUrls        String[]
   buttonUrls        String[]      @default([])
+  formFields        Json          @default("[]")
   foundByButtonText String?
   durationMs        Int
   createdAt         DateTime      @default(now())
@@ -646,4 +697,135 @@ model Credential {
 
   @@index([websiteId])
   @@map("credentials")
+}
+
+/// One input of an action - a field it can be run with a different value
+/// for. This table is the ONE place an action's parameters are stored: every
+/// field of the action, with all that is known about it. Belongs to one
+/// action (and, denormalized, its website); one row per `(actionId, key)`.
+/// Soft deleted with its action or website.
+///
+/// The rows are kept up to date by `syncActionParameters` (no LLM): when a
+/// version is saved, the action is edited, a run finishes, or a crawl ends.
+/// The sync never overwrites the user's columns (`userLabel`,
+/// `userRequiredChoice`) or the user's own rows (`source: "you"`), and it
+/// soft deletes a detected row nothing produces any more - the row comes
+/// back, with the user's changes, if it reappears.
+///
+/// What is NOT stored: which steps of a version use a row, and the literal a
+/// step types (the default value). Both are the plan's own data, read from
+/// the version when its parameters are shown or run.
+///
+/// What it is:
+/// - `kind`: `text` (typed), `option` (picked from a select), or `object`
+///   (which existing object to act on - always required).
+/// - `source`: `steps` (a step of a version types into it), `page` (the page
+///   has it beside such a field, but no step fills it), or `you` (added by
+///   the user).
+/// - `foundBy`: where it was seen - `plan`, `snapshot` (an aria snapshot),
+///   `crawl` (the crawler's form fields), `run` (the runner's readings), `you`.
+/// - `isSecret`: a password-like field; its value is masked, scrubbed from
+///   logs, and never stored on a run.
+/// Its name: `label` (worked out), `userLabel` (the user's, or null).
+/// How to find it: `fieldTarget` (a plan target - `{label}`, `{placeholder}`,
+/// or `{role,name}`), `fieldRole`, `inputType`, `placeholder`, and
+/// `stepAction` (`fill` or `selectOption`).
+/// Where it sits: `pageUrl`, `containerName` (its form or dialog), the
+/// parameters it sits beside (`besideKeys`), and `fillAfterKey` (an added
+/// field is typed right after that parameter's step).
+/// Required: `userRequiredChoice` (`required`, `optional`, or null for "let
+/// the page decide"), then the latest run's reading (`runIsRequired`,
+/// `runReadAt`), then the latest crawl's (`crawlIsRequired`, `crawlReadAt`) -
+/// each null when unknown - then the default (a field a step types into is
+/// required, any other optional).
+/// The object: `objectTypeKey` (a web object's `instancePatternKey`).
+/// A value the user picked in the steps: `matchText` (the literal) and
+/// `matchFields` (where it may appear: `value`, `targetName`, `targetText`,
+/// `url`).
+model ActionParameter {
+  id                 String    @id @default(cuid())
+  websiteId          String
+  actionId           String
+  key                String
+  kind               String
+  source             String
+  foundBy            String[]  @default([])
+  isSecret           Boolean   @default(false)
+  label              String
+  userLabel          String?
+  fieldTarget        Json?
+  fieldRole          String?
+  inputType          String?
+  placeholder        String?
+  stepAction         String?
+  pageUrl            String?
+  containerName      String?
+  besideKeys         String[]  @default([])
+  fillAfterKey       String?
+  userRequiredChoice String?
+  runIsRequired      Boolean?
+  runReadAt          DateTime?
+  crawlIsRequired    Boolean?
+  crawlReadAt        DateTime?
+  objectTypeKey      String?
+  matchText          String?
+  matchFields        String[]  @default([])
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+  website            Website   @relation(fields: [websiteId], references: [id])
+  action             Action    @relation(fields: [actionId], references: [id])
+
+  @@unique([actionId, key])
+  @@index([websiteId])
+  @@map("action_parameters")
+}
+
+/// One object a run of a Create action made on the website - the record of
+/// what the app created, so it can be cleaned up or used again (it is offered
+/// as a choice to Object actions). Written only when the run's confirm step
+/// (the click that submits the create form) succeeded with no error showing,
+/// whether or not later steps passed. One per run (`actionScriptRunId`).
+///
+/// `name` is the value the run typed into the action's name parameter, `url`
+/// the object's own page when the run landed on one (matched against the
+/// type's instance pattern), or null. `objectTypeKey` is the web object
+/// (`instancePatternKey`) it is an instance of, and `objectTypeName` that
+/// type's name when it was made (a crawl replaces the web objects); both null
+/// when the action had no object type.
+///
+/// A crawl never deletes a row: when a crawl reaches the type's list page and
+/// does not list the object, `notSeenSince` is set (it stops being a choice);
+/// a later crawl that lists it clears that and sets `lastSeenAt`. When an
+/// Object action that deletes passes on it, `deletedOnSiteAt` and
+/// `deletedByActionScriptRunId` record that (a crawl never clears them).
+/// `deletedAt` means the USER removed it from the record. Soft deleted with
+/// its website, but KEPT when its action is deleted - the object is still on
+/// the site.
+model CreatedObject {
+  id                         String           @id @default(cuid())
+  websiteId                  String
+  actionId                   String
+  actionScriptId             String
+  actionScriptRunId          String           @unique
+  objectTypeKey              String?
+  objectTypeName             String?
+  name                       String
+  url                        String?
+  lastSeenAt                 DateTime?
+  notSeenSince               DateTime?
+  deletedOnSiteAt            DateTime?
+  deletedByActionScriptRunId String?
+  createdAt                  DateTime         @default(now())
+  updatedAt                  DateTime         @updatedAt
+  deletedAt                  DateTime?
+  website                    Website          @relation(fields: [websiteId], references: [id])
+  action                     Action           @relation(fields: [actionId], references: [id])
+  actionScript               ActionScript     @relation(fields: [actionScriptId], references: [id])
+  actionScriptRun            ActionScriptRun  @relation("CreatedObjectRun", fields: [actionScriptRunId], references: [id])
+  deletedByActionScriptRun   ActionScriptRun? @relation("CreatedObjectDeletingRun", fields: [deletedByActionScriptRunId], references: [id])
+
+  @@index([websiteId])
+  @@index([actionId])
+  @@map("created_objects")
 }

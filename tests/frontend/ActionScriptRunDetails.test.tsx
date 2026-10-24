@@ -3,6 +3,7 @@ import { render, screen, within, type RenderResult } from "@testing-library/reac
 import { userEvent } from "@testing-library/user-event";
 import ActionScriptRunDetails, {
   MAX_REFINE_NOTE_LENGTH,
+  describeRunObjectChanges,
   type ActionScriptRunDetailsProps,
 } from "../../src/components/ActionScriptRunDetails";
 import { buildActionScriptRunRecord } from "./support/frontendTestHelpers";
@@ -321,6 +322,56 @@ describe("ActionScriptRunDetails", () => {
         />,
       );
       expect(screen.getByRole("alert")).toHaveTextContent("Could not refine: Claude is overloaded");
+    });
+  });
+
+  describe("objects and values", () => {
+    /** The object summary a run lists. */
+    const apolloSummary = { id: "created-object-1", name: "Apollo 7", url: null, objectTypeName: "Project" };
+
+    it("says what a run did to the record of created objects", () => {
+      expect(describeRunObjectChanges(buildActionScriptRunRecord({ createdObject: apolloSummary, confirmStepNumber: 3, confirmStepSucceeded: true }))).toEqual([
+        "Created Apollo 7",
+      ]);
+      expect(describeRunObjectChanges(buildActionScriptRunRecord({ confirmStepNumber: 3, confirmStepSucceeded: false }))).toEqual([
+        "Not recorded: the confirm step (step 3) showed an error",
+      ]);
+      expect(describeRunObjectChanges(buildActionScriptRunRecord({ confirmStepNumber: 3, confirmStepSucceeded: null }))).toEqual([
+        "Not recorded: stopped before the confirm step",
+      ]);
+      expect(describeRunObjectChanges(buildActionScriptRunRecord({ confirmStepNumber: 3, confirmStepSucceeded: true }))).toEqual([]);
+      expect(describeRunObjectChanges(buildActionScriptRunRecord({ deletedObjects: [apolloSummary] }))).toEqual([
+        "Deleted Apollo 7",
+      ]);
+      expect(describeRunObjectChanges(buildActionScriptRunRecord())).toEqual([]);
+    });
+
+    it("shows the created object and the values the run used", async () => {
+      const user = userEvent.setup();
+      renderRunDetails({
+        run: buildActionScriptRunRecord({
+          createdObject: apolloSummary,
+          confirmStepNumber: 3,
+          confirmStepSucceeded: true,
+          parameterValues: [
+            { key: "projectName", label: "Project name", value: "Apollo 7" },
+            { key: "notes", label: "Notes", value: "" },
+            { broken: true },
+          ],
+        }),
+      });
+
+      expect(screen.getByLabelText("Created objects")).toHaveTextContent("Created Apollo 7");
+      await user.click(screen.getByRole("button", { name: /Values used/ }));
+      expect(screen.getByText("Project name")).toBeInTheDocument();
+      expect(screen.getByText("Apollo 7")).toBeInTheDocument();
+      expect(screen.getByText("(left blank - its steps were skipped)")).toBeInTheDocument();
+    });
+
+    it("shows no values row for a run from before parameters", () => {
+      renderRunDetails({ run: buildActionScriptRunRecord() });
+      expect(screen.queryByRole("button", { name: /Values used/ })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Created objects")).not.toBeInTheDocument();
     });
   });
 });

@@ -1,4 +1,5 @@
 import { type LatestActionScriptRunRecord } from "./useActionScripts";
+import { type ActionKindRecord, type ActionObjectRoleRecord } from "../utils/actionParameters";
 import { type JsonResourceState, useJsonResource } from "./useJsonResource";
 import { websiteItemApiUrl, websiteItemsApiUrl } from "../utils/routePaths";
 import { type WebsiteItemKind } from "../utils/websiteItemKinds";
@@ -40,6 +41,16 @@ export interface WebsiteItemRecord {
   credential?: { id: string; name: string } | null;
   /** The action list only: the action's newest script version and its newest run, or null when it has no versions. Undefined on use cases and on a single action. */
   newestScript?: NewestActionScriptRecord | null;
+  /** Actions only: the user's kind, or null to detect it. */
+  userActionKind?: ActionKindRecord | null;
+  /** Actions only: the user's object type key, or null to detect it. */
+  userObjectTypeKey?: string | null;
+  /** Actions only: the parameter the user says names a created object, or null to detect it. */
+  userNameParameterKey?: string | null;
+  /** Actions only: the user's "deletes the object" choice, or null to detect it. */
+  userDeletesObject?: boolean | null;
+  /** A single action only: what it does with an object, with the detections. Undefined on use cases and in the action list. */
+  objectRole?: ActionObjectRoleRecord;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -51,6 +62,14 @@ export interface WebsiteItemRequestBody {
   description: string;
   /** Actions only: the credential to run as, or null for logged out. Left out for use cases. */
   credentialId?: string | null;
+  /** Actions only: the kind, or null to detect it. Left out for use cases. */
+  userActionKind?: ActionKindRecord | null;
+  /** Actions only: the object type key, or null to detect it. */
+  userObjectTypeKey?: string | null;
+  /** Actions only: the parameter that names a created object, or null to detect it. */
+  userNameParameterKey?: string | null;
+  /** Actions only: whether an Object action deletes its object, or null to detect it. */
+  userDeletesObject?: boolean | null;
 }
 
 /**

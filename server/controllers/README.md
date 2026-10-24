@@ -7,9 +7,12 @@ Route registrars. One file per API section.
 | `health.ts` | `GET /api/health` |
 | `websites.ts` | `GET`/`POST /api/websites`, `GET`/`PUT`/`DELETE /api/websites/:websiteId`. The list answers each website with the dashboard's `summary: { actionCount, passedActionCount, failedActionCount, notRunActionCount, latestRunAt, latestCrawlRun }` |
 | `useCases.ts` | `GET`/`POST /api/websites/:websiteId/use-cases`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/use-cases/:useCaseId` |
-| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId }`; the credential must be one of the website's). The list answers each action with `newestScript: { id, versionNumber, actionTitle, actionDescription, credentialId, latestRun }` (or null when it has no versions) for its status, version, and "Out of date" tag |
+| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId, userActionKind, userObjectTypeKey, userNameParameterKey, userDeletesObject }`; the credential must be one of the website's; each role choice null / left out means "detect"). The list answers each action with `newestScript: { id, versionNumber, actionTitle, actionDescription, credentialId, latestRun }` (or null when it has no versions) for its status, version, and "Out of date" tag. A single action (GET, POST, PUT) also carries `objectRole`: its kind (`parameters` / `object` / `create`), object type, and "deletes", with the detections and how sure they are (see `../utils/scoreActionObjectRole.ts`). A PUT syncs the action's parameters |
 | `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
-| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run, or null) |
+| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run, or null). A run takes an optional body `{ parameterValues }` (values by parameter key - see below) and answers with the run plus `createdObject` and `deletedObjects`; convert, edit, and refine sync the action's parameters afterwards, and refine puts the failed run's values back into the plan it sends |
+| `actionParameters.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/parameters` (a version's parameters view `{ role, parameters, objectChoices, confirmStepNumber, nameParameterKey, bindableTexts, warnings }`; POST adds one of the user's own - `{ addKind: "value", ... }` or `{ addKind: "field", ... }`), `PUT`/`DELETE /api/websites/:websiteId/actions/:actionId/parameters/:parameterKey` (change a parameter's `userLabel` / `userRequiredChoice`; remove one the user added) |
+| `createdObjects.ts` | `GET /api/websites/:websiteId/created-objects` (the record of objects Create runs made), `DELETE .../created-objects/:createdObjectId` (remove one from the record) |
+| `webObjects.ts` | `GET /api/websites/:websiteId/web-objects`, `PUT .../web-objects/:webObjectId` (rename) |
 | `scriptModels.ts` | `GET /api/script-models` |
 | `crawlRuns.ts` | `GET`/`POST /api/websites/:websiteId/crawl-runs`, `GET .../crawl-runs/:crawlRunId`, `GET .../crawl-runs/:crawlRunId/pages/:crawledPageId`, `GET .../crawl-runs/:crawlRunId/login-failure-screenshot` |
 | `credentials.ts` | `GET`/`POST /api/websites/:websiteId/credentials`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/credentials/:credentialId` |
@@ -299,3 +302,25 @@ with structured outputs, newest first, each with its effort levels (empty for
 "Standard"), whether it takes adaptive thinking, and its fallback. The
 defaults are Claude Opus 5.5 at `high` when listed (both null when no model
 is usable). Without `ANTHROPIC_API_KEY` it answers `503`, like a conversion.
+
+## Action parameters
+
+An action's parameters - the values a run can change - are stored in ONE
+place, its `ActionParameter` rows (see `../prisma/schema.prisma`), kept up to
+date by `syncActionParameters` (`../services/actionParameterService.ts`) with
+no LLM. Which steps of a version use each parameter, and the value the
+version types, are read from the version's plan when its parameters are
+shown or run.
+
+- **Run values:** `POST .../runs` takes `{ parameterValues: { [key]: string } }`.
+  A key left out keeps the version's own value. `400` for an unknown key, a
+  blank required value, a value over 1000 characters or containing `{{`, an
+  object with no known address for a version that opens it by address, or a
+  plan the values make invalid. A blank optional value skips the steps that
+  use it; an added field with a value adds a step.
+- **After a run** (`followUpRecordedRun`): the parameters learn from the
+  fields the runner read; a Create run whose confirm step showed no error
+  records a `CreatedObject`; a passed deleting Object run marks the created
+  object it ran on as deleted.
+- **After a crawl:** created objects are checked against the type's list page,
+  and every action's parameters are synced.

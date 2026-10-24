@@ -6,6 +6,7 @@ import TitleDescriptionForm, {
   type TitleDescriptionFormProps,
 } from "../../src/components/TitleDescriptionForm";
 import { type WebsiteItemRequestBody } from "../../src/hooks/useWebsiteItems";
+import { buildActionObjectRoleRecord } from "./support/frontendTestHelpers";
 
 /**
  * Renders the title / description form with blank fields and spy callbacks,
@@ -235,5 +236,145 @@ describe("TitleDescriptionForm", () => {
     await user.click(getSubmitButton());
 
     expect(onSubmit).toHaveBeenCalledWith({ title: "Log in", description: "Sign in", credentialId: null });
+  });
+
+  describe("object role choices (actions)", () => {
+    /** The website's one object type. */
+    const OBJECT_TYPES = [{ key: "/projects/{project}", name: "Project" }];
+
+    /** A role detected as Create, of a Project, that does not delete. */
+    const DETECTED_CREATE_ROLE = buildActionObjectRoleRecord({
+      kind: "create",
+      detectedKind: {
+        kind: "create",
+        reason: "won",
+        confidence: "high",
+        confidenceShare: 1,
+        objectScore: 0,
+        createScore: 3,
+        evidence: ["create", "adds"],
+      },
+      objectTypeKey: "/projects/{project}",
+      objectTypeName: "Project",
+      objectTypeSource: "detected",
+      detectedObjectType: {
+        objectTypeKey: "/projects/{project}",
+        objectTypeName: "Project",
+        confidence: "high",
+        confidenceShare: 1,
+        evidence: ["project"],
+      },
+    });
+
+    /**
+     * Picks an option from one of the form's selects.
+     * @param user - The user-event session
+     * @param selectName - The select's label
+     * @param optionName - The option's text
+     */
+    async function pickOption(user: UserEvent, selectName: RegExp, optionName: string | RegExp): Promise<void> {
+      await user.click(screen.getByRole("combobox", { name: selectName }));
+      await user.click(await screen.findByRole("option", { name: optionName }));
+    }
+
+    it("starts every choice on Detect, naming what the detection picks, and submits nulls", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderTitleDescriptionForm({
+        initialValues: { ...FILLED_VALUES, credentialId: null, userNameParameterKey: "projectName" },
+        credentialOptions: CREDENTIAL_OPTIONS,
+        objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: DETECTED_CREATE_ROLE },
+      });
+
+      expect(screen.getByRole("combobox", { name: /^Kind/ })).toHaveTextContent("Detect — Create (High: create, adds)");
+      expect(screen.getByText("The action makes a new object, which each run records.")).toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: /^Object type/ })).toHaveTextContent("Detect — Project (High)");
+      // A Create action never deletes, so that choice is not offered.
+      expect(screen.queryByRole("combobox", { name: /^Deletes the object/ })).not.toBeInTheDocument();
+
+      await user.click(getSubmitButton());
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...FILLED_VALUES,
+        credentialId: null,
+        userActionKind: null,
+        userObjectTypeKey: null,
+        userNameParameterKey: "projectName",
+        userDeletesObject: null,
+      });
+    });
+
+    it("submits the kind, type, and delete choice the user picks", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderTitleDescriptionForm({
+        initialValues: { ...FILLED_VALUES, credentialId: null },
+        credentialOptions: CREDENTIAL_OPTIONS,
+        objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: DETECTED_CREATE_ROLE },
+      });
+
+      await pickOption(user, /^Kind/, "Object");
+      await pickOption(user, /^Object type/, "Project");
+      await pickOption(user, /^Deletes the object/, "Yes");
+      await user.click(getSubmitButton());
+      expect(onSubmit).toHaveBeenLastCalledWith({
+        ...FILLED_VALUES,
+        credentialId: null,
+        userActionKind: "object",
+        userObjectTypeKey: "/projects/{project}",
+        userNameParameterKey: null,
+        userDeletesObject: true,
+      });
+
+      await pickOption(user, /^Deletes the object/, "No");
+      await user.click(getSubmitButton());
+      expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ userDeletesObject: false }));
+
+      await pickOption(user, /^Kind/, "Parameters");
+      expect(screen.queryByRole("combobox", { name: /^Object type/ })).not.toBeInTheDocument();
+    });
+
+    it("keeps saved choices, including a type the latest crawl no longer finds", () => {
+      renderTitleDescriptionForm({
+        initialValues: {
+          ...FILLED_VALUES,
+          credentialId: null,
+          userActionKind: "object",
+          userObjectTypeKey: "/gone/{gone}",
+          userDeletesObject: false,
+        },
+        credentialOptions: CREDENTIAL_OPTIONS,
+        objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: null },
+      });
+
+      expect(screen.getByRole("combobox", { name: /^Kind/ })).toHaveTextContent("Object");
+      expect(screen.getByRole("combobox", { name: /^Object type/ })).toHaveTextContent(
+        "/gone/{gone} (no longer found by the latest crawl)",
+      );
+      expect(screen.getByRole("combobox", { name: /^Deletes the object/ })).toHaveTextContent("No");
+    });
+
+    it("on a new action, offers every choice before anything is detected", () => {
+      renderTitleDescriptionForm({
+        initialValues: { ...FILLED_VALUES, credentialId: null, userDeletesObject: true },
+        credentialOptions: CREDENTIAL_OPTIONS,
+        objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: null },
+      });
+
+      expect(screen.getByRole("combobox", { name: /^Kind/ })).toHaveTextContent("Detect from the title and description");
+      expect(screen.getByRole("combobox", { name: /^Object type/ })).toHaveTextContent(
+        "Detect from the title, description, and addresses",
+      );
+      expect(screen.getByRole("combobox", { name: /^Deletes the object/ })).toHaveTextContent("Yes");
+    });
+
+    it("shows the role's warnings", () => {
+      renderTitleDescriptionForm({
+        initialValues: { ...FILLED_VALUES, credentialId: null },
+        credentialOptions: CREDENTIAL_OPTIONS,
+        objectRoleChoices: {
+          objectTypes: [],
+          detectedRole: { ...DETECTED_CREATE_ROLE, warnings: ["Pick the kind of object this action works on - none was detected"] },
+        },
+      });
+      expect(screen.getByRole("alert")).toHaveTextContent("Pick the kind of object this action works on");
+    });
   });
 });

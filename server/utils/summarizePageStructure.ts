@@ -47,6 +47,32 @@ function readEntryLabel(entryText: string): string | null {
   return `${roleMatch[1]}${levelSuffix}`;
 }
 
+/** One `- ...` line of a YAML aria snapshot: how deep it is nested, and what follows its `- `. */
+export interface AriaSnapshotLine {
+  /** How deeply the line is nested: 0 at the top. */
+  depth: number;
+  /** The entry without its indentation and `- `, e.g. `heading "Title" [level=1]` or `/url: /about`. */
+  entryText: string;
+}
+
+/**
+ * Reads the `- ...` lines of a YAML aria snapshot, in order, with their depth.
+ * Lines that are not entries (continuation lines of a long text) are skipped;
+ * property entries (`- /url: ...`) are kept.
+ * @param ariaSnapshot - Playwright's YAML aria snapshot
+ * @returns Each entry line's depth and text
+ */
+export function readAriaSnapshotLines(ariaSnapshot: string): AriaSnapshotLine[] {
+  const lines: AriaSnapshotLine[] = [];
+  for (const line of ariaSnapshot.split("\n")) {
+    const entryMatch = /^(\s*)- (.*)$/.exec(line);
+    if (entryMatch === null) continue;
+    const depth = Math.floor(entryMatch[1].length / INDENT_PER_LEVEL);
+    lines.push({ depth, entryText: entryMatch[2] });
+  }
+  return lines;
+}
+
 /**
  * Reads the entries of a YAML aria snapshot, in order. Lines that are not
  * `- ...` entries (continuation lines of a long text) and property entries
@@ -56,12 +82,9 @@ function readEntryLabel(entryText: string): string | null {
  */
 function readSnapshotEntries(ariaSnapshot: string): SnapshotEntry[] {
   const entries: SnapshotEntry[] = [];
-  for (const line of ariaSnapshot.split("\n")) {
-    const entryMatch = /^(\s*)- (.*)$/.exec(line);
-    if (entryMatch === null) continue;
-    const label = readEntryLabel(entryMatch[2]);
+  for (const { depth, entryText } of readAriaSnapshotLines(ariaSnapshot)) {
+    const label = readEntryLabel(entryText);
     if (label === null) continue;
-    const depth = Math.floor(entryMatch[1].length / INDENT_PER_LEVEL);
     entries.push({ depth, label });
   }
   return entries;

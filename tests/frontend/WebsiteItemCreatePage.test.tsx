@@ -57,6 +57,9 @@ function renderWebsiteItemCreatePage(routerStart: RouterStart): RenderResult {
   );
 }
 
+/** What an action form sends for its object role when every choice is left on "Detect". */
+const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null, userDeletesObject: null };
+
 /**
  * Stubs a successful load of the owning website and its credentials, plus
  * any extra or replacement routes.
@@ -99,7 +102,7 @@ describe.each(ITEM_KIND_TEST_CASES)(
     const itemsApiUrl = `${WEBSITE_API_URL}/${segment}`;
     const submitLabel = `Create ${singularLabel}`;
     /** What the create request adds for this kind: an action says who it logs in as (nobody, by default). */
-    const expectedCredentialFields = segment === "actions" ? { credentialId: null } : {};
+    const expectedCredentialFields = segment === "actions" ? { credentialId: null, ...DETECT_EVERY_ROLE_CHOICE } : {};
 
     /** History as it is after clicking "New ..." on the website's page. */
     const openedFromWebsite: RouterStart = {
@@ -332,7 +335,7 @@ describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
     expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: "credential-1" }),
+      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: "credential-1", ...DETECT_EVERY_ROLE_CHOICE }),
     });
   });
 
@@ -352,7 +355,7 @@ describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
     expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: null }),
+      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE }),
     });
   });
 });

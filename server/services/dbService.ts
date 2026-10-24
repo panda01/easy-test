@@ -1,6 +1,6 @@
 import {
   PrismaClient,
-  type Prisma,
+  Prisma,
   type Website,
   type UseCase,
   type Action,
@@ -13,6 +13,8 @@ import {
   type Credential,
   type WebObject,
   type PagePattern,
+  type ActionParameter,
+  type CreatedObject,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import type { CrawlButtonMode } from "../utils/crawlButtonModes.js";
@@ -23,6 +25,24 @@ import type {
   PatternDetectionMethod,
 } from "../utils/detectPagePatterns.js";
 import type { NewStructureSkeleton } from "../utils/crawlPatternSampling.js";
+import { readStoredFormFields, type FormField } from "../utils/formFields.js";
+import {
+  PARAMETER_FOUND_BY,
+  PARAMETER_KINDS,
+  PARAMETER_SOURCES,
+  PARAMETER_STEP_ACTIONS,
+  PARAMETER_USE_FIELDS,
+  REQUIRED_CHOICES,
+  chooseFreeKey,
+  readStoredTarget,
+  toParameterKey,
+  type ActionParameterRecord,
+  type ParameterUseField,
+  type RequiredChoice,
+  type UsedParameterValue,
+} from "../utils/actionParameters.js";
+import type { DetectedParameter } from "../utils/detectActionParameters.js";
+import type { PlanTarget } from "../utils/actionPlanSchema.js";
 
 export type {
   Website,
@@ -37,6 +57,8 @@ export type {
   Credential,
   WebObject,
   PagePattern,
+  ActionParameter,
+  CreatedObject,
 };
 
 /**
@@ -95,6 +117,14 @@ export type UseCaseInput = TitleDescriptionInput;
 export interface ActionInput extends TitleDescriptionInput {
   /** The credential the action logs in as before each run, or null to run logged out. */
   credentialId: string | null;
+  /** The user's kind (`parameters`, `object`, `create`), or null to detect it. */
+  userActionKind: string | null;
+  /** The user's object type (a web object's `instancePatternKey`), or null to detect it. */
+  userObjectTypeKey: string | null;
+  /** The parameter the user says names a created object, or null to detect it. */
+  userNameParameterKey: string | null;
+  /** The user's "deletes the object" choice, or null to detect it. */
+  userDeletesObject: boolean | null;
 }
 
 /** An action as the API returns it: the row plus the id and name of the credential it runs as. */
@@ -318,6 +348,14 @@ export interface ActionScriptRunInput {
   failingPageAriaSnapshot: string | null;
   /** How long the run took, in milliseconds. */
   durationMs: number;
+  /** The values the run used, secrets left out ("" for a blank one). */
+  parameterValues: UsedParameterValue[];
+  /** The address the browser was on when the run ended (credential values scrubbed), or null. */
+  finalPageUrl: string | null;
+  /** A Create run's confirm step, or null. */
+  confirmStepNumber: number | null;
+  /** Whether that step ran without an error showing; null when the run never reached it (or has none). */
+  confirmStepSucceeded: boolean | null;
 }
 
 /**
@@ -437,6 +475,8 @@ export interface CrawledPageInput {
   ariaSnapshot: string | null;
   /** Every same-origin link found on the page, normalized. */
   linkedUrls: string[];
+  /** The page's visible form fields, read in the browser (see `readRawFormFields`). */
+  formFields: FormField[];
   /** How long visiting the page took, in milliseconds. */
   durationMs: number;
 }
@@ -477,7 +517,7 @@ export type CredentialSummary = Omit<Credential, "encryptedPassword">;
  * polls that list while the crawl runs. The full page comes from
  * `findCrawledPageForRun`.
  */
-export type CrawledPageSummary = Omit<CrawledPage, "ariaSnapshot" | "linkedUrls" | "buttonUrls">;
+export type CrawledPageSummary = Omit<CrawledPage, "ariaSnapshot" | "linkedUrls" | "buttonUrls" | "formFields">;
 
 /**
  * Checks whether a thrown value carries the given Prisma error code.
@@ -729,9 +769,10 @@ export async function updateWebsite(
 /**
  * Soft deletes an active website AND its active use cases, actions, screenshot
  * runs, action scripts, action script runs, action script refinements, crawl
- * runs, crawled pages, credentials, web objects, and page patterns.
+ * runs, crawled pages, credentials, web objects, page patterns, action
+ * parameters, and created objects.
  *
- * All twelve updates run in one transaction and share one `deletedAt`
+ * All fourteen updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
@@ -799,6 +840,14 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.webObject.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionParameter.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.createdObject.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1044,12 +1093,13 @@ export async function updateActionForWebsite(
 }
 
 /**
- * Soft deletes one active action AND its active scripts, script runs, and
- * script refinements.
+ * Soft deletes one active action AND its active scripts, script runs, script
+ * refinements, and parameters. Its created objects are KEPT: they are still
+ * on the website, and the record says what to clean up.
  *
- * All four updates run in one transaction and share one `deletedAt`
+ * All five updates run in one transaction and share one `deletedAt`
  * timestamp, like `softDeleteWebsite`. When no active action matched, the
- * scripts, runs, and refinements are left untouched.
+ * scripts, runs, refinements, and parameters are left untouched.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
  * @returns True when an active action was deleted; false when none matched
@@ -1088,6 +1138,10 @@ export async function softDeleteActionForWebsite(
       data: { deletedAt },
     });
     await transaction.actionScriptRefinement.updateMany({
+      where: { actionId, websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionParameter.updateMany({
       where: { actionId, websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1269,7 +1323,33 @@ export async function createRefinedActionScriptForAction(
 // === Action script runs ===
 
 /**
- * Lists a script's active runs, newest first.
+ * What the run reads bring along: the object a Create run made (when it is
+ * still in the record) and the created objects a deleting run marked
+ * deleted - each cut down to what the run details show.
+ */
+const ACTION_SCRIPT_RUN_OBJECTS_INCLUDE = {
+  createdObject: {
+    where: { deletedAt: null },
+    select: { id: true, name: true, url: true, objectTypeName: true },
+  },
+  deletedObjects: {
+    where: { deletedAt: null },
+    select: { id: true, name: true, url: true, objectTypeName: true },
+  },
+} as const;
+
+/**
+ * A script run as the run list returns it: the row plus `createdObject` (the
+ * object it made, or null) and `deletedObjects` (the created objects it
+ * deleted on the site).
+ */
+export type ActionScriptRunWithObjects = Prisma.ActionScriptRunGetPayload<{
+  include: typeof ACTION_SCRIPT_RUN_OBJECTS_INCLUDE;
+}>;
+
+/**
+ * Lists a script's active runs, newest first, each with the object it
+ * created and the created objects it deleted.
  * @param websiteId - The owning website's cuid
  * @param actionId - The owning action's cuid
  * @param actionScriptId - The script's cuid
@@ -1279,12 +1359,32 @@ export async function listActionScriptRunsForScript(
   websiteId: string,
   actionId: string,
   actionScriptId: string,
-): Promise<ActionScriptRun[]> {
+): Promise<ActionScriptRunWithObjects[]> {
   const actionScriptRuns = await prisma.actionScriptRun.findMany({
     where: { websiteId, actionId, actionScriptId, deletedAt: null },
     orderBy: { createdAt: "desc" },
+    include: ACTION_SCRIPT_RUN_OBJECTS_INCLUDE,
   });
   return actionScriptRuns;
+}
+
+/**
+ * Looks up one active script run with the object it created and the created
+ * objects it deleted - what the run route answers with once its follow-up
+ * (recording what it created or deleted) is done.
+ * @param websiteId - The owning website's cuid
+ * @param actionScriptRunId - The run's cuid
+ * @returns The run, or null when it does not exist or was soft deleted
+ */
+export async function findActionScriptRunWithObjects(
+  websiteId: string,
+  actionScriptRunId: string,
+): Promise<ActionScriptRunWithObjects | null> {
+  const actionScriptRun = await prisma.actionScriptRun.findFirst({
+    where: { id: actionScriptRunId, websiteId, deletedAt: null },
+    include: ACTION_SCRIPT_RUN_OBJECTS_INCLUDE,
+  });
+  return actionScriptRun;
 }
 
 /**
@@ -1325,7 +1425,7 @@ export async function createActionScriptRunForScript(
   data: ActionScriptRunInput,
 ): Promise<ActionScriptRun> {
   const created = await prisma.actionScriptRun.create({
-    data: { ...data, websiteId, actionId, actionScriptId },
+    data: { ...data, parameterValues: data.parameterValues.map((usedValue) => ({ ...usedValue })), websiteId, actionId, actionScriptId },
   });
   return created;
 }
@@ -1442,7 +1542,7 @@ export async function recordCrawledPage(
       return null;
     }
     const created = await transaction.crawledPage.create({
-      data: { ...data, crawlRunId, websiteId },
+      data: { ...data, formFields: data.formFields.map((formField) => ({ ...formField })), crawlRunId, websiteId },
     });
     return created;
   };
@@ -1572,7 +1672,7 @@ export async function listCrawledPageSummariesForRun(
   const pageSummaries = await prisma.crawledPage.findMany({
     where: { websiteId, crawlRunId, deletedAt: null },
     orderBy: { visitOrder: "asc" },
-    omit: { ariaSnapshot: true, linkedUrls: true, buttonUrls: true },
+    omit: { ariaSnapshot: true, linkedUrls: true, buttonUrls: true, formFields: true },
   });
   return pageSummaries;
 }
@@ -1896,6 +1996,712 @@ export async function renameWebObject(
       return null;
     }
     throw error;
+  }
+}
+
+// === Crawled pages for parameters ===
+// Detection and the object choices read only the few pages they need from
+// the latest crawl, never every snapshot of it.
+
+/** One crawled page as parameter detection reads it. */
+export interface CrawledPageFields {
+  /** The page's identity (origin + path). */
+  url: string;
+  /** Its `<title>`, or null. */
+  title: string | null;
+  /** Its aria snapshot, or null. */
+  ariaSnapshot: string | null;
+  /** The form fields the crawler read (empty for pages crawled before it did). */
+  formFields: FormField[];
+}
+
+/** Some pages of one crawl run, with when the crawl ran. */
+export interface CrawlRunPages {
+  /** The crawl run's cuid, or null when the website was never crawled. */
+  crawlRunId: string | null;
+  /** When that crawl started, or null. */
+  crawledAt: Date | null;
+  /** The pages. */
+  pages: CrawledPageFields[];
+}
+
+/**
+ * Picks the crawl run the parameter reads use - the same one
+ * `findLatestCrawledPagesForWebsite` picks: the newest finished crawl with
+ * pages done the way the action runs (logged in as its credential, or
+ * logged out), else the newest of any kind.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The action's credential, or null when it runs logged out
+ * @returns The run's id and start, or null when the website was never crawled
+ */
+async function findParameterCrawlRun(
+  websiteId: string,
+  credentialId: string | null,
+): Promise<{ id: string; createdAt: Date } | null> {
+  const actionRunsLoggedIn = credentialId !== null;
+  const sameWayFilter: Prisma.CrawlRunWhereInput = actionRunsLoggedIn
+    ? { credentialId, isLoggedIn: true }
+    : { credentialId: null };
+  const crawlRunId =
+    (await findNewestCrawlRunWithPages(websiteId, sameWayFilter)) ??
+    (await findNewestCrawlRunWithPages(websiteId, {}));
+  if (crawlRunId === null) return null;
+  const crawlRun = await prisma.crawlRun.findFirst({
+    where: { id: crawlRunId, websiteId },
+    select: { id: true, createdAt: true },
+  });
+  return crawlRun;
+}
+
+/**
+ * Reads the pages of one crawl run whose address passes a test: first only
+ * every page's address, then the snapshots and form fields of the pages
+ * that pass - so a crawl's other snapshots are never loaded.
+ * @param websiteId - The owning website's cuid
+ * @param crawlRunId - The crawl run's cuid
+ * @param keepPage - Decides from a page's address whether it is read
+ * @returns The pages that passed, in visiting order
+ */
+export async function readCrawlRunPagesMatching(
+  websiteId: string,
+  crawlRunId: string,
+  keepPage: (pageUrl: string) => boolean,
+): Promise<CrawledPageFields[]> {
+  const pageAddresses = await prisma.crawledPage.findMany({
+    where: { websiteId, crawlRunId, deletedAt: null, succeeded: true },
+    orderBy: { visitOrder: "asc" },
+    select: { id: true, url: true },
+  });
+  const keptPageIds = pageAddresses.filter((page) => keepPage(page.url)).map((page) => page.id);
+  if (keptPageIds.length === 0) return [];
+  const pages = await prisma.crawledPage.findMany({
+    where: { id: { in: keptPageIds }, websiteId, deletedAt: null },
+    orderBy: { visitOrder: "asc" },
+    select: { url: true, title: true, ariaSnapshot: true, formFields: true },
+  });
+  return pages.map((page) => ({ ...page, formFields: readStoredFormFields(page.formFields) }));
+}
+
+/**
+ * Reads the pages of the latest crawl (see `findParameterCrawlRun`) whose
+ * address passes a test.
+ * @param websiteId - The owning website's cuid
+ * @param credentialId - The action's credential, or null when it runs logged out
+ * @param keepPage - Decides from a page's address whether it is read
+ * @returns The crawl run, when it started, and the pages that passed
+ */
+export async function findLatestCrawlPagesMatching(
+  websiteId: string,
+  credentialId: string | null,
+  keepPage: (pageUrl: string) => boolean,
+): Promise<CrawlRunPages> {
+  const crawlRun = await findParameterCrawlRun(websiteId, credentialId);
+  if (crawlRun === null) return { crawlRunId: null, crawledAt: null, pages: [] };
+  const pages = await readCrawlRunPagesMatching(websiteId, crawlRun.id, keepPage);
+  return { crawlRunId: crawlRun.id, crawledAt: crawlRun.createdAt, pages };
+}
+
+// === Action parameters ===
+// The ONE place an action's parameters are stored (see the `ActionParameter`
+// model). Detected rows are written only by `saveSyncedActionParameters`; the
+// user's own rows and columns only by the functions after it.
+
+/** One version of an action, as the parameter sync reads it. */
+export interface ParameterVersion {
+  /** The version's cuid. */
+  id: string;
+  /** Its plan. */
+  plan: ActionPlan;
+  /** The crawled pages Claude was shown for it. */
+  contextPageUrls: string[];
+}
+
+/** What the parameter sync reads about an action, besides the crawl. */
+export interface ActionParameterSyncInputs {
+  /** The action's live versions, newest first. */
+  versions: ParameterVersion[];
+  /** The aria snapshots of the pages its newest failed runs stopped on. */
+  failingPageSnapshots: { url: string | null; ariaSnapshot: string }[];
+  /** The keys of the user's own rows (removed ones too), which detection may not use. */
+  reservedKeys: string[];
+}
+
+/** How many failed runs' snapshots the parameter sync reads. */
+const MAX_FAILING_SNAPSHOTS_READ = 10;
+
+/**
+ * Reads a stored list of strings, keeping only known values.
+ * @param storedValues - The column's value
+ * @param knownValues - The values allowed
+ * @returns The known values, in order
+ */
+function keepKnownValues<TValue extends string>(storedValues: string[], knownValues: readonly TValue[]): TValue[] {
+  return storedValues.flatMap((storedValue) => knownValues.filter((knownValue) => knownValue === storedValue));
+}
+
+/**
+ * Reads one stored value, keeping it only when it is known.
+ * @param storedValue - The column's value
+ * @param knownValues - The values allowed
+ * @returns The value, or null when it is not one of them
+ */
+function readKnownValue<TValue extends string>(storedValue: string | null, knownValues: readonly TValue[]): TValue | null {
+  return knownValues.find((knownValue) => knownValue === storedValue) ?? null;
+}
+
+/**
+ * Turns a parameter row into the shape the parameter logic reads: its JSON
+ * target parsed, and every value column narrowed to its known values.
+ * @param row - An `ActionParameter` row
+ * @returns The record
+ */
+export function toActionParameterRecord(row: ActionParameter): ActionParameterRecord {
+  return {
+    id: row.id,
+    key: row.key,
+    kind: readKnownValue(row.kind, PARAMETER_KINDS) ?? "text",
+    source: readKnownValue(row.source, PARAMETER_SOURCES) ?? "steps",
+    foundBy: keepKnownValues(row.foundBy, PARAMETER_FOUND_BY),
+    isSecret: row.isSecret,
+    label: row.label,
+    userLabel: row.userLabel,
+    fieldTarget: readStoredTarget(row.fieldTarget),
+    fieldRole: row.fieldRole,
+    inputType: row.inputType,
+    placeholder: row.placeholder,
+    stepAction: readKnownValue(row.stepAction, PARAMETER_STEP_ACTIONS),
+    pageUrl: row.pageUrl,
+    containerName: row.containerName,
+    besideKeys: row.besideKeys,
+    fillAfterKey: row.fillAfterKey,
+    userRequiredChoice: readKnownValue(row.userRequiredChoice, REQUIRED_CHOICES),
+    runIsRequired: row.runIsRequired,
+    runReadAt: row.runReadAt,
+    crawlIsRequired: row.crawlIsRequired,
+    crawlReadAt: row.crawlReadAt,
+    objectTypeKey: row.objectTypeKey,
+    matchText: row.matchText,
+    matchFields: keepKnownValues(row.matchFields, PARAMETER_USE_FIELDS),
+  };
+}
+
+/**
+ * Lists an action's active parameter rows, oldest first.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @returns The rows, as records
+ */
+export async function listActionParametersForAction(
+  websiteId: string,
+  actionId: string,
+): Promise<ActionParameterRecord[]> {
+  const rows = await prisma.actionParameter.findMany({
+    where: { websiteId, actionId, deletedAt: null },
+    orderBy: { createdAt: "asc" },
+  });
+  return rows.map(toActionParameterRecord);
+}
+
+/**
+ * Reads what the parameter sync needs about an action besides the crawl:
+ * its live versions (newest first), the snapshots of its newest failed runs'
+ * pages, and the keys of the user's own rows.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @returns The inputs
+ */
+export async function findActionParameterSyncInputs(
+  websiteId: string,
+  actionId: string,
+): Promise<ActionParameterSyncInputs> {
+  const versionRows = await prisma.actionScript.findMany({
+    where: { websiteId, actionId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, plan: true, contextPageUrls: true },
+  });
+  const versions = versionRows.flatMap((versionRow) => {
+    const planParse = parseActionPlan(versionRow.plan);
+    return planParse.isValid
+      ? [{ id: versionRow.id, plan: planParse.input, contextPageUrls: versionRow.contextPageUrls }]
+      : [];
+  });
+  const failedRuns = await prisma.actionScriptRun.findMany({
+    where: { websiteId, actionId, deletedAt: null, failingPageAriaSnapshot: { not: null } },
+    orderBy: { createdAt: "desc" },
+    take: MAX_FAILING_SNAPSHOTS_READ,
+    select: { failingPageUrl: true, failingPageAriaSnapshot: true },
+  });
+  const failingPageSnapshots = failedRuns.flatMap((failedRun) =>
+    failedRun.failingPageAriaSnapshot === null
+      ? []
+      : [{ url: failedRun.failingPageUrl, ariaSnapshot: failedRun.failingPageAriaSnapshot }],
+  );
+  const yourRows = await prisma.actionParameter.findMany({
+    where: { websiteId, actionId, source: "you" },
+    select: { key: true },
+  });
+  return { versions, failingPageSnapshots, reservedKeys: yourRows.map((yourRow) => yourRow.key) };
+}
+
+/**
+ * Reads the plan of an action's newest live version - what the action's
+ * object role detection compares addresses with.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @returns The plan, or null when the action has no versions (or its newest plan does not parse)
+ */
+export async function findNewestActionPlan(websiteId: string, actionId: string): Promise<ActionPlan | null> {
+  const newestVersion = await prisma.actionScript.findFirst({
+    where: { websiteId, actionId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    select: { plan: true },
+  });
+  if (newestVersion === null) return null;
+  const planParse = parseActionPlan(newestVersion.plan);
+  return planParse.isValid ? planParse.input : null;
+}
+
+/** When the readings a sync writes were taken. */
+export interface ParameterReadingTimes {
+  /** When the crawl that was read started, or null when none was read. */
+  crawlReadAt: Date | null;
+  /** When the run that triggered the sync finished, or null when no run did. */
+  runReadAt: Date | null;
+}
+
+/**
+ * Builds the columns a detected row writes - everything but the user's
+ * columns, which a sync never touches. The run's reading is only written
+ * when the run read the field, so an older reading is kept otherwise; a
+ * run-found `foundBy` is kept too.
+ * @param detected - The detected row
+ * @param existingFoundBy - The stored row's `foundBy`, or empty for a new row
+ * @param readingTimes - When the readings were taken
+ * @returns The columns to write
+ */
+function buildDetectedParameterColumns(
+  detected: DetectedParameter,
+  existingFoundBy: string[],
+  readingTimes: ParameterReadingTimes,
+): Prisma.ActionParameterUncheckedUpdateInput {
+  const keptRunFoundBy = existingFoundBy.includes("run") && !detected.foundBy.includes("run") ? ["run"] : [];
+  const runReadingWasTaken = detected.runIsRequired !== undefined;
+  return {
+    kind: detected.kind,
+    source: detected.source,
+    foundBy: [...detected.foundBy, ...keptRunFoundBy],
+    isSecret: detected.isSecret,
+    label: detected.label,
+    fieldTarget: detected.fieldTarget === null ? Prisma.DbNull : { ...detected.fieldTarget },
+    fieldRole: detected.fieldRole,
+    inputType: detected.inputType,
+    placeholder: detected.placeholder,
+    stepAction: detected.stepAction,
+    pageUrl: detected.pageUrl,
+    containerName: detected.containerName,
+    besideKeys: detected.besideKeys,
+    fillAfterKey: detected.fillAfterKey,
+    crawlIsRequired: detected.crawlIsRequired,
+    crawlReadAt: detected.crawlIsRequired === null ? null : readingTimes.crawlReadAt,
+    objectTypeKey: detected.objectTypeKey,
+    deletedAt: null,
+    ...(runReadingWasTaken ? { runIsRequired: detected.runIsRequired, runReadAt: readingTimes.runReadAt } : {}),
+  };
+}
+
+/**
+ * Saves what a parameter sync detected, in one transaction:
+ * - each detected row is created, or updated by key (a soft-deleted row
+ *   comes back) - never its user columns (`userLabel`,
+ *   `userRequiredChoice`), and never a user's own row;
+ * - each active detected row detection no longer produces is soft deleted,
+ *   except a `page` row a run found (the crawler never opens dialogs, so a
+ *   crawl's silence says nothing about it);
+ * - the action's `parametersSyncedAt` is stamped.
+ * Its first write is the stamp, with the action's `deletedAt: null` in its
+ * condition, which serialises it with `softDeleteActionForWebsite`: when the
+ * action is gone, nothing is written.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param detectedRows - The rows detection says the action should have
+ * @param readingTimes - When the crawl and run readings were taken
+ * @returns True when saved; false when the action is no longer active
+ */
+export async function saveSyncedActionParameters(
+  websiteId: string,
+  actionId: string,
+  detectedRows: DetectedParameter[],
+  readingTimes: ParameterReadingTimes,
+): Promise<boolean> {
+  /**
+   * The transaction body. Declared with an explicit parameter type because
+   * the overloaded `$transaction` signature does not contextually type an
+   * inline callback (tsc reports an implicit any).
+   * @param transaction - The transaction-scoped Prisma client
+   * @returns True when saved; false when the action is no longer active
+   */
+  const saveInsideTransaction = async (transaction: Prisma.TransactionClient): Promise<boolean> => {
+    const syncedAt = new Date();
+    const actionLock = await transaction.action.updateMany({
+      where: { id: actionId, websiteId, deletedAt: null },
+      data: { parametersSyncedAt: syncedAt },
+    });
+    const actionIsNoLongerActive = actionLock.count === 0;
+    if (actionIsNoLongerActive) return false;
+
+    const existingRows = await transaction.actionParameter.findMany({ where: { websiteId, actionId } });
+    const existingRowsByKey = new Map(existingRows.map((existingRow) => [existingRow.key, existingRow]));
+    for (const detected of detectedRows) {
+      const existingRow = existingRowsByKey.get(detected.key);
+      if (existingRow?.source === "you") continue;
+      const columns = buildDetectedParameterColumns(detected, existingRow?.foundBy ?? [], readingTimes);
+      if (existingRow === undefined) {
+        await transaction.actionParameter.create({
+          data: { ...(columns as Prisma.ActionParameterUncheckedCreateInput), websiteId, actionId, key: detected.key },
+        });
+      } else {
+        await transaction.actionParameter.update({ where: { id: existingRow.id }, data: columns });
+      }
+    }
+
+    const detectedKeys = new Set(detectedRows.map((detected) => detected.key));
+    const vanishedRowIds = existingRows
+      .filter((existingRow) => {
+        const rowIsActiveAndDetected = existingRow.deletedAt === null && existingRow.source !== "you";
+        const runFoundThisPageField = existingRow.source === "page" && existingRow.foundBy.includes("run");
+        return rowIsActiveAndDetected && !detectedKeys.has(existingRow.key) && !runFoundThisPageField;
+      })
+      .map((existingRow) => existingRow.id);
+    if (vanishedRowIds.length > 0) {
+      await transaction.actionParameter.updateMany({
+        where: { id: { in: vanishedRowIds } },
+        data: { deletedAt: syncedAt },
+      });
+    }
+    return true;
+  };
+
+  const parametersWereSaved = await prisma.$transaction(saveInsideTransaction);
+  return parametersWereSaved;
+}
+
+/** The user's changes to one parameter. */
+export interface ActionParameterChoicesInput {
+  /** The user's name for it, or null for the worked-out one. */
+  userLabel: string | null;
+  /** Required or optional, or null to let the page decide. */
+  userRequiredChoice: RequiredChoice | null;
+}
+
+/**
+ * Saves the user's changes to one active parameter (any source).
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param parameterKey - The parameter's key
+ * @param choices - The user's label and required choice (null clears each)
+ * @returns The updated row, or null when no active parameter of that action has the key
+ */
+export async function setActionParameterChoices(
+  websiteId: string,
+  actionId: string,
+  parameterKey: string,
+  choices: ActionParameterChoicesInput,
+): Promise<ActionParameterRecord | null> {
+  const parameterUpdate = await prisma.actionParameter.updateMany({
+    where: { websiteId, actionId, key: parameterKey, deletedAt: null },
+    data: choices,
+  });
+  const noActiveParameterMatched = parameterUpdate.count === 0;
+  if (noActiveParameterMatched) return null;
+  const updated = await prisma.actionParameter.findFirst({
+    where: { websiteId, actionId, key: parameterKey, deletedAt: null },
+  });
+  return updated === null ? null : toActionParameterRecord(updated);
+}
+
+/** A parameter the user adds: a value in the steps, or a field the steps don't fill. */
+export type UserActionParameterInput =
+  | {
+      /** A literal of the steps to make a parameter of. */
+      addKind: "value";
+      /** Its name. */
+      label: string;
+      /** Required or optional (an object one is always required). */
+      requiredChoice: RequiredChoice;
+      /** Text, or which object (with its type). */
+      valueKind: "text" | "object";
+      /** The object type, for an object one. */
+      objectTypeKey: string | null;
+      /** The literal. */
+      matchText: string;
+      /** Where it may appear. */
+      matchFields: ParameterUseField[];
+    }
+  | {
+      /** A field to type into after a parameter's step. */
+      addKind: "field";
+      /** Its name. */
+      label: string;
+      /** Required or optional. */
+      requiredChoice: RequiredChoice;
+      /** How to find the field. */
+      fieldTarget: PlanTarget;
+      /** Typed or picked. */
+      stepAction: "fill" | "selectOption";
+      /** The parameter it is typed after. */
+      fillAfterKey: string;
+    };
+
+/**
+ * Adds one of the user's own parameters (`source: "you"`), keyed after its
+ * label - numbered when that key is taken (by any row, removed ones too).
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param data - What the user added
+ * @returns The new row
+ */
+export async function addUserActionParameter(
+  websiteId: string,
+  actionId: string,
+  data: UserActionParameterInput,
+): Promise<ActionParameterRecord> {
+  const takenKeyRows = await prisma.actionParameter.findMany({ where: { actionId }, select: { key: true } });
+  const takenKeys = new Set(takenKeyRows.map((takenKeyRow) => takenKeyRow.key));
+  const key = chooseFreeKey(toParameterKey(data.label), takenKeys);
+  const sharedColumns = {
+    websiteId,
+    actionId,
+    key,
+    source: "you",
+    foundBy: ["you"],
+    label: data.label,
+    isSecret: false,
+  };
+  const created =
+    data.addKind === "value"
+      ? await prisma.actionParameter.create({
+          data: {
+            ...sharedColumns,
+            kind: data.valueKind,
+            userRequiredChoice: data.valueKind === "object" ? "required" : data.requiredChoice,
+            objectTypeKey: data.valueKind === "object" ? data.objectTypeKey : null,
+            matchText: data.matchText,
+            matchFields: data.matchFields,
+          },
+        })
+      : await prisma.actionParameter.create({
+          data: {
+            ...sharedColumns,
+            kind: data.stepAction === "selectOption" ? "option" : "text",
+            userRequiredChoice: data.requiredChoice,
+            fieldTarget: { ...data.fieldTarget },
+            stepAction: data.stepAction,
+            fillAfterKey: data.fillAfterKey,
+          },
+        });
+  return toActionParameterRecord(created);
+}
+
+/** What happened to a request to remove a parameter. */
+export type ParameterRemoval = "removed" | "notFound" | "notYours";
+
+/**
+ * Removes (soft deletes) one of the user's own parameters. A detected one
+ * cannot be removed - only its user columns cleared.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param parameterKey - The parameter's key
+ * @returns `removed`, `notFound` (no active parameter has the key), or `notYours` (it was detected)
+ */
+export async function removeUserActionParameter(
+  websiteId: string,
+  actionId: string,
+  parameterKey: string,
+): Promise<ParameterRemoval> {
+  const parameter = await prisma.actionParameter.findFirst({
+    where: { websiteId, actionId, key: parameterKey, deletedAt: null },
+    select: { id: true, source: true },
+  });
+  if (parameter === null) return "notFound";
+  if (parameter.source !== "you") return "notYours";
+  await prisma.actionParameter.update({ where: { id: parameter.id }, data: { deletedAt: new Date() } });
+  return "removed";
+}
+
+/**
+ * Lists a website's active actions with what the parameter sync needs.
+ * @param websiteId - The owning website's cuid
+ * @returns Each action's id
+ */
+export async function listActionIdsForWebsite(websiteId: string): Promise<string[]> {
+  const actions = await prisma.action.findMany({
+    where: { websiteId, deletedAt: null },
+    select: { id: true },
+  });
+  return actions.map((action) => action.id);
+}
+
+// === Created objects ===
+// The record of the objects Create actions made. A row is never deleted by a
+// crawl - only marked - and survives its action's deletion.
+
+/** The fields a caller supplies when recording one created object. */
+export interface CreatedObjectInput {
+  /** The Create action. */
+  actionId: string;
+  /** The version that ran. */
+  actionScriptId: string;
+  /** The run that made it. */
+  actionScriptRunId: string;
+  /** Its type (`instancePatternKey`), or null when the action had none. */
+  objectTypeKey: string | null;
+  /** That type's name then, or null. */
+  objectTypeName: string | null;
+  /** The name the run typed. */
+  name: string;
+  /** Its own page, or null. */
+  url: string | null;
+}
+
+/** What the created object reads bring along: the action that made it, and the run that deleted it. */
+const CREATED_OBJECT_INCLUDE = {
+  action: { select: { id: true, title: true, deletedAt: true } },
+  deletedByActionScriptRun: {
+    select: { id: true, actionId: true, actionScriptId: true, createdAt: true, action: { select: { title: true } } },
+  },
+} as const;
+
+/** A created object as its reads return it. */
+export type CreatedObjectWithSources = Prisma.CreatedObjectGetPayload<{ include: typeof CREATED_OBJECT_INCLUDE }>;
+
+/**
+ * Records one object a Create run made.
+ * @param websiteId - The owning website's cuid
+ * @param data - The run, the type, the name, and the address
+ * @returns The created row
+ */
+export async function createCreatedObject(websiteId: string, data: CreatedObjectInput): Promise<CreatedObject> {
+  const created = await prisma.createdObject.create({ data: { ...data, websiteId } });
+  return created;
+}
+
+/**
+ * Lists a website's created objects still in the record (not removed by the
+ * user), newest first, each with the action that made it and the run that
+ * deleted it (if one did).
+ * @param websiteId - The owning website's cuid
+ * @returns The rows
+ */
+export async function listCreatedObjectsForWebsite(websiteId: string): Promise<CreatedObjectWithSources[]> {
+  const createdObjects = await prisma.createdObject.findMany({
+    where: { websiteId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    include: CREATED_OBJECT_INCLUDE,
+  });
+  return createdObjects;
+}
+
+/**
+ * Lists the created objects of one type that can still be chosen: in the
+ * record, not marked Not seen, and not deleted on the site - newest first.
+ * @param websiteId - The owning website's cuid
+ * @param objectTypeKey - The type's key
+ * @returns The rows
+ */
+export async function listChoosableCreatedObjects(
+  websiteId: string,
+  objectTypeKey: string,
+): Promise<CreatedObjectWithSources[]> {
+  const createdObjects = await prisma.createdObject.findMany({
+    where: { websiteId, objectTypeKey, deletedAt: null, notSeenSince: null, deletedOnSiteAt: null },
+    orderBy: { createdAt: "desc" },
+    include: CREATED_OBJECT_INCLUDE,
+  });
+  return createdObjects;
+}
+
+/**
+ * Removes a created object from the record (soft delete).
+ * @param websiteId - The owning website's cuid
+ * @param createdObjectId - The row's cuid
+ * @returns True when an active row was removed; false when none matched
+ */
+export async function removeCreatedObject(websiteId: string, createdObjectId: string): Promise<boolean> {
+  const createdObjectUpdate = await prisma.createdObject.updateMany({
+    where: { id: createdObjectId, websiteId, deletedAt: null },
+    data: { deletedAt: new Date() },
+  });
+  return createdObjectUpdate.count > 0;
+}
+
+/**
+ * Records that a passed run of a deleting Object action deleted a created
+ * object on the site. A row already marked keeps its first mark.
+ * @param websiteId - The owning website's cuid
+ * @param createdObjectId - The row's cuid
+ * @param actionScriptRunId - The deleting run
+ * @returns True when the row was marked
+ */
+export async function markCreatedObjectDeletedByRun(
+  websiteId: string,
+  createdObjectId: string,
+  actionScriptRunId: string,
+): Promise<boolean> {
+  const createdObjectUpdate = await prisma.createdObject.updateMany({
+    where: { id: createdObjectId, websiteId, deletedAt: null, deletedOnSiteAt: null },
+    data: { deletedOnSiteAt: new Date(), deletedByActionScriptRunId: actionScriptRunId },
+  });
+  return createdObjectUpdate.count > 0;
+}
+
+/**
+ * Lists the created objects a crawl checks: in the record and not deleted on
+ * the site (a run's delete mark is never cleared by a crawl).
+ * @param websiteId - The owning website's cuid
+ * @returns The rows, with their type and address
+ */
+export async function listCreatedObjectsToCheck(websiteId: string): Promise<CreatedObject[]> {
+  const createdObjects = await prisma.createdObject.findMany({
+    where: { websiteId, deletedAt: null, deletedOnSiteAt: null, objectTypeKey: { not: null } },
+  });
+  return createdObjects;
+}
+
+/** One created object a crawl checked. */
+export interface CreatedObjectCheck {
+  /** The row's cuid. */
+  createdObjectId: string;
+  /** True when the crawl's list page lists it. */
+  isListed: boolean;
+}
+
+/**
+ * Saves what a crawl found about created objects: a listed one gets
+ * `lastSeenAt` and loses its Not seen mark; one not listed is marked Not seen
+ * (keeping the first time it was missed).
+ * @param websiteId - The owning website's cuid
+ * @param checks - Each checked row and whether it was listed
+ * @param checkedAt - When the crawl ran
+ * @returns Resolves once saved
+ */
+export async function saveCreatedObjectChecks(
+  websiteId: string,
+  checks: CreatedObjectCheck[],
+  checkedAt: Date,
+): Promise<void> {
+  const listedIds = checks.filter((check) => check.isListed).map((check) => check.createdObjectId);
+  const missingIds = checks.filter((check) => !check.isListed).map((check) => check.createdObjectId);
+  if (listedIds.length > 0) {
+    await prisma.createdObject.updateMany({
+      where: { id: { in: listedIds }, websiteId, deletedAt: null },
+      data: { lastSeenAt: checkedAt, notSeenSince: null },
+    });
+  }
+  if (missingIds.length > 0) {
+    await prisma.createdObject.updateMany({
+      where: { id: { in: missingIds }, websiteId, deletedAt: null, notSeenSince: null },
+      data: { notSeenSince: checkedAt },
+    });
   }
 }
 

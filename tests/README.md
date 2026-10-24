@@ -51,6 +51,14 @@ crawl controller spec and `server.test.ts` mock `crawlRunService` outright.
 right after import (before any `beforeEach` reset) to prove the boot step does
 not run under test.
 
+**One backend spec runs in jsdom.** `formFields.test.ts` starts with a
+`// @vitest-environment jsdom` docblock, because it runs the in-browser form
+field reader (`readRawFormFields`) against a real DOM rather than a stubbed
+`document`. jsdom lays nothing out, so it fakes `getClientRects`: every
+element gets a box except those marked `data-hidden`.
+`actionParameterService.test.ts` mocks only dbService; parameter detection,
+binding, and scoring run for real (their own specs cover their rules).
+
 **Polling is tested with fake timers.** `usePolledJsonResource`,
 `useCrawlRunProgress`, and `CrawlRunPage`'s "while the crawl runs" specs use
 `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })` and

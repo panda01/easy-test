@@ -7,6 +7,15 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import { AddIcon } from "./icons";
 import { type WebsiteItemRequestBody } from "../hooks/useWebsiteItems";
+import {
+  ACTION_KIND_HELP,
+  ACTION_KIND_LABELS,
+  DETECT_CHOICE_VALUE,
+  describeDetectedDeletesChoice,
+  describeDetectedKindChoice,
+  describeDetectedObjectTypeChoice,
+} from "../utils/actionObjectRole";
+import { type ActionKindRecord, type ActionObjectRoleRecord } from "../utils/actionParameters";
 
 /** The "Log in as" choice for running logged out (no credential). */
 export const LOGGED_OUT_CREDENTIAL_VALUE = "";
@@ -17,6 +26,35 @@ export interface CredentialOption {
   id: string;
   /** The credential's label. */
   name: string;
+}
+
+/** One object type the "Object type" select offers. */
+export interface ObjectTypeChoice {
+  /** The web object's key (its own page's URL pattern). */
+  key: string;
+  /** Its name. */
+  name: string;
+}
+
+/** What the action's object role fields need: the types to offer, and what "Detect" picks now. */
+export interface ObjectRoleChoices {
+  /** The website's web objects. */
+  objectTypes: ObjectTypeChoice[];
+  /** The action's role with its detections, or null for a new action (nothing detected yet). */
+  detectedRole: ActionObjectRoleRecord | null;
+}
+
+/** The "Deletes the object" select's values. */
+const DELETES_CHOICE_VALUES = { yes: "yes", no: "no" } as const;
+
+/**
+ * Reads the kind select's value back.
+ * @param choiceValue - The select's value
+ * @returns The kind, or null for "Detect"
+ */
+function readKindChoice(choiceValue: string): ActionKindRecord | null {
+  const kinds: ActionKindRecord[] = ["parameters", "object", "create"];
+  return kinds.find((kind) => kind === choiceValue) ?? null;
 }
 
 /** Props for `TitleDescriptionForm`. */
@@ -44,6 +82,12 @@ export interface TitleDescriptionFormProps {
    * only); undefined hides it and leaves `credentialId` out of the values.
    */
   credentialOptions?: CredentialOption[];
+  /**
+   * The object role choices (actions only): shows the Kind, Object type,
+   * and Deletes the object selects; undefined hides them and leaves the
+   * role fields out of the values.
+   */
+  objectRoleChoices?: ObjectRoleChoices;
 }
 
 /**
@@ -55,6 +99,16 @@ export interface TitleDescriptionFormProps {
  * the credential the action logs in as before each run, or "Logged out" -
  * and submits the choice as `credentialId` (null for logged out). A saved
  * credential that is no longer offered falls back to "Logged out".
+ *
+ * Given `objectRoleChoices` (actions), it also shows what the action does
+ * with an object - each select starting on "Detect", which names what the
+ * detection picks and how sure it is:
+ * - Kind: Parameters, Object (acts on an existing object, always required),
+ *   or Create (makes one, recorded on each run);
+ * - Object type (for Object and Create): one of the website's web objects;
+ * - Deletes the object (for Object): Yes or No.
+ * Their warnings (a tie, no type found, an unsure type) show under them. The
+ * name parameter is kept as it was (it is picked in the Parameters section).
  *
  * Field state is seeded from `initialValues` once, on mount - see
  * `WebsiteForm` for why the edit pages mount it keyed by the record's id.
@@ -74,7 +128,25 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
     onSubmit,
     onCancel,
     credentialOptions,
+    objectRoleChoices,
   } = props;
+  const [kindChoice, setKindChoice] = useState<string>(initialValues.userActionKind ?? DETECT_CHOICE_VALUE);
+  const [objectTypeChoice, setObjectTypeChoice] = useState<string>(
+    initialValues.userObjectTypeKey ?? DETECT_CHOICE_VALUE,
+  );
+  const [deletesChoice, setDeletesChoice] = useState<string>(
+    initialValues.userDeletesObject === null || initialValues.userDeletesObject === undefined
+      ? DETECT_CHOICE_VALUE
+      : initialValues.userDeletesObject
+        ? DELETES_CHOICE_VALUES.yes
+        : DELETES_CHOICE_VALUES.no,
+  );
+  const roleFieldsAreShown = objectRoleChoices !== undefined;
+  const detectedRole = objectRoleChoices?.detectedRole ?? null;
+  const effectiveKind = readKindChoice(kindChoice) ?? detectedRole?.detectedKind.kind ?? null;
+  // Before anything is detected (a new action on "Detect"), both may apply.
+  const kindTakesAType = effectiveKind !== "parameters";
+  const kindActsOnAnObject = effectiveKind === "object" || effectiveKind === null;
   const [title, setTitle] = useState(initialValues.title);
   const [description, setDescription] = useState(initialValues.description);
   const [selectedCredentialId, setSelectedCredentialId] = useState(
@@ -137,7 +209,15 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
       return;
     }
     const actionRunsLoggedOut = credentialIdToShow === LOGGED_OUT_CREDENTIAL_VALUE;
-    onSubmit({ title, description, credentialId: actionRunsLoggedOut ? null : credentialIdToShow });
+    const roleValues = roleFieldsAreShown
+      ? {
+          userActionKind: readKindChoice(kindChoice),
+          userObjectTypeKey: objectTypeChoice === DETECT_CHOICE_VALUE ? null : objectTypeChoice,
+          userNameParameterKey: initialValues.userNameParameterKey ?? null,
+          userDeletesObject: deletesChoice === DETECT_CHOICE_VALUE ? null : deletesChoice === DELETES_CHOICE_VALUES.yes,
+        }
+      : {};
+    onSubmit({ title, description, credentialId: actionRunsLoggedOut ? null : credentialIdToShow, ...roleValues });
   };
 
   return (
@@ -173,6 +253,70 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
             ))}
           </TextField>
         )}
+        {roleFieldsAreShown && (
+          <TextField
+            select
+            label="Kind"
+            value={kindChoice}
+            onChange={(event) => {
+              setKindChoice(event.target.value);
+            }}
+            helperText={effectiveKind === null ? undefined : ACTION_KIND_HELP[effectiveKind]}
+            fullWidth
+          >
+            <MenuItem value={DETECT_CHOICE_VALUE}>{describeDetectedKindChoice(detectedRole)}</MenuItem>
+            {(Object.keys(ACTION_KIND_LABELS) as ActionKindRecord[]).map((kind) => (
+              <MenuItem key={kind} value={kind}>
+                {ACTION_KIND_LABELS[kind]}
+              </MenuItem>
+            ))}
+          </TextField>
+        )}
+        {roleFieldsAreShown && kindTakesAType && (
+          <TextField
+            select
+            label="Object type"
+            value={objectTypeChoice}
+            onChange={(event) => {
+              setObjectTypeChoice(event.target.value);
+            }}
+            helperText="The kind of object it works on or creates, from the latest crawl"
+            fullWidth
+          >
+            <MenuItem value={DETECT_CHOICE_VALUE}>{describeDetectedObjectTypeChoice(detectedRole)}</MenuItem>
+            {objectRoleChoices.objectTypes.map((objectType) => (
+              <MenuItem key={objectType.key} value={objectType.key}>
+                {objectType.name}
+              </MenuItem>
+            ))}
+            {objectTypeChoice !== DETECT_CHOICE_VALUE &&
+              !objectRoleChoices.objectTypes.some((objectType) => objectType.key === objectTypeChoice) && (
+                <MenuItem value={objectTypeChoice}>{objectTypeChoice} (no longer found by the latest crawl)</MenuItem>
+              )}
+          </TextField>
+        )}
+        {roleFieldsAreShown && kindTakesAType && kindActsOnAnObject && (
+          <TextField
+            select
+            label="Deletes the object"
+            value={deletesChoice}
+            onChange={(event) => {
+              setDeletesChoice(event.target.value);
+            }}
+            helperText="A passed run marks the created object it ran on as deleted"
+            fullWidth
+          >
+            <MenuItem value={DETECT_CHOICE_VALUE}>{describeDetectedDeletesChoice(detectedRole)}</MenuItem>
+            <MenuItem value={DELETES_CHOICE_VALUES.yes}>Yes</MenuItem>
+            <MenuItem value={DELETES_CHOICE_VALUES.no}>No</MenuItem>
+          </TextField>
+        )}
+        {roleFieldsAreShown &&
+          (detectedRole?.warnings ?? []).map((warning) => (
+            <Alert key={warning} severity="warning">
+              {warning}
+            </Alert>
+          ))}
         {saveFailed && <Alert severity="error">{errorMessage}</Alert>}
         <Stack direction="row" spacing={1}>
           <Button

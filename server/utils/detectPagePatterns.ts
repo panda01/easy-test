@@ -342,6 +342,21 @@ export function matchPagePattern(patternTokens: PathToken[], pageTokens: PathTok
 }
 
 /**
+ * Checks whether a page's address fits a pattern key - every static segment
+ * equal, any value in a variable one: `https://site/projects/abc` fits
+ * `/projects/{project}`. The query and hash are ignored.
+ * @param url - An absolute URL
+ * @param patternKey - A key from `formatPatternKey`, e.g. `/projects/{project}`
+ * @returns True when the address fits; false when it does not, or does not parse
+ */
+export function urlMatchesPatternKey(url: string, patternKey: string): boolean {
+  const rawSegments = readPathSegments(url);
+  if (rawSegments === null) return false;
+  const pageTokens: PathToken[] = rawSegments.map((segment) => ({ kind: "static", value: segment }));
+  return matchPagePattern(parsePatternKey(patternKey), pageTokens);
+}
+
+/**
  * Describes a token for grouping siblings: a static segment by its value,
  * every variable alike.
  * @param token - A path token

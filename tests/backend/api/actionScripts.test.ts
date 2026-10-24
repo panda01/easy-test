@@ -19,6 +19,17 @@ const mockDbService = vi.hoisted(() => ({
   listActionScriptRunsForScript: vi.fn(),
   findActionScriptRunForScript: vi.fn(),
   createActionScriptRunForScript: vi.fn(),
+  findActionScriptRunWithObjects: vi.fn(),
+}));
+
+/**
+ * The parameter service's database work is replaced (the database is
+ * mocked); its pure run preparation (`prepareParameterRun`) stays real.
+ */
+const mockActionParameterService = vi.hoisted(() => ({
+  loadVersionParameters: vi.fn(),
+  followUpRecordedRun: vi.fn(),
+  syncActionParametersQuietly: vi.fn(),
 }));
 
 /** Claude is replaced outright: no spec ever calls the Anthropic API. */
@@ -56,6 +67,10 @@ vi.mock("../../../server/services/scriptModelService.js", () => mockScriptModelS
 vi.mock("../../../server/services/actionPlanRunnerService.js", () => mockActionPlanRunnerService);
 vi.mock("../../../server/services/crawlerLoginService.js", () => mockCrawlerLoginService);
 vi.mock("../../../server/utils/credentialEncryption.js", () => mockCredentialEncryption);
+vi.mock("../../../server/services/actionParameterService.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../server/services/actionParameterService.js")>()),
+  ...mockActionParameterService,
+}));
 
 import { registerActionScriptRoutes } from "../../../server/controllers/actionScripts.js";
 
@@ -130,6 +145,17 @@ const CREDENTIAL_PLAN = {
     { action: "fill", target: { label: "Password" }, value: "{{credential.password}}" },
     { action: "click", target: { role: "button", name: "Sign in" }, value: null },
   ],
+};
+
+/** A version's parameters view with no parameters: a run changes nothing. */
+const EMPTY_PARAMETERS_VIEW = {
+  role: { kind: "parameters" },
+  parameters: [],
+  objectChoices: [],
+  confirmStepNumber: null,
+  nameParameterKey: null,
+  bindableTexts: [],
+  warnings: [],
 };
 
 // The ids in the request path and the ids on the rows the lookups return are
@@ -308,6 +334,19 @@ const passingRunResult = {
   failingPageUrl: null,
   failingPageAriaSnapshot: null,
   durationMs: 3100,
+  fieldReadings: [],
+  confirmStepSucceeded: null,
+  pageUrlAfterConfirm: null,
+  finalPageUrl: "https://example.com/welcome",
+};
+
+/** What a run with no parameter values changes: nothing. */
+const UNCHANGED_PARAMETER_RUN = {
+  skippedStepNumbers: [],
+  insertedSteps: [],
+  secretValues: [],
+  readFieldsAfterStepNumbers: [],
+  confirmStepNumber: null,
 };
 
 /**
@@ -394,6 +433,13 @@ describe("Action script routes", () => {
     mockScriptModelService.findScriptModel.mockResolvedValue(opusModel);
     mockCredentialEncryption.credentialEncryptionIsConfigured.mockReturnValue(true);
     mockCrawlerLoginService.buildCrawlLoginDetails.mockReturnValue(loginDetails);
+    // A version has no parameters, and a run's follow-up and a version's
+    // sync succeed, unless a test says otherwise.
+    mockActionParameterService.loadVersionParameters.mockResolvedValue(EMPTY_PARAMETERS_VIEW);
+    mockActionParameterService.followUpRecordedRun.mockResolvedValue(undefined);
+    mockActionParameterService.syncActionParametersQuietly.mockResolvedValue(undefined);
+    // The run route answers with the recorded run as created, unless a test says otherwise.
+    mockDbService.findActionScriptRunWithObjects.mockResolvedValue(null);
   });
 
   describe("GET /api/websites/:websiteId/actions/:actionId/scripts", () => {
@@ -1159,6 +1205,7 @@ describe("Action script routes", () => {
         timingSettings: { networkIdleTimeoutMs: 7000, screenshotMinimumWaitMs: 250 },
         allowedOrigins: ["https://example.com"],
         uploadsDirectory: path.join(FIXTURE_ACTION_SCRIPT_DIRECTORY, "uploads"),
+        parameterRun: UNCHANGED_PARAMETER_RUN,
       });
       expect(readRequestedRunFolderName()).toMatch(RUN_FOLDER_NAME_PATTERN);
       // Logging out needs no credential, so neither the key nor the password is touched.
@@ -1181,7 +1228,14 @@ describe("Action script routes", () => {
           failingPageUrl: null,
           failingPageAriaSnapshot: null,
           durationMs: 3100,
+          parameterValues: [],
+          finalPageUrl: "https://example.com/welcome",
+          confirmStepNumber: null,
+          confirmStepSucceeded: null,
         },
+      );
+      expect(mockActionParameterService.followUpRecordedRun).toHaveBeenCalledWith(
+        expect.objectContaining({ websiteId: foundWebsite.id, actionScriptRunId: sampleRun.id, runResult: passingRunResult }),
       );
     });
 
@@ -1225,6 +1279,7 @@ describe("Action script routes", () => {
         timingSettings: { networkIdleTimeoutMs: 7000, screenshotMinimumWaitMs: 250 },
         allowedOrigins: ["https://example.com", "https://auth.example.com"],
         uploadsDirectory: path.join(FIXTURE_ACTION_SCRIPT_DIRECTORY, "uploads"),
+        parameterRun: UNCHANGED_PARAMETER_RUN,
       });
       expect(readRequestedRunFolderName()).toMatch(RUN_FOLDER_NAME_PATTERN);
       expect(mockDbService.createActionScriptRunForScript).toHaveBeenCalledWith(
@@ -2447,6 +2502,227 @@ describe("Action script routes", () => {
 
         expect(res.status).toBe(500);
         expect(res.body).toEqual({ error: "db down" });
+      });
+    });
+  });
+
+  describe("parameters", () => {
+    /** A plan that types a project's name, then creates it. */
+    const TYPE_NAME_PLAN = {
+      name: "Create a project",
+      startUrl: "https://example.com/projects/new",
+      steps: [
+        { action: "fill", target: { label: "Project name" }, value: "Apollo 7" },
+        { action: "click", target: { role: "button", name: "Create" }, value: null },
+      ],
+    };
+
+    /** That version's parameters: the required name, and an optional added Notes field. */
+    const typeNameView = {
+      ...EMPTY_PARAMETERS_VIEW,
+      role: { kind: "create" },
+      confirmStepNumber: 2,
+      nameParameterKey: "projectName",
+      parameters: [
+        {
+          id: "parameter-1",
+          key: "projectName",
+          label: "Project name",
+          detectedLabel: "Project name",
+          userLabel: null,
+          kind: "text",
+          source: "steps",
+          foundBy: ["plan"],
+          isSecret: false,
+          isRequired: true,
+          requiredReason: "default",
+          userRequiredChoice: null,
+          defaultValue: "Apollo 7",
+          uses: [{ stepNumber: 1, field: "value" }],
+          addedField: null,
+          objectTypeKey: null,
+          containerName: null,
+        },
+        {
+          id: "parameter-2",
+          key: "notes",
+          label: "Notes",
+          detectedLabel: "Notes",
+          userLabel: null,
+          kind: "text",
+          source: "page",
+          foundBy: ["crawl"],
+          isSecret: false,
+          isRequired: false,
+          requiredReason: "default",
+          userRequiredChoice: null,
+          defaultValue: "",
+          uses: [],
+          addedField: { target: { label: "Notes" }, stepAction: "fill", afterStepNumber: 1 },
+          objectTypeKey: null,
+          containerName: null,
+        },
+      ],
+    };
+
+    beforeEach(() => {
+      mockDbService.findActionScriptForAction.mockResolvedValue({ ...foundScript, plan: TYPE_NAME_PLAN });
+      mockActionParameterService.loadVersionParameters.mockResolvedValue(typeNameView);
+      mockActionPlanRunnerService.runActionPlan.mockResolvedValue({ ...passingRunResult, confirmStepSucceeded: true });
+      mockDbService.createActionScriptRunForScript.mockResolvedValue(sampleRun);
+    });
+
+    it("runs with the values given, records them, and answers with the run and what it created", async () => {
+      const runWithObjects = { ...sampleRun, createdObject: { id: "created-object-1", name: "Voyager" }, deletedObjects: [] };
+      mockDbService.findActionScriptRunWithObjects.mockResolvedValue(runWithObjects);
+
+      const res = await request(createActionScriptsApp())
+        .post(RUNS_PATH)
+        .send({ parameterValues: { projectName: "Voyager", notes: "Made by a test" } });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual(runWithObjects);
+      const runRequest = readRunRequest();
+      expect(runRequest.plan.steps[0]).toEqual({ action: "fill", target: { label: "Project name" }, value: "Voyager" });
+      expect(runRequest.parameterRun).toEqual({
+        skippedStepNumbers: [],
+        insertedSteps: [
+          {
+            afterStepNumber: 1,
+            step: { action: "fill", target: { label: "Notes" }, value: "Made by a test" },
+            parameterKey: "notes",
+          },
+        ],
+        secretValues: [],
+        readFieldsAfterStepNumbers: [1],
+        confirmStepNumber: 2,
+      });
+      expect(mockDbService.createActionScriptRunForScript).toHaveBeenCalledWith(
+        foundWebsite.id,
+        foundAction.id,
+        foundScript.id,
+        expect.objectContaining({
+          parameterValues: [
+            { key: "projectName", label: "Project name", value: "Voyager" },
+            { key: "notes", label: "Notes", value: "Made by a test" },
+          ],
+          confirmStepNumber: 2,
+          confirmStepSucceeded: true,
+        }),
+      );
+      expect(mockActionParameterService.loadVersionParameters).toHaveBeenCalledWith(foundWebsite.id, foundAction, {
+        ...foundScript,
+        plan: TYPE_NAME_PLAN,
+      });
+    });
+
+    it.each([
+      [{ parameterValues: "Voyager" }, "The parameter values must be an object of text values, by key"],
+      [{ parameterValues: { projectName: "{{credential.password}}" } }, 'The value for "projectName" may not contain {{'],
+      [{ parameterValues: { nope: "x" } }, 'Unknown parameter "nope"; this version\'s parameters are: projectName, notes'],
+      [{ parameterValues: { projectName: " " } }, '"Project name" is required'],
+    ])("answers 400 and runs nothing for %j", async (body, errorMessage) => {
+      const res = await request(createActionScriptsApp()).post(RUNS_PATH).send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: errorMessage });
+      expect(mockActionPlanRunnerService.runActionPlan).not.toHaveBeenCalled();
+    });
+
+    it("answers 400 when the values leave the plan with no step to run", async () => {
+      const optionalOnlyView = {
+        ...typeNameView,
+        parameters: [{ ...typeNameView.parameters[0], isRequired: false, uses: [{ stepNumber: 1, field: "value" }, { stepNumber: 2, field: "targetName" }] }],
+      };
+      mockActionParameterService.loadVersionParameters.mockResolvedValue(optionalOnlyView);
+
+      const res = await request(createActionScriptsApp()).post(RUNS_PATH).send({ parameterValues: { projectName: "" } });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "With these values the plan cannot run: Steps: a plan needs at least one step" });
+    });
+
+    it("records no confirm check for a version without a confirm step", async () => {
+      mockActionParameterService.loadVersionParameters.mockResolvedValue({ ...typeNameView, confirmStepNumber: null });
+
+      await request(createActionScriptsApp()).post(RUNS_PATH);
+
+      expect(mockDbService.createActionScriptRunForScript).toHaveBeenCalledWith(
+        foundWebsite.id,
+        foundAction.id,
+        foundScript.id,
+        expect.objectContaining({ confirmStepNumber: null, confirmStepSucceeded: null }),
+      );
+    });
+
+    it("syncs the action's parameters after converting and after saving an edit", async () => {
+      mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
+      mockScriptGenerationService.convertActionToPlan.mockResolvedValue({
+        summary: "Clicks Sign in",
+        assumptions: [],
+        plan: CLICK_SIGN_IN_PLAN,
+        modelId: "claude-opus-5-5",
+        effort: "high",
+      });
+      mockScriptModelService.chooseEffortForModel.mockReturnValue("high");
+
+      await request(createActionScriptsApp()).post(SCRIPTS_PATH).send({ modelId: "claude-opus-5-5", effort: "high" });
+      await request(createActionScriptsApp()).post(EDITS_PATH).send({ plan: CLICK_SIGN_IN_PLAN });
+
+      expect(mockActionParameterService.syncActionParametersQuietly).toHaveBeenCalledTimes(2);
+      expect(mockActionParameterService.syncActionParametersQuietly).toHaveBeenCalledWith(foundWebsite.id, foundAction);
+    });
+
+    describe("refining a run that used values", () => {
+      /** A version Claude wrote, whose failed run typed "Voyager". */
+      const refinableTypedScript = { ...foundScript, plan: TYPE_NAME_PLAN, modelId: "claude-opus-5-5", effort: "high" };
+      const failedRunWithValues = {
+        ...sampleRun,
+        parameterValues: [{ key: "projectName", label: "Project name", value: "Voyager" }, { key: "gone", label: "Gone", value: "x" }],
+      };
+
+      beforeEach(() => {
+        mockDbService.findActionScriptForAction.mockResolvedValue(refinableTypedScript);
+        mockDbService.findActionScriptRunForScript.mockResolvedValue(failedRunWithValues);
+        mockScriptGenerationService.refineActionPlan.mockResolvedValue({
+          summary: "Types the name, then creates it",
+          assumptions: [],
+          plan: TYPE_NAME_PLAN,
+          modelId: "claude-opus-5-5",
+          effort: "high",
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+          screenshotWasSent: false,
+        });
+        mockDbService.createRefinedActionScriptForAction.mockResolvedValue(refinableTypedScript);
+      });
+
+      it("shows Claude the plan with the run's values put back in, then syncs the new version", async () => {
+        const res = await request(createActionScriptsApp()).post(REFINEMENTS_PATH);
+
+        expect(res.status).toBe(201);
+        const [refinementRequest] = mockScriptGenerationService.refineActionPlan.mock.calls[0] as [{ previousPlan: { steps: unknown[] } }];
+        expect(refinementRequest.previousPlan.steps[0]).toEqual({
+          action: "fill",
+          target: { label: "Project name" },
+          value: "Voyager",
+        });
+        expect(mockActionParameterService.syncActionParametersQuietly).toHaveBeenCalledWith(foundWebsite.id, foundAction);
+      });
+
+      it("shows Claude the version's own plan when the run's values no longer fit", async () => {
+        mockActionParameterService.loadVersionParameters.mockResolvedValue({
+          ...typeNameView,
+          parameters: [{ ...typeNameView.parameters[0], key: "projectName", isRequired: true }],
+        });
+        mockDbService.findActionScriptRunForScript.mockResolvedValue({
+          ...sampleRun,
+          parameterValues: [{ key: "projectName", label: "Project name", value: "" }],
+        });
+
+        await request(createActionScriptsApp()).post(REFINEMENTS_PATH);
+
+        const [refinementRequest] = mockScriptGenerationService.refineActionPlan.mock.calls[0] as [{ previousPlan: unknown }];
+        expect(refinementRequest.previousPlan).toEqual(TYPE_NAME_PLAN);
       });
     });
   });

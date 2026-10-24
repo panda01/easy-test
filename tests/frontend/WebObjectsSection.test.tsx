@@ -5,6 +5,7 @@ import { Route } from "react-router-dom";
 import WebObjectsSection from "../../src/components/WebObjectsSection";
 import { formatFullDateTime } from "../../src/utils/formatRelativeTime";
 import {
+  buildCreatedObjectRecord,
   buildPagePatternRecord,
   buildWebObjectRecord,
   countRequests,
@@ -144,6 +145,123 @@ describe("WebObjectsSection", () => {
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("created objects", () => {
+    const CREATED_OBJECTS_API_URL = "/api/websites/website-1/created-objects";
+    const projectObject = buildWebObjectRecord({
+      id: "web-object-3",
+      instancePatternKey: "/projects/{project}",
+      detectedName: "Project",
+      name: null,
+      pagePatterns: [],
+    });
+    const seenProject = buildCreatedObjectRecord({
+      id: "created-object-1",
+      name: "Apollo 7",
+      lastSeenAt: "2026-04-04T00:00:00.000Z",
+    });
+    const missingProject = buildCreatedObjectRecord({
+      id: "created-object-2",
+      name: "Apollo 8",
+      url: null,
+      notSeenSince: "2026-04-05T00:00:00.000Z",
+      action: { id: "item-9", title: "Old create action", deletedAt: "2026-04-06T00:00:00.000Z" },
+    });
+    const deletedProject = buildCreatedObjectRecord({
+      id: "created-object-3",
+      name: "Apollo 9",
+      deletedOnSiteAt: "2026-04-07T00:00:00.000Z",
+      deletedByActionScriptRunId: "script-run-9",
+      deletedByActionScriptRun: {
+        id: "script-run-9",
+        actionId: "item-2",
+        actionScriptId: "script-2",
+        createdAt: "2026-04-07T00:00:00.000Z",
+        action: { title: "Delete a project" },
+      },
+    });
+    const freshProject = buildCreatedObjectRecord({ id: "created-object-4", name: "Apollo 10" });
+    const untypedObject = buildCreatedObjectRecord({
+      id: "created-object-5",
+      name: "Mystery",
+      objectTypeKey: null,
+      objectTypeName: null,
+    });
+
+    it("lists each type's created objects with what the record knows, and the others apart", async () => {
+      stubFetchRoutes({
+        [`GET ${WEB_OBJECTS_API_URL}`]: { status: 200, body: [projectObject] },
+        [`GET ${CREATED_OBJECTS_API_URL}`]: {
+          status: 200,
+          body: [seenProject, missingProject, deletedProject, freshProject, untypedObject],
+        },
+      });
+      renderSection();
+
+      const projectList = await screen.findByRole("list", { name: "Project created by runs" });
+      expect(screen.getByText("Created by runs · 4")).toBeInTheDocument();
+      expect(within(projectList).getByRole("link", { name: "Apollo 7" })).toHaveAttribute(
+        "href",
+        "http://localhost:3099/projects/capollo",
+      );
+      expect(
+        within(projectList).getByText(`Seen on the crawl of ${formatFullDateTime("2026-04-04T00:00:00.000Z")}`),
+      ).toBeInTheDocument();
+      expect(within(projectList).getByText(`Not seen since ${formatFullDateTime("2026-04-05T00:00:00.000Z")}`)).toBeInTheDocument();
+      expect(within(projectList).getByText(/Old create action \(deleted\)/)).toBeInTheDocument();
+      expect(
+        within(projectList).getByText(
+          `Deleted by a run of Delete a project on ${formatFullDateTime("2026-04-07T00:00:00.000Z")}`,
+        ),
+      ).toBeInTheDocument();
+      expect(within(projectList).getByText("Not crawled since it was made")).toBeInTheDocument();
+      expect(within(projectList).getAllByRole("link", { name: "Create a project" })[0]).toHaveAttribute(
+        "href",
+        "/websites/website-1/actions/item-1",
+      );
+
+      const otherList = screen.getByRole("list", { name: "Other created objects" });
+      expect(within(otherList).getByText("Mystery")).toBeInTheDocument();
+    });
+
+    it("removes a created object from the record and fetches the record again", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubFetchRoutes({
+        [`GET ${WEB_OBJECTS_API_URL}`]: { status: 200, body: [projectObject] },
+        [`GET ${CREATED_OBJECTS_API_URL}`]: { status: 200, body: [seenProject] },
+        [`DELETE ${CREATED_OBJECTS_API_URL}/created-object-1`]: { status: 204 },
+      });
+      renderSection();
+
+      await user.click(await screen.findByRole("button", { name: "Remove Apollo 7 from the record" }));
+
+      await waitFor(() => {
+        expect(countRequests(fetchStub, "GET", CREATED_OBJECTS_API_URL)).toBe(2);
+      });
+      expect(countRequests(fetchStub, "DELETE", `${CREATED_OBJECTS_API_URL}/created-object-1`)).toBe(1);
+    });
+
+    it("shows why the record could not be loaded, or an object could not be removed", async () => {
+      const user = userEvent.setup();
+      stubFetchRoutes({
+        [`GET ${WEB_OBJECTS_API_URL}`]: { status: 200, body: [projectObject] },
+        [`GET ${CREATED_OBJECTS_API_URL}`]: { status: 200, body: [untypedObject] },
+        [`DELETE ${CREATED_OBJECTS_API_URL}/created-object-5`]: { status: 404, body: { error: "Created object not found" } },
+      });
+      renderSection();
+      await user.click(await screen.findByRole("button", { name: "Remove Mystery from the record" }));
+      expect(await screen.findByText("Could not remove it: Created object not found")).toBeInTheDocument();
+    });
+
+    it("says when the record could not be fetched", async () => {
+      stubFetchRoutes({
+        [`GET ${WEB_OBJECTS_API_URL}`]: { status: 200, body: [] },
+        [`GET ${CREATED_OBJECTS_API_URL}`]: { status: 500, body: { error: "Database is down" } },
+      });
+      renderSection();
+      expect(await screen.findByText("Could not load the created objects: Database is down")).toBeInTheDocument();
     });
   });
 });

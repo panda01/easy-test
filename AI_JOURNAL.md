@@ -4,6 +4,79 @@ Newest entry at the top.
 
 ---
 
+## 2026-10-23 18:34 EDT — Parameters for actions, the object switch, and the record of created objects
+
+**Intent:**
+- USECASES.md:9 asks for actions to have parameters ("set the objects you want to target or the names of things"). Until now a plan typed fixed literals such as "Test School", so every run typed the same name and two leftover "Test School" rows broke a heading check.
+- Each action version now has named parameters, each **required** or **optional**, that can be changed on every run. They cover the names it types, the other fields on the same form, and **which object to act on**. They are detected **without an LLM**, and the user can add their own.
+- Each action has a **Parameters / Object / Create** switch. It is detected by fuzzy word scoring and the user can change it. A Create run whose confirm step succeeds records the object it made in a new **record of created objects**, so the app knows what it created, to clean it up or use it again.
+- This follows the approved plan (`~/.claude/plans/i-would-like-to-shimmering-pumpkin.md`, v3).
+
+### Decisions
+- **Made by the user (in the planning rounds):**
+  - No LLM to find the inputs. Required vs optional comes from the field's own `required` / `aria-required` attribute.
+  - One source of truth: the `ActionParameter` table holds all the data about an action's fields. There is no parameters JSON on versions.
+  - Fields are also found from the aria snapshot (the text boxes, search boxes, spin buttons, combo boxes and list boxes present).
+  - Created objects get their own record (`CreatedObject`). A row is written **only when the confirm step didn't error out**; there is no "maybe created".
+  - A passed deleting Object run marks the object "Deleted by run of …".
+- **Made by me** (all in the plan's "Decisions I made" list unless noted):
+  - Password-like values are secret: masked, scrubbed, and never stored on runs.
+  - An added field is required only when the page marks it required.
+  - Parameters, the switch and the user's rows never mark a version "Out of date". There is no change to the Claude prompt or the credential placeholders.
+  - The confirm step is the first button click (or Enter) after the last typed parameter, detected from the plan. Its error signs are a failed click, a new `alert` / `alertdialog` with text that reads like an error, or a field marked `aria-invalid` / `:user-invalid`, all within 2 s.
+  - **Not in the plan:**
+    - A confirm error is noted in the run log, not thrown, so later steps still run.
+    - A created object with no name value is recorded as "Unnamed <type>".
+    - `CreatedObject.objectTypeKey` is nullable, for a Create action with no detected type.
+    - A key made from a placeholder can look odd (`e.g. Studio A` gives `eGStudioA`); the label shown is the page's name for the field.
+    - An unnamed form inside a dialog gives the field a null container name.
+    - The use-case pages also fetch the web objects, because they share the item form.
+    - `ActionPlanStepFields.tsx` was not changed (the plan listed it); the step tags are shown by `ActionPlanSteps.tsx`.
+
+### Files changed
+| File | Change |
+|---|---|
+| `server/prisma/schema.prisma` | **Added:** `Action.userActionKind`, `userObjectTypeKey`, `userNameParameterKey`, `userDeletesObject`, `parametersSyncedAt`; `ActionScriptRun.parameterValues`, `finalPageUrl`, `confirmStepNumber`, `confirmStepSucceeded`; `CrawledPage.formFields`; new models `ActionParameter` (`action_parameters`, unique `[actionId, key]`) and `CreatedObject` (`created_objects`, unique `actionScriptRunId`), with their relations and doc comments. `npx prisma db push` and `npx prisma generate` were run. |
+| `server/utils/formFields.ts` | **New:** `FORM_FIELD_ROLES`, `FORM_FIELD_SELECTOR`, `FORM_CONTAINER_SELECTOR`, `FORM_FIELD_SELECTORS`, `MAX_FORM_FIELD_TEXT_LENGTH`, types `RawFormField`, `RawFormFieldRead`, `FormFieldSelectors`, `FormField`; `readRawFormFields` (an in-browser arrow), `tidyFieldText`, `cleanRawFormFields`, `readStoredFormFields`, `normalizeFieldName`, `matchFieldToTarget`, `matchFormField`, `interpretRequiredReading`. |
+| `server/utils/readAriaSnapshotFields.ts` | **New:** `readAriaSnapshotOutline` (fields with their dialog or form, and links with addresses), `unquoteSnapshotText`, types `SnapshotField`, `SnapshotLink`, `AriaSnapshotOutline`. |
+| `server/utils/scoreActionObjectRole.ts` | **New:** the word lists (`OBJECT_WORDS`, `CREATE_WORDS`, `DELETE_WORDS`), `ACTION_KINDS`, confidence shares; `splitIntoWords`, `stemWord`, `isOneTypoApart`, `scoreWordMatch`, `findWordMatches`, `sumWordMatches`, `describeConfidence`, `detectActionKind`, `detectDeletesObject`, `detectObjectType`, `readActionKind`, `resolveActionObjectRole`. |
+| `server/utils/actionParameters.ts` | **New:** the parameter types (`ActionParameterRecord`, `VersionParameter`, `ObjectChoice`, `ObjectBindingContext`, `AppliedParameterValues`, `InsertedPlanStep`, `UsedParameterValue`, …) and `toParameterKey`, `chooseFreeKey`, `readTargetText`, `labelFromTarget`, `readTargetIdentity`, `readStoredTarget`, `looksSecret`, `isCredentialPlaceholder`, `listParameterSteps`, `findConfirmStepNumber`, `decideRequired`, `findTextUses`, `readPageIdentity`, `isInstanceAddress`, `resolveVersionParameters`, `chooseNameParameterKey`, `applyParameterValues`, `expandAppliedPlan`, `readUsedParameterValues`, `listBindableTexts`. |
+| `server/utils/detectActionParameters.ts` | **New:** `detectActionParameters` and types `DetectionPage`, `RunFieldReading`, `ParameterDetectionInput`, `DetectedParameter`. |
+| `server/utils/summarizePageStructure.ts` | **Changed:** exports `readAriaSnapshotLines` / `AriaSnapshotLine` (now shared by `readSnapshotEntries` and the snapshot outline). |
+| `server/utils/detectPagePatterns.ts` | **Added:** `urlMatchesPatternKey`. |
+| `server/utils/validateRequestBodies.ts` | **Changed:** `validateActionInput` reads the role choices (`readActionRoleChoices`). **Added:** `validateRunParameterValuesInput`, `validateActionParameterChoicesInput`, `validateNewActionParameterInput`, `MAX_OBJECT_TYPE_KEY_LENGTH`, `MAX_PARAMETER_TEXT_LENGTH`, `MAX_RUN_PARAMETER_VALUES`. |
+| `server/services/dbService.ts` | **Changed:** `ActionInput`, `ActionScriptRunInput` and `CrawledPageInput` gain the new fields; summaries omit `formFields`; `listActionScriptRunsForScript` includes created and deleted objects; `createActionScriptRunForScript` and `recordCrawledPage` save the new fields; the soft-delete cascades cover the new tables. **Added:** `findActionScriptRunWithObjects`, `readCrawlRunPagesMatching`, `findLatestCrawlPagesMatching`, `toActionParameterRecord`, `listActionParametersForAction`, `findActionParameterSyncInputs`, `findNewestActionPlan`, `saveSyncedActionParameters` (one transaction: stamps `parametersSyncedAt`, upserts detected rows without touching the user's columns, soft deletes vanished ones except run-found page rows), `setActionParameterChoices`, `addUserActionParameter`, `removeUserActionParameter`, `listActionIdsForWebsite`, `createCreatedObject`, `listCreatedObjectsForWebsite`, `listChoosableCreatedObjects`, `removeCreatedObject`, `markCreatedObjectDeletedByRun`, `listCreatedObjectsToCheck`, `saveCreatedObjectChecks`. |
+| `server/services/crawlerService.ts` | **Added:** `readPageFormFields`, called after the snapshot in `visitCrawlPage`; an unreadable page records `formFields: []`. |
+| `server/services/actionPlanRunnerService.ts` | **Added:** `PlanParameterRun`, `NO_PARAMETER_RUN`, `FIELD_READ_TIMEOUT_MS`, `CONFIRM_CHECK_WINDOW_MS`, `alertReadsAsAnError`, `runConfirmStep`; `PlanStepContext` is exported. **Changed:** the request takes `parameterRun`; the walk skips the steps of blank optional parameters and runs inserted steps; fields are read after parameter steps; the confirm step is checked; secrets include the parameter secrets; the result adds `fieldReadings`, `confirmStepSucceeded`, `pageUrlAfterConfirm`, `finalPageUrl`. |
+| `server/services/actionParameterService.ts` | **New:** `toObjectTypeCandidates`, `readPlanUrls`, `resolveRoleForAction`, `loadActionRole`, `syncActionParameters`, `ensureActionParametersSynced`, `syncActionParametersQuietly`, `syncWebsiteActionParameters`, `loadObjectChoices`, `loadVersionParameters`, `prepareParameterRun`, `followUpRecordedRun`, `checkCreatedObjectsAfterCrawl`, types `VersionParametersView`, `PreparedParameterRun`, `RunFollowUp`. |
+| `server/services/crawlRunService.ts` | **Changed:** after `saveCrawlWebObjects`, calls `checkCreatedObjectsAfterCrawl`, then `syncWebsiteActionParameters`. |
+| `server/controllers/actionScripts.ts` | **Changed:** the run route validates `{ parameterValues }`; `runPlanAndRecordRun` prepares the values (400 with the reason), re-validates the expanded plan, runs with `parameterRun`, records the new run fields, calls `followUpRecordedRun`, and answers with the run and its objects. Refine puts the failed run's values back in (`planWithRunValues`). Convert, edit and refine sync quietly. |
+| `server/controllers/actions.ts` | **Changed:** GET one, POST and PUT answer `{ ...action, objectRole }`; PUT syncs quietly. |
+| `server/controllers/actionParameters.ts` | **New:** `registerActionParameterRoutes` with `buildUserParameterInput`, `findWebsiteAndAction`, `findWebsiteActionAndScript`. GET / POST `…/scripts/:actionScriptId/parameters`, PUT / DELETE `…/parameters/:parameterKey`. |
+| `server/controllers/createdObjects.ts` | **New:** `registerCreatedObjectRoutes`: GET `/api/websites/:websiteId/created-objects`, DELETE `…/:createdObjectId`. |
+| `server/server.ts` | **Changed:** registers the two new route groups. |
+| `src/utils/actionParameters.ts` | **New:** the client record types and `buildInitialParameterValues`, `findParameterValueProblem`, `listParametersToFix`, `listChangedParameterValues`, `describeParameterRequirement`, `describeParameterSource`, `describeParameterSteps`, `buildStepParameterTags`, `readUsedParameterValues`. |
+| `src/utils/actionObjectRole.ts` | **New:** `DETECT_CHOICE_VALUE`, `ACTION_KIND_LABELS`, `ACTION_KIND_HELP`, `describeConfidence`, `describeDetectedKindChoice`, `describeDetectedObjectTypeChoice`, `describeDetectedDeletesChoice`, `describeObjectRole`. |
+| `src/utils/routePaths.ts` | **Added:** `actionScriptParametersApiUrl`, `actionParameterApiUrl`, `createdObjectsApiUrl`, `createdObjectApiUrl`. |
+| `src/hooks/useActionParameters.ts`, `src/hooks/useCreatedObjects.ts` | **New:** `useActionParameters` (reloadable, keeps the view while reloading) and `useCreatedObjects` (`CreatedObjectRecord`, remove then refetch). |
+| `src/hooks/useWebsiteItems.ts`, `src/hooks/useActionScriptRuns.ts` | **Changed:** the role fields and `objectRole`; `RunObjectSummary` and the new run fields. |
+| `src/components/ActionRunParameterFields.tsx`, `ActionScriptParameters.tsx`, `AddActionParameterDialog.tsx`, `CreatedObjectsList.tsx` | **New:** the run form's fields (the object is a free-typing `Autocomplete`), the Parameters section with its edit dialog, the add-parameter dialog, and the created-object list (`describeCreatedObjectStatus`). |
+| `src/components/ActionPlanSteps.tsx`, `ActionScriptDetails.tsx`, `ActionScriptRunsSection.tsx`, `ActionScriptRunDetails.tsx`, `TitleDescriptionForm.tsx`, `WebObjectsSection.tsx` | **Changed:** step tags; the Parameters disclosure; the run panel sends `onRunClick(parameterValues)`; "Values used" and created/deleted lines (`describeRunObjectChanges`); the Kind / Object type / Deletes selects (`objectRoleChoices`); "Created by runs · N" and "Other created objects". |
+| `src/pages/ActionDetailPage.tsx`, `WebsiteItemCreatePage.tsx`, `WebsiteItemEditPage.tsx` | **Changed:** parameters wiring, the role line in the header, and run panel keys per version; the role choices on create and edit. |
+| `USECASES.md`, `server/controllers/README.md`, `server/services/README.md`, `server/utils/README.md`, `server/prisma/README.md`, `src/components/README.md`, `src/hooks/README.md`, `tests/README.md` | **Changed:** docs for the above. `tests/README.md` notes that `formFields.test.ts` runs in jsdom by docblock and that `actionParameterService.test.ts` mocks only dbService. |
+| **Tests (new)** | `tests/backend/utils/scoreActionObjectRole.test.ts` (24), `formFields.test.ts` (11, jsdom), `readAriaSnapshotFields.test.ts`, `actionParameters.test.ts` (34), `detectActionParameters.test.ts` (8), `tests/backend/services/actionParameterService.test.ts` (28), `tests/backend/api/actionParameters.test.ts` (18), `tests/backend/api/createdObjects.test.ts` (4), `tests/frontend/ActionScriptParameters.test.tsx`, `AddActionParameterDialog.test.tsx`, `useActionParameters.test.tsx`, `actionParameters.test.tsx`. |
+| **Tests (changed)** | `actionPlanRunnerService`, `crawlerService`, `crawlRunService` (fixture gains `formFields: []`), `dbService` (new delegates, a `Prisma.DbNull` mock, and `DETECT_EVERY_ROLE_CHOICE` on action writes), `validateRequestBodies`, `summarizePageStructure`, `detectPagePatterns`, `server.test`, `api/actions`, `api/actionScripts`, and the frontend specs for every changed component and page, plus new builders in `frontendTestHelpers.tsx`. |
+
+### Verification
+- **Manual (before tests):** the `manual-verifier` agent drove the app with Playwright against a fixture site in `claude_tmp/` (port 3099). It checked crawling form fields, scoring, Create runs recording "Apollo 7" with its address, a taken name (alert) recording nothing, blank optional / blank required values, the object choices, delete marks, crawl seen / Not seen, user-added parameters, dialog fields found by a run, and the 400 cases. It first failed on a duplicate React key in the phone layout. After the fix (run panel keys per version) and the Autocomplete and add-dialog fixes, it returned VERIFIED. curl smoke tests against the same fixture matched.
+- `npm run test:coverage`: 131/131 files and 2831/2831 tests. Statements 99.27 %, branches 97.67 %, functions 99.36 %, lines 99.66 %, all above the 80/70/80/80 thresholds.
+  - The first run of it had 4 failures in `ActionPlanEditor.test.tsx` and `CredentialForm.test.tsx` (a 5 s timeout, and typing that landed out of order). This change does not touch those files, and they passed alone (28/28). The rerun, and a final run after the fixture fixes, both passed fully.
+- `npm run lint` passes. `npm run tsc` passes. `npm run tsc:client` passes, after adding the new required fields to old fixtures in `dbService.test.ts` and `crawlRunService.test.ts`.
+- No servers left running: ports 3010, 5180 and 3099 are free.
+- **Left behind:** the dev database holds the verification's fixture website, its actions, runs and created objects. `claude_tmp/` holds the fixture site, the seed script, the verifier's scripts and the test output files.
+
+---
+
 ## 2026-10-19 18:12 EDT — The step-limit spec builds 4 cards instead of 99
 
 **Intent:**

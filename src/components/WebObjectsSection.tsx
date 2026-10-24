@@ -5,8 +5,11 @@ import IconButton from "@mui/material/IconButton";
 import Link from "@mui/material/Link";
 import Typography from "@mui/material/Typography";
 import { EditOutlinedIcon } from "./icons";
+import Alert from "@mui/material/Alert";
+import CreatedObjectsList from "./CreatedObjectsList";
 import LoadStatusNotice from "./LoadStatusNotice";
 import RenameWebObjectDialog from "./RenameWebObjectDialog";
+import { type CreatedObjectRecord, useCreatedObjects } from "../hooks/useCreatedObjects";
 import { type WebObjectRecord, useWebObjectRenaming, useWebObjects } from "../hooks/useWebObjects";
 import { MONOSPACE_FONT_FAMILY, nocturneTokens } from "../theme/nocturneTheme";
 import {
@@ -51,6 +54,12 @@ function measureSavedObjectDepths(webObjects: WebObjectRecord[]): Map<string, nu
  * tree, each child object under its parent - and a link to that crawl's
  * Objects view ("From the crawl on ...").
  *
+ * Under each object, "Created by runs · N" lists the record of the objects
+ * of that type the website's Create actions made (see `CreatedObjectsList`),
+ * so they can be cleaned up or used again; created objects whose type the
+ * latest crawl no longer has are listed at the end, under "Other created
+ * objects".
+ *
  * Each object shows its name (and "detected as ..." when it was renamed),
  * how many instances the crawl saw and how many links it skipped, its
  * instance pattern, and each of its patterns with its page count. Its rename
@@ -69,6 +78,28 @@ export default function WebObjectsSection(props: WebObjectsSectionProps): ReactE
     useWebObjectRenaming(websiteId);
   const [webObjectBeingRenamed, setWebObjectBeingRenamed] = useState<WebObjectRecord | null>(null);
   const webObjects = webObjectsResource.data;
+  const { createdObjects, errorMessage: createdObjectsErrorMessage, removeCreatedObject, isRemoving, removeErrorMessage } =
+    useCreatedObjects(websiteId);
+  const objectTypeKeys = new Set((webObjects ?? []).map((webObject) => webObject.instancePatternKey));
+  const otherCreatedObjects = (createdObjects ?? []).filter(
+    (createdObject) => createdObject.objectTypeKey === null || !objectTypeKeys.has(createdObject.objectTypeKey),
+  );
+
+  /**
+   * Lists the created objects of one type.
+   * @param objectTypeKey - The type's key
+   * @returns Its created objects, newest first
+   */
+  const listCreatedObjectsOfType = (objectTypeKey: string): CreatedObjectRecord[] =>
+    (createdObjects ?? []).filter((createdObject) => createdObject.objectTypeKey === objectTypeKey);
+
+  /**
+   * Removes a created object from the record.
+   * @param createdObjectId - Its cuid
+   */
+  const handleRemoveCreatedObject = (createdObjectId: string): void => {
+    void removeCreatedObject(createdObjectId);
+  };
   const crawlRunOfTheObjects = webObjects?.at(0)?.crawlRun ?? null;
   const depthsByKey = measureSavedObjectDepths(webObjects ?? []);
 
@@ -162,6 +193,20 @@ export default function WebObjectsSection(props: WebObjectsSectionProps): ReactE
                     <EditOutlinedIcon fontSize="small" />
                   </IconButton>
                 </Box>
+                {listCreatedObjectsOfType(webObject.instancePatternKey).length > 0 && (
+                  <Box sx={{ mt: "6px", pl: 1, borderLeft: `2px solid ${nocturneTokens.divider}` }}>
+                    <Typography component="h4" sx={{ m: 0, fontSize: 12, color: nocturneTokens.neutral[400] }}>
+                      Created by runs · {listCreatedObjectsOfType(webObject.instancePatternKey).length}
+                    </Typography>
+                    <CreatedObjectsList
+                      websiteId={websiteId}
+                      createdObjects={listCreatedObjectsOfType(webObject.instancePatternKey)}
+                      label={`${displayName} created by runs`}
+                      isRemoving={isRemoving}
+                      onRemove={handleRemoveCreatedObject}
+                    />
+                  </Box>
+                )}
                 <Box component="ul" aria-label={`${displayName} patterns`} sx={{ m: 0, mt: "4px", p: 0 }}>
                   {webObject.pagePatterns.map((pagePattern) => (
                     <Box component="li" key={pagePattern.id} sx={{ listStyle: "none", py: "2px" }}>
@@ -182,6 +227,28 @@ export default function WebObjectsSection(props: WebObjectsSectionProps): ReactE
           })}
         </Box>
       )}
+
+      {otherCreatedObjects.length > 0 && (
+        <Box>
+          <Typography component="h3" sx={{ m: 0, fontSize: 13.5, fontWeight: 600 }}>
+            Other created objects · {otherCreatedObjects.length}
+          </Typography>
+          <Typography sx={{ fontSize: 12, color: nocturneTokens.neutral[400] }}>
+            Made by runs, of a kind the latest crawl no longer finds (or with no kind).
+          </Typography>
+          <CreatedObjectsList
+            websiteId={websiteId}
+            createdObjects={otherCreatedObjects}
+            label="Other created objects"
+            isRemoving={isRemoving}
+            onRemove={handleRemoveCreatedObject}
+          />
+        </Box>
+      )}
+      {createdObjectsErrorMessage !== null && (
+        <Alert severity="error">Could not load the created objects: {createdObjectsErrorMessage}</Alert>
+      )}
+      {removeErrorMessage !== null && <Alert severity="error">Could not remove it: {removeErrorMessage}</Alert>}
 
       <RenameWebObjectDialog
         webObject={

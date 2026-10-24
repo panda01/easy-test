@@ -10,6 +10,7 @@ import DisclosureRow from "./DisclosureRow";
 import { CheckCircleOutlineIcon, HighlightOffIcon } from "./icons";
 import { type ActionScriptRunRecord } from "../hooks/useActionScriptRuns";
 import { MONOSPACE_FONT_FAMILY, nocturneTokens } from "../theme/nocturneTheme";
+import { readUsedParameterValues } from "../utils/actionParameters";
 import { describeActionScriptRunOutcome } from "../utils/describeActionScriptRun";
 import { formatRunDuration } from "../utils/describeScreenshotRun";
 import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeTime";
@@ -43,6 +44,28 @@ export interface ActionScriptRunDetailsProps {
 }
 
 /**
+ * Says what a run did to the record of created objects: the object a Create
+ * run made, why one was not recorded, or the objects a deleting run deleted.
+ * @param run - The run
+ * @returns The lines to show (empty for a run that touched no object)
+ */
+export function describeRunObjectChanges(run: ActionScriptRunRecord): string[] {
+  const lines: string[] = [];
+  const { createdObject, confirmStepNumber, confirmStepSucceeded } = run;
+  if (createdObject !== null) {
+    lines.push(`Created ${createdObject.name}`);
+  } else if (confirmStepNumber !== null && confirmStepSucceeded === false) {
+    lines.push(`Not recorded: the confirm step (step ${String(confirmStepNumber)}) showed an error`);
+  } else if (confirmStepNumber !== null && confirmStepSucceeded === null) {
+    lines.push("Not recorded: stopped before the confirm step");
+  }
+  for (const deletedObject of run.deletedObjects) {
+    lines.push(`Deleted ${deletedObject.name}`);
+  }
+  return lines;
+}
+
+/**
  * Turns the note field's text into what the refine request sends: the
  * trimmed note, or null when nothing but whitespace was typed.
  * @param noteText - The note field's text as typed
@@ -59,6 +82,9 @@ function noteToSend(noteText: string): string | null {
  * - a status banner: how it went ("Failed at step 9"), then its error, how
  *   long it took, and (on desktop) when it ran;
  * - the failure screenshot, when it saved one, and the page it failed on;
+ * - what the run did to the record of created objects ("Created Apollo 7",
+ *   "Not recorded: ...", "Deleted Apollo 7"), and the values it used ("Values
+ *   used", secrets never stored);
  * - for a failed run of a version Claude wrote, "Refine with Claude": an
  *   optional note (with a 2,000-character counter on desktop) and a button
  *   that asks the model that wrote the version to fix it from the run's error,
@@ -99,6 +125,8 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
   const refineAreaIsShown = runHasAnErrorMessage && versionCanBeRefined;
   const refineIsBlocked = isRefining || isRunning;
   const refineErrorIsShown = refineWasAttemptedForThisRun && refineErrorMessage !== null;
+  const usedValues = readUsedParameterValues(run.parameterValues);
+  const objectChangeLines = describeRunObjectChanges(run);
   const bannerDetails = [
     run.errorMessage,
     formatRunDuration(run.durationMs),
@@ -178,6 +206,30 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
           <span title={ranAtText}>{bannerDetails.join(" · ")}</span>
         </Box>
       </Alert>
+
+      {objectChangeLines.length > 0 && (
+        <Box aria-label="Created objects" sx={{ fontSize: 13, color: nocturneTokens.neutral[300] }}>
+          {objectChangeLines.map((objectChangeLine) => (
+            <Box key={objectChangeLine}>{objectChangeLine}</Box>
+          ))}
+        </Box>
+      )}
+      {usedValues.length > 0 && (
+        <DisclosureRow label="Values used" detail={String(usedValues.length)}>
+          <Box component="dl" sx={{ m: 0, display: "grid", gridTemplateColumns: "auto minmax(0,1fr)", gap: "4px 12px", fontSize: 13 }}>
+            {usedValues.map((usedValue) => (
+              <Box key={usedValue.key} sx={{ display: "contents" }}>
+                <Box component="dt" sx={{ color: nocturneTokens.neutral[400] }}>
+                  {usedValue.label}
+                </Box>
+                <Box component="dd" sx={{ m: 0, overflowWrap: "anywhere" }}>
+                  {usedValue.value === "" ? "(left blank - its steps were skipped)" : usedValue.value}
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        </DisclosureRow>
+      )}
 
       {(runHasFailureScreenshot || run.failingPageUrl !== null) && (
         <Box>

@@ -39,6 +39,12 @@ export interface ActionScriptDetailsProps {
   isPhoneLayout: boolean;
   /** Rows the phone layout lists before this version's own (its "Run history" and "Output log"); omit for none. */
   leadingDisclosures?: ReactNode;
+  /** The version's Parameters section (see `ActionScriptParameters`), shown as a row before Assumptions; omit for none. */
+  parametersSection?: ReactNode;
+  /** How many parameters the version has, for the row's "· N" (null while they load). */
+  parameterCount?: number | null;
+  /** Tags to show on the steps (the parameters each uses, and "Confirm"); omit for none. */
+  stepTags?: ReadonlyMap<number, string[]>;
 }
 
 /**
@@ -87,7 +93,8 @@ function describeVersionOrigin(
  * One saved plan version, as the steps column of the mockup draws it:
  * "Version N" with "Edit steps", where it came from and how long ago, Claude's
  * summary, the steps (marked by the run shown beside them, see
- * `ActionPlanSteps`), and collapsed rows for the assumptions Claude made, the
+ * `ActionPlanSteps`, with each step's parameter tags), and collapsed rows for
+ * its parameters (what each run can change), the assumptions Claude made, the
  * crawled pages it was shown, and the plan's JSON. On a phone it is headed
  * "Steps", without the caption or summary, and the page's run rows come
  * first among the collapsed rows.
@@ -112,6 +119,9 @@ export default function ActionScriptDetails(props: ActionScriptDetailsProps): Re
     highlightedRun,
     isPhoneLayout,
     leadingDisclosures,
+    parametersSection,
+    parameterCount = null,
+    stepTags,
   } = props;
   const [isEditing, setIsEditing] = useState(false);
   // The page keeps the last save error until the next save starts, so the
@@ -194,11 +204,21 @@ export default function ActionScriptDetails(props: ActionScriptDetailsProps): Re
           onCancel={handleEditCancel}
         />
       ) : (
-        <ActionPlanSteps plan={script.plan} highlightedRun={highlightedRun} isCompact={isPhoneLayout} />
+        <ActionPlanSteps
+          plan={script.plan}
+          highlightedRun={highlightedRun}
+          isCompact={isPhoneLayout}
+          stepTags={stepTags}
+        />
       )}
 
       <Box sx={{ mt: "18px", display: "flex", flexDirection: "column" }}>
         {leadingDisclosures}
+        {parametersSection !== undefined && (
+          <DisclosureRow label="Parameters" detail={parameterCount === null ? undefined : String(parameterCount)}>
+            {parametersSection}
+          </DisclosureRow>
+        )}
         <DisclosureRow label="Assumptions" detail={String(script.assumptions.length)}>
           {scriptHasAssumptions ? (
             <Box component="ul" aria-label="Assumptions" sx={{ m: 0, pl: "26px", fontSize: 13.5 }}>

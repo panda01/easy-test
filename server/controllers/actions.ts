@@ -8,6 +8,7 @@ import {
   softDeleteActionForWebsite,
   findCredentialForWebsite,
 } from "../services/dbService.js";
+import { loadActionRole, syncActionParametersQuietly } from "../services/actionParameterService.js";
 import { describeError } from "../utils/describeError.js";
 import { validateActionInput } from "../utils/validateRequestBodies.js";
 
@@ -71,11 +72,12 @@ export function registerActionRoutes(app: Express): void {
 
   /**
    * Creates an action on a website, optionally linked to one of the
-   * website's credentials (the action then logs in as it before each run).
+   * website's credentials (the action then logs in as it before each run),
+   * with its object role choices (each null / left out to detect it).
    * @route POST /api/websites/:websiteId/actions
    * @param websiteId - Path parameter: the owning website's cuid
-   * @param body - JSON `{ title, description, credentialId }`; title and description required; `credentialId` an active credential of this website, or null / left out to run logged out
-   * @returns 201 with the created action (with `credential`); 400 with `{ error }` for an invalid body or a credential that is not this website's; 404 with `{ error }` when the website does not exist or was deleted; 500 with `{ error }` otherwise
+   * @param body - JSON `{ title, description, credentialId, userActionKind, userObjectTypeKey, userNameParameterKey, userDeletesObject }`; title and description required; `credentialId` an active credential of this website, or null / left out to run logged out; `userActionKind` `parameters`, `object`, `create`, or null / `detect`; `userObjectTypeKey` a web object's key or null; `userNameParameterKey` a parameter key or null; `userDeletesObject` true, false, or null
+   * @returns 201 with the created action (with `credential` and `objectRole`); 400 with `{ error }` for an invalid body or a credential that is not this website's; 404 with `{ error }` when the website does not exist or was deleted; 500 with `{ error }` otherwise
    */
   app.post("/api/websites/:websiteId/actions", async (req, res) => {
     const validation = validateActionInput(req.body);
@@ -99,7 +101,8 @@ export function registerActionRoutes(app: Express): void {
         return;
       }
       const created = await createActionForWebsite(website.id, validation.input);
-      res.status(201).json(created);
+      const objectRole = await loadActionRole(website.id, created);
+      res.status(201).json({ ...created, objectRole });
     } catch (error: unknown) {
       res.status(500).json({ error: describeError(error) });
     }
@@ -107,11 +110,14 @@ export function registerActionRoutes(app: Express): void {
 
   /**
    * Fetches one active action of a website, with `credential: { id, name }`
-   * (the credential it logs in as) or null.
+   * (the credential it logs in as) or null, and `objectRole`: what the
+   * action does with an object - its kind, object type, and whether it
+   * deletes - with the user's choices applied and the detections (and how
+   * sure they are) for the ones left on "detect".
    * @route GET /api/websites/:websiteId/actions/:actionId
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action's cuid
-   * @returns 200 with the action; 404 with `{ error }` when the website or the action does not exist or was deleted; 500 with `{ error }` when a query fails
+   * @returns 200 with the action and its `objectRole`; 404 with `{ error }` when the website or the action does not exist or was deleted; 500 with `{ error }` when a query fails
    */
   app.get("/api/websites/:websiteId/actions/:actionId", async (req, res) => {
     try {
@@ -125,20 +131,24 @@ export function registerActionRoutes(app: Express): void {
         res.status(404).json({ error: ACTION_NOT_FOUND_MESSAGE });
         return;
       }
-      res.json(action);
+      const objectRole = await loadActionRole(website.id, action);
+      res.json({ ...action, objectRole });
     } catch (error: unknown) {
       res.status(500).json({ error: describeError(error) });
     }
   });
 
   /**
-   * Replaces an active action's title, description, and credential. A PUT
-   * replaces the whole action, so leaving `credentialId` out unlinks it.
+   * Replaces an active action's title, description, credential, and object
+   * role choices. A PUT replaces the whole action, so leaving `credentialId`
+   * out unlinks it, and leaving a role choice out goes back to detecting it.
+   * The action's parameters are synced afterwards (its kind or type may have
+   * changed).
    * @route PUT /api/websites/:websiteId/actions/:actionId
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action's cuid
-   * @param body - JSON `{ title, description, credentialId }`; title and description required; `credentialId` an active credential of this website, or null / left out to run logged out
-   * @returns 200 with the updated action (with `credential`); 400 with `{ error }` for an invalid body or a credential that is not this website's; 404 with `{ error }` when the website or the action does not exist or was deleted; 500 with `{ error }` otherwise
+   * @param body - JSON `{ title, description, credentialId, userActionKind, userObjectTypeKey, userNameParameterKey, userDeletesObject }`, as for creating an action
+   * @returns 200 with the updated action (with `credential` and `objectRole`); 400 with `{ error }` for an invalid body or a credential that is not this website's; 404 with `{ error }` when the website or the action does not exist or was deleted; 500 with `{ error }` otherwise
    */
   app.put("/api/websites/:websiteId/actions/:actionId", async (req, res) => {
     const validation = validateActionInput(req.body);
@@ -170,7 +180,9 @@ export function registerActionRoutes(app: Express): void {
         res.status(404).json({ error: ACTION_NOT_FOUND_MESSAGE });
         return;
       }
-      res.json(updated);
+      await syncActionParametersQuietly(website.id, updated);
+      const objectRole = await loadActionRole(website.id, updated);
+      res.json({ ...updated, objectRole });
     } catch (error: unknown) {
       res.status(500).json({ error: describeError(error) });
     }

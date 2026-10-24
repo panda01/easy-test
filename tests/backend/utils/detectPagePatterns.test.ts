@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  urlMatchesPatternKey,
   buildPathSegments,
   detectPagePatterns,
   findConfirmedSlugPatterns,
@@ -449,5 +450,16 @@ describe("pattern helpers", () => {
     ["blog", "blog"],
   ])("makes %s singular as %s", (word, singularWord) => {
     expect(singularizeWord(word)).toBe(singularWord);
+  });
+});
+
+describe("urlMatchesPatternKey", () => {
+  it("fits an address whose static segments match, with any value in a variable one", () => {
+    expect(urlMatchesPatternKey("https://example.com/projects/abc?tab=1#top", "/projects/{project}")).toBe(true);
+    expect(urlMatchesPatternKey("https://example.com/projects/new", "/projects/{project}")).toBe(true);
+    expect(urlMatchesPatternKey("https://example.com/projects", "/projects/{project}")).toBe(false);
+    expect(urlMatchesPatternKey("https://example.com/teams/abc", "/projects/{project}")).toBe(false);
+    expect(urlMatchesPatternKey("https://example.com/", "/")).toBe(true);
+    expect(urlMatchesPatternKey("not a url", "/projects/{project}")).toBe(false);
   });
 });

@@ -23,6 +23,7 @@ const {
   mockPlaywrightService,
   mockCredentialEncryption,
   mockWebObjectService,
+  mockActionParameterService,
 } = vi.hoisted(() => ({
   mockDbService: {
     adoptWebsiteLoginUrl: vi.fn(),
@@ -39,6 +40,8 @@ const {
   mockCredentialEncryption: { decryptCredentialPassword: vi.fn() },
   /** Saving the web objects is replaced: its own spec covers the grouping and the write. */
   mockWebObjectService: { saveCrawlWebObjects: vi.fn() },
+  /** The created object check and the parameter sync are replaced: their own spec covers them. */
+  mockActionParameterService: { checkCreatedObjectsAfterCrawl: vi.fn(), syncWebsiteActionParameters: vi.fn() },
 }));
 
 vi.mock("../../../server/services/dbService.js", () => mockDbService);
@@ -46,6 +49,7 @@ vi.mock("../../../server/services/crawlerService.js", () => mockCrawlerService);
 vi.mock("../../../server/services/playwrightService.js", () => mockPlaywrightService);
 vi.mock("../../../server/utils/credentialEncryption.js", () => mockCredentialEncryption);
 vi.mock("../../../server/services/webObjectService.js", () => mockWebObjectService);
+vi.mock("../../../server/services/actionParameterService.js", () => mockActionParameterService);
 
 import {
   startCrawlRun,
@@ -101,6 +105,7 @@ const visitedPage: CrawledPageInput = {
   errorMessage: null,
   title: "Example",
   ariaSnapshot: '- heading "Example" [level=1]',
+  formFields: [],
   linkedUrls: [],
   durationMs: 800,
 };
@@ -397,6 +402,17 @@ describe("startCrawlRun", () => {
     const finishOrder = mockDbService.finishCrawlRun.mock.invocationCallOrder[0];
     const saveOrder = mockWebObjectService.saveCrawlWebObjects.mock.invocationCallOrder[0];
     expect(finishOrder).toBeLessThan(saveOrder);
+    // Then the created objects are checked against this crawl, and every action's parameters synced.
+    expect(mockActionParameterService.checkCreatedObjectsAfterCrawl).toHaveBeenCalledWith(
+      "website-1",
+      "crawl-run-1",
+      expect.any(Date),
+    );
+    expect(mockActionParameterService.syncWebsiteActionParameters).toHaveBeenCalledWith("website-1");
+    const checkOrder = mockActionParameterService.checkCreatedObjectsAfterCrawl.mock.invocationCallOrder[0];
+    const syncOrder = mockActionParameterService.syncWebsiteActionParameters.mock.invocationCallOrder[0];
+    expect(saveOrder).toBeLessThan(checkOrder);
+    expect(checkOrder).toBeLessThan(syncOrder);
   });
 
   it("saves no web objects when the crawl recorded no page, so the previous ones stay", async () => {
@@ -415,6 +431,8 @@ describe("startCrawlRun", () => {
 
     expect(mockDbService.finishCrawlRun).toHaveBeenCalledTimes(1);
     expect(mockWebObjectService.saveCrawlWebObjects).not.toHaveBeenCalled();
+    expect(mockActionParameterService.checkCreatedObjectsAfterCrawl).not.toHaveBeenCalled();
+    expect(mockActionParameterService.syncWebsiteActionParameters).not.toHaveBeenCalled();
   });
 
   it("saves no web objects when the run could not be finished (it was deleted meanwhile)", async () => {

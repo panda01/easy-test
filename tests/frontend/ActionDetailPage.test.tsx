@@ -11,6 +11,9 @@ import {
   buildActionScriptRunRecord,
   buildJsonResponse,
   buildScriptModelCatalog,
+  buildActionObjectRoleRecord,
+  buildVersionParameterRecord,
+  buildVersionParametersRecord,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
   countRequests,
@@ -58,6 +61,15 @@ const OPENED_BY_DEEP_LINK: RouterStart = { initialEntries: [ACTION_PATH] };
  */
 function editsApiUrl(actionScriptId: string): string {
   return `${SCRIPTS_API_URL}/${actionScriptId}/edits`;
+}
+
+/**
+ * Builds the API url of a version's parameters.
+ * @param actionScriptId - The version's id
+ * @returns The url
+ */
+function parametersApiUrl(actionScriptId: string): string {
+  return `${SCRIPTS_API_URL}/${actionScriptId}/parameters`;
 }
 
 /**
@@ -158,8 +170,25 @@ function stubLoadedAction(scripts: unknown[], extraRoutes: StubbedRouteTable = {
     [`GET ${ACTION_API_URL}`]: { status: 200, body: buildWebsiteItemRecord() },
     [`GET ${SCRIPTS_API_URL}`]: { status: 200, body: scripts },
     [`GET ${SCRIPT_MODELS_API_URL}`]: { status: 200, body: buildScriptModelCatalog() },
+    [`GET ${WEBSITE_API_URL}/web-objects`]: { status: 200, body: [] },
+    ...buildEmptyParametersRoutes(),
     ...extraRoutes,
   });
+}
+
+/**
+ * Stubs the parameters of versions script-1 to script-9 - every version a
+ * spec shows, saved ones included - as a version with no parameters.
+ * @returns The routes
+ */
+function buildEmptyParametersRoutes(): StubbedRouteTable {
+  const scriptNumbers = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  return Object.fromEntries(
+    scriptNumbers.map((scriptNumber) => [
+      `GET ${parametersApiUrl(`script-${String(scriptNumber)}`)}`,
+      { status: 200, body: buildVersionParametersRecord() },
+    ]),
+  );
 }
 
 /**
@@ -279,6 +308,13 @@ async function pickFromSelect(user: UserEvent, selectName: RegExp, optionName: s
   await user.click(screen.getByRole("combobox", { name: selectName }));
   await user.click(await screen.findByRole("option", { name: optionName }));
 }
+
+/** What a "Run" request sends when no value was changed: an empty `parameterValues`. */
+const RUN_WITH_NO_CHANGED_VALUES: RequestInit = {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ parameterValues: {} }),
+};
 
 /** A failed run of script-1, at step 2, with a failure screenshot and a failing page. */
 const failedRunOfOlderScript = buildActionScriptRunRecord({
@@ -722,7 +758,7 @@ describe("ActionDetailPage", () => {
       const historyButtons = within(screen.getByRole("list", { name: "Runs of version 1" })).getAllByRole("button");
       expect(historyButtons).toHaveLength(1);
       expect(historyButtons[0]).toHaveAttribute("aria-current", "true");
-      expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), { method: "POST" });
+      expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), RUN_WITH_NO_CHANGED_VALUES);
       expect(countRequests(fetchStub, "GET", runsApiUrl("script-1"))).toBe(1);
 
       await user.click(screen.getByRole("button", { name: /^Output log · / }));
@@ -1315,7 +1351,7 @@ describe("ActionDetailPage", () => {
 
       await user.click(within(runCard).getByRole("button", { name: "Run again" }));
       expect(await screen.findByText("Could not run the script: stop here")).toBeInTheDocument();
-      expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), { method: "POST" });
+      expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), RUN_WITH_NO_CHANGED_VALUES);
     });
 
     it("lists the run history and the output log among the collapsed rows below the steps", async () => {
@@ -1370,6 +1406,173 @@ describe("ActionDetailPage", () => {
           { label: "Example", href: WEBSITE_PATH },
           { label: "Log in", href: null },
         ]);
+      });
+    });
+  });
+
+  describe("parameters", () => {
+    /** The detected role of a Create action that makes Projects. */
+    const createRole = buildActionObjectRoleRecord({
+      kind: "create",
+      detectedKind: {
+        kind: "create",
+        reason: "won",
+        confidence: "high",
+        confidenceShare: 1,
+        objectScore: 0,
+        createScore: 3,
+        evidence: ["create"],
+      },
+      objectTypeKey: "/projects/{project}",
+      objectTypeName: "Project",
+      objectTypeSource: "detected",
+    });
+
+    /** Version 1's parameters: the project's name (step 1), with its confirm step. */
+    const createParametersView = buildVersionParametersRecord({
+      role: createRole,
+      parameters: [buildVersionParameterRecord({ uses: [{ stepNumber: 1, field: "value" }] })],
+      confirmStepNumber: 1,
+      nameParameterKey: "projectName",
+      bindableTexts: [{ text: "Apollo 7", fields: ["value"] }],
+    });
+
+    /** A parameter the user added: a field the steps don't fill. */
+    const notesParameter = buildVersionParameterRecord({
+      id: "parameter-2",
+      key: "notes",
+      label: "Notes",
+      source: "you",
+      isRequired: false,
+      requiredReason: "you",
+      userRequiredChoice: "optional",
+      defaultValue: "",
+      uses: [],
+      addedField: { target: { label: "Notes" }, stepAction: "fill", afterStepNumber: 1 },
+    });
+
+    /**
+     * Stubs a Create action with one version and its parameters.
+     * @param extraRoutes - More replies
+     * @returns The installed fetch stub
+     */
+    function stubCreateAction(extraRoutes: StubbedRouteTable = {}): FetchStub {
+      return stubLoadedAction([olderScript], {
+        [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+        [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: createParametersView },
+        ...extraRoutes,
+      });
+    }
+
+    it("shows what the action does with an object, and tags the steps", async () => {
+      stubCreateAction();
+      renderActionDetailPage();
+
+      expect(
+        await screen.findByText("Creates a Project, named by Project name, confirmed by step 1 (detected, High)"),
+      ).toBeInTheDocument();
+      const steps = screen.getByRole("list", { name: "Plan steps" });
+      expect(within(steps).getByText("Project name")).toBeInTheDocument();
+      expect(within(steps).getByText("Confirm")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Parameters · 1" })).toBeInTheDocument();
+    });
+
+    it("falls back to the action's own role before the parameters load", async () => {
+      stubLoadedAction([], {
+        [`GET ${ACTION_API_URL}`]: {
+          status: 200,
+          body: buildWebsiteItemRecord({ objectRole: buildActionObjectRoleRecord({ ...createRole, kind: "object" }) }),
+        },
+      });
+      renderActionDetailPage();
+      expect(await screen.findByText("Takes a Project (detected, High)")).toBeInTheDocument();
+    });
+
+    it("runs with the changed values, then fetches the parameters again", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubCreateAction({
+        [`POST ${runsApiUrl("script-1")}`]: { status: 201, body: buildActionScriptRunRecord({ id: "run-new" }) },
+      });
+      renderActionDetailPage();
+
+      const nameField = await screen.findByRole("textbox", { name: "Project name" });
+      await user.clear(nameField);
+      await user.type(nameField, "Voyager");
+      await user.click(screen.getByRole("button", { name: "Run" }));
+
+      await waitFor(() => {
+        expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ parameterValues: { projectName: "Voyager" } }),
+        });
+      });
+      await waitFor(() => {
+        expect(countRequests(fetchStub, "GET", parametersApiUrl("script-1"))).toBe(2);
+      });
+    });
+
+    it("changes a parameter, adds one, removes one, and picks what names the new object", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubCreateAction({
+        [`PUT ${ACTION_API_URL}/parameters/projectName`]: { status: 200, body: {} },
+        [`POST ${parametersApiUrl("script-1")}`]: {
+          status: 201,
+          body: { ...createParametersView, parameters: [...createParametersView.parameters, notesParameter] },
+        },
+        [`DELETE ${ACTION_API_URL}/parameters/notes`]: { status: 204 },
+        [`PUT ${ACTION_API_URL}`]: {
+          status: 200,
+          body: buildWebsiteItemRecord({ userNameParameterKey: "projectName", objectRole: createRole }),
+        },
+      });
+      renderActionDetailPage();
+      await user.click(await screen.findByRole("button", { name: "Parameters · 1" }));
+
+      await user.click(screen.getByRole("button", { name: "Change Project name" }));
+      const changeDialog = await screen.findByRole("dialog", { name: "Change “Project name”" });
+      await user.type(within(changeDialog).getByRole("textbox", { name: "Label" }), "Name");
+      await user.click(within(changeDialog).getByRole("button", { name: "Save" }));
+      await waitFor(() => {
+        expect(fetchStub).toHaveBeenCalledWith(`${ACTION_API_URL}/parameters/projectName`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userLabel: "Name", userRequiredChoice: null }),
+        });
+      });
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+      expect(countRequests(fetchStub, "GET", parametersApiUrl("script-1"))).toBe(2);
+
+      await user.click(screen.getByRole("button", { name: "Add parameter" }));
+      const addDialog = await screen.findByRole("dialog", { name: "Add a parameter" });
+      await user.type(within(addDialog).getByRole("textbox", { name: "Label" }), "Code");
+      await user.click(within(addDialog).getByRole("button", { name: "Add" }));
+      expect(await screen.findByRole("button", { name: "Remove Notes" })).toBeInTheDocument();
+      expect(countRequests(fetchStub, "POST", parametersApiUrl("script-1"))).toBe(1);
+
+      await user.click(screen.getByRole("button", { name: "Remove Notes" }));
+      await waitFor(() => {
+        expect(countRequests(fetchStub, "DELETE", `${ACTION_API_URL}/parameters/notes`)).toBe(1);
+      });
+
+      await user.click(screen.getByRole("combobox", { name: "Names the new object" }));
+      await user.click(await screen.findByRole("option", { name: "Project name" }));
+      await waitFor(() => {
+        expect(fetchStub).toHaveBeenCalledWith(ACTION_API_URL, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: "Log in",
+            description: "Sign in with a valid account",
+            credentialId: null,
+            userActionKind: null,
+            userObjectTypeKey: null,
+            userNameParameterKey: "projectName",
+            userDeletesObject: null,
+          }),
+        });
       });
     });
   });

@@ -55,6 +55,19 @@ const mockDbService = vi.hoisted(() => ({
   updateCredentialForWebsite: vi.fn(),
   softDeleteCredentialForWebsite: vi.fn(),
   findLatestCrawledPagesForWebsite: vi.fn(),
+  findActionScriptRunWithObjects: vi.fn(),
+  listCreatedObjectsForWebsite: vi.fn(),
+}));
+
+/**
+ * The parameter service's database work is replaced (the database is
+ * mocked above); its pure run preparation stays real.
+ */
+const mockActionParameterService = vi.hoisted(() => ({
+  loadVersionParameters: vi.fn(),
+  followUpRecordedRun: vi.fn(),
+  syncActionParametersQuietly: vi.fn(),
+  loadActionRole: vi.fn(),
 }));
 
 /** The Playwright service is replaced so loading the full app can never launch a browser. */
@@ -94,6 +107,10 @@ vi.mock("../../server/services/playwrightService.js", () => mockPlaywrightServic
 vi.mock("../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
 vi.mock("../../server/services/actionPlanRunnerService.js", () => mockActionPlanRunnerService);
 vi.mock("../../server/services/scriptModelService.js", () => mockScriptModelService);
+vi.mock("../../server/services/actionParameterService.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../server/services/actionParameterService.js")>()),
+  ...mockActionParameterService,
+}));
 
 import {
   app,
@@ -348,18 +365,49 @@ describe("server.ts", () => {
       durationMs: 1200,
     });
     mockDbService.createActionScriptRunForScript.mockResolvedValue({ id: "run-1" });
+    mockDbService.findActionScriptRunWithObjects.mockResolvedValue({ id: "run-1", createdObject: null });
+    mockActionParameterService.loadVersionParameters.mockResolvedValue({
+      role: { kind: "parameters" },
+      parameters: [],
+      objectChoices: [],
+      confirmStepNumber: null,
+      nameParameterKey: null,
+      bindableTexts: [],
+      warnings: [],
+    });
+    mockActionParameterService.followUpRecordedRun.mockResolvedValue(undefined);
 
     const res = await request(app).post(
       `/api/websites/${sampleWebsite.id}/actions/${sampleAction.id}/scripts/${sampleScript.id}/runs`,
     );
 
     expect(res.status).toBe(201);
+    expect(res.body).toEqual({ id: "run-1", createdObject: null });
     const [{ runDirectory, uploadsDirectory }] = mockActionPlanRunnerService.runActionPlan.mock
       .calls[0] as [{ runDirectory: string; uploadsDirectory: string }];
     // bootEnv loaded ACTION_SCRIPT_DIR from .env, as it does for `npm run dev`.
     const configuredActionScriptDirectory = resolveActionScriptDirectory();
     expect(runDirectory.startsWith(configuredActionScriptDirectory + path.sep)).toBe(true);
     expect(uploadsDirectory).toBe(path.join(configuredActionScriptDirectory, "uploads"));
+  });
+
+  it("wires the parameters and created objects routes into the full app", async () => {
+    const sampleScript = { id: "action-script-1", plan: { name: "Log in", startUrl: sampleWebsite.url, steps: [] } };
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
+    mockDbService.findActionScriptForAction.mockResolvedValue(sampleScript);
+    mockActionParameterService.loadVersionParameters.mockResolvedValue({ parameters: [] });
+    mockDbService.listCreatedObjectsForWebsite.mockResolvedValue([{ id: "created-object-1" }]);
+
+    const parametersResponse = await request(app).get(
+      `/api/websites/${sampleWebsite.id}/actions/${sampleAction.id}/scripts/${sampleScript.id}/parameters`,
+    );
+    const createdObjectsResponse = await request(app).get(`/api/websites/${sampleWebsite.id}/created-objects`);
+
+    expect(parametersResponse.status).toBe(200);
+    expect(parametersResponse.body).toEqual({ parameters: [] });
+    expect(createdObjectsResponse.status).toBe(200);
+    expect(createdObjectsResponse.body).toEqual([{ id: "created-object-1" }]);
   });
 
   it("wires the refine-a-failed-run route into the full app", async () => {

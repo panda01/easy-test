@@ -4,7 +4,15 @@ import type {
   ActionInput,
   CredentialInput,
 } from "../services/dbService.js";
-import { type ActionPlan, validateActionPlan } from "./actionPlanSchema.js";
+import {
+  MAX_PLAN_TEXT_LENGTH,
+  PlanTargetSchema,
+  type ActionPlan,
+  type PlanTarget,
+  validateActionPlan,
+} from "./actionPlanSchema.js";
+import { ACTION_KINDS, type ActionKind } from "./scoreActionObjectRole.js";
+import { REQUIRED_CHOICES, type RequiredChoice } from "./actionParameters.js";
 import {
   CRAWL_BUTTON_MODES,
   DEFAULT_CRAWL_BUTTON_MODE,
@@ -294,10 +302,99 @@ export function validateTitleDescriptionInput(
   return { isValid: true, input: { title, description } };
 }
 
+/** The longest object type key (a URL pattern) an action may name. */
+export const MAX_OBJECT_TYPE_KEY_LENGTH = 500;
+
+/** The longest parameter key or label a request may name. */
+export const MAX_PARAMETER_TEXT_LENGTH = 100;
+
+/** What an action body says about the action's object role (see `ActionInput`). */
+type ActionRoleChoices = Pick<
+  ActionInput,
+  "userActionKind" | "userObjectTypeKey" | "userNameParameterKey" | "userDeletesObject"
+>;
+
+/**
+ * Reads an optional text field of at most a given length; missing, null, or
+ * blank means null.
+ * @param body - The request body object
+ * @param fieldName - The property to read
+ * @param maxLength - The most characters it may have, once trimmed
+ * @param description - How an error message names the field
+ * @returns The trimmed text (or null), or the problem
+ */
+function readOptionalLimitedText(
+  body: Record<string, unknown>,
+  fieldName: string,
+  maxLength: number,
+  description: string,
+): ValidationResult<string | null> {
+  const text = readOptionalTrimmedText(body, fieldName);
+  if (!text.isText) {
+    return { isValid: false, errorMessage: `The ${description} must be text, or null` };
+  }
+  const textIsTooLong = text.value !== null && text.value.length > maxLength;
+  if (textIsTooLong) {
+    return { isValid: false, errorMessage: `The ${description} must be at most ${maxLength} characters` };
+  }
+  return { isValid: true, input: text.value };
+}
+
+/**
+ * Reads the action's object role choices. Each is optional, and a missing or
+ * null value means "detect" - so a PUT that leaves one out goes back to
+ * detecting it:
+ * - `userActionKind`: `parameters`, `object`, or `create` (`detect` is also
+ *   accepted, as null);
+ * - `userObjectTypeKey`: a web object's key, text of at most
+ *   `MAX_OBJECT_TYPE_KEY_LENGTH` characters;
+ * - `userNameParameterKey`: a parameter key, text of at most
+ *   `MAX_PARAMETER_TEXT_LENGTH` characters;
+ * - `userDeletesObject`: true or false.
+ * @param body - The request body object
+ * @returns The choices, or the first problem found
+ */
+function readActionRoleChoices(body: Record<string, unknown>): ValidationResult<ActionRoleChoices> {
+  const rawKind = body.userActionKind;
+  const kindIsDetect = rawKind === undefined || rawKind === null || rawKind === "detect";
+  const userActionKind: ActionKind | undefined = ACTION_KINDS.find((kind) => kind === rawKind);
+  if (!kindIsDetect && userActionKind === undefined) {
+    return {
+      isValid: false,
+      errorMessage: `The action kind must be one of: detect, ${ACTION_KINDS.join(", ")}`,
+    };
+  }
+  const objectTypeKey = readOptionalLimitedText(body, "userObjectTypeKey", MAX_OBJECT_TYPE_KEY_LENGTH, "object type");
+  if (!objectTypeKey.isValid) return objectTypeKey;
+  const nameParameterKey = readOptionalLimitedText(
+    body,
+    "userNameParameterKey",
+    MAX_PARAMETER_TEXT_LENGTH,
+    "name parameter",
+  );
+  if (!nameParameterKey.isValid) return nameParameterKey;
+  const rawDeletesObject = body.userDeletesObject;
+  const deletesObjectIsDetect = rawDeletesObject === undefined || rawDeletesObject === null;
+  const deletesObjectIsABoolean = typeof rawDeletesObject === "boolean";
+  if (!deletesObjectIsDetect && !deletesObjectIsABoolean) {
+    return { isValid: false, errorMessage: "\"Deletes the object\" must be true, false, or null to detect it" };
+  }
+  return {
+    isValid: true,
+    input: {
+      userActionKind: userActionKind ?? null,
+      userObjectTypeKey: objectTypeKey.input,
+      userNameParameterKey: nameParameterKey.input,
+      userDeletesObject: deletesObjectIsABoolean ? rawDeletesObject : null,
+    },
+  };
+}
+
 /**
  * Validates the body of an action create or replace request: `title` and
- * `description` exactly as `validateTitleDescriptionInput` checks them, plus
- * the credential the action runs as.
+ * `description` exactly as `validateTitleDescriptionInput` checks them, the
+ * credential the action runs as, and its object role choices (see
+ * `readActionRoleChoices`).
  *
  * `credentialId` is optional: a missing or null value means the action runs
  * logged out - so a PUT that leaves it out UNLINKS the credential, because a
@@ -314,11 +411,15 @@ export function validateActionInput(body: unknown): ValidationResult<ActionInput
   }
   // validateTitleDescriptionInput only succeeds for a JSON object.
   const bodyObject = body as Record<string, unknown>;
+  const roleChoices = readActionRoleChoices(bodyObject);
+  if (!roleChoices.isValid) {
+    return roleChoices;
+  }
 
   const rawCredentialId = bodyObject.credentialId;
   const credentialIdWasLeftOut = rawCredentialId === undefined || rawCredentialId === null;
   if (credentialIdWasLeftOut) {
-    return { isValid: true, input: { ...titleDescription.input, credentialId: null } };
+    return { isValid: true, input: { ...titleDescription.input, credentialId: null, ...roleChoices.input } };
   }
   const credentialId = readTrimmedString(bodyObject, "credentialId");
   const credentialIdIsNotANonBlankString = credentialId === null || credentialId === "";
@@ -328,7 +429,253 @@ export function validateActionInput(body: unknown): ValidationResult<ActionInput
       errorMessage: "The credential id must be a non-blank string, or null to run logged out",
     };
   }
-  return { isValid: true, input: { ...titleDescription.input, credentialId } };
+  return { isValid: true, input: { ...titleDescription.input, credentialId, ...roleChoices.input } };
+}
+
+/** The most parameter values one run request may carry. */
+export const MAX_RUN_PARAMETER_VALUES = 100;
+
+/** A "run a version" request, as validated. */
+export interface RunParameterValuesInput {
+  /** The values to run with, by parameter key; a key left out keeps the version's own value. */
+  parameterValues: Record<string, string>;
+}
+
+/**
+ * Checks one value a run would type. It may not contain `{{` - a credential
+ * placeholder typed as a value would otherwise type the real password.
+ * @param value - The value
+ * @returns A problem, or null when the value is fine
+ */
+function findParameterValueProblem(value: string): string | null {
+  if (value.length > MAX_PLAN_TEXT_LENGTH) return `must be at most ${MAX_PLAN_TEXT_LENGTH} characters`;
+  if (value.includes("{{")) return "may not contain {{";
+  return null;
+}
+
+/**
+ * Validates the body of a "run a version" request. The body is optional: no
+ * body at all means "run with the version's own values". `parameterValues`
+ * is optional too; when given it must be an object of at most
+ * `MAX_RUN_PARAMETER_VALUES` text values, each at most
+ * `MAX_PLAN_TEXT_LENGTH` characters and without `{{`. Whether each key is a
+ * parameter of the version, and whether required ones are filled in, is
+ * checked by the controller.
+ * @param body - The parsed request body, or undefined when none was sent
+ * @returns The values, or the first problem found as a message
+ */
+export function validateRunParameterValuesInput(body: unknown): ValidationResult<RunParameterValuesInput> {
+  const bodyWasLeftOut = body === undefined;
+  if (bodyWasLeftOut) {
+    return { isValid: true, input: { parameterValues: {} } };
+  }
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object" };
+  }
+  const rawValues = body.parameterValues;
+  const valuesWereLeftOut = rawValues === undefined || rawValues === null;
+  if (valuesWereLeftOut) {
+    return { isValid: true, input: { parameterValues: {} } };
+  }
+  if (!isJsonObject(rawValues)) {
+    return { isValid: false, errorMessage: "The parameter values must be an object of text values, by key" };
+  }
+  const valueEntries = Object.entries(rawValues);
+  if (valueEntries.length > MAX_RUN_PARAMETER_VALUES) {
+    return { isValid: false, errorMessage: `A run may have at most ${MAX_RUN_PARAMETER_VALUES} parameter values` };
+  }
+  const parameterValues: Record<string, string> = {};
+  for (const [parameterKey, rawValue] of valueEntries) {
+    if (typeof rawValue !== "string") {
+      return { isValid: false, errorMessage: `The value for "${parameterKey}" must be text` };
+    }
+    const valueProblem = findParameterValueProblem(rawValue);
+    if (valueProblem !== null) {
+      return { isValid: false, errorMessage: `The value for "${parameterKey}" ${valueProblem}` };
+    }
+    parameterValues[parameterKey] = rawValue;
+  }
+  return { isValid: true, input: { parameterValues } };
+}
+
+/** A parameter's user changes, as validated. */
+export interface ActionParameterChoicesRequestInput {
+  /** The user's name for it, or null for the worked-out one. */
+  userLabel: string | null;
+  /** Required or optional, or null to let the page decide. */
+  userRequiredChoice: RequiredChoice | null;
+}
+
+/**
+ * Reads a required choice: `required`, `optional`, or - when allowed - null.
+ * @param rawChoice - The field's value as it arrived
+ * @returns The choice (null for "let the page decide"), or undefined when it is not one
+ */
+function readRequiredChoice(rawChoice: unknown): RequiredChoice | null | undefined {
+  if (rawChoice === undefined || rawChoice === null) return null;
+  return REQUIRED_CHOICES.find((choice) => choice === rawChoice);
+}
+
+/**
+ * Validates the body of a "change a parameter" request: `{ userLabel,
+ * userRequiredChoice }`. `userLabel` is text of at most
+ * `MAX_PARAMETER_TEXT_LENGTH` characters, or null / blank for the worked-out
+ * name; `userRequiredChoice` is `required`, `optional`, or null to let the
+ * page decide.
+ * @param body - The parsed request body
+ * @returns The cleaned input, or the first problem found as a message
+ */
+export function validateActionParameterChoicesInput(
+  body: unknown,
+): ValidationResult<ActionParameterChoicesRequestInput> {
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object" };
+  }
+  const userLabel = readOptionalLimitedText(body, "userLabel", MAX_PARAMETER_TEXT_LENGTH, "label");
+  if (!userLabel.isValid) return userLabel;
+  const userRequiredChoice = readRequiredChoice(body.userRequiredChoice);
+  if (userRequiredChoice === undefined) {
+    return {
+      isValid: false,
+      errorMessage: `Required must be one of: ${REQUIRED_CHOICES.join(", ")}, or null to let the page decide`,
+    };
+  }
+  return { isValid: true, input: { userLabel: userLabel.input, userRequiredChoice } };
+}
+
+/** A parameter the user adds, as validated (before the controller works out where its text appears). */
+export type NewActionParameterRequestInput =
+  | {
+      /** A literal of the steps. */
+      addKind: "value";
+      /** Its name. */
+      label: string;
+      /** Required or optional. */
+      requiredChoice: RequiredChoice;
+      /** Text, or which object. */
+      valueKind: "text" | "object";
+      /** The object type, for an object one. */
+      objectTypeKey: string | null;
+      /** The literal. */
+      matchText: string;
+    }
+  | {
+      /** A field the steps don't fill. */
+      addKind: "field";
+      /** Its name. */
+      label: string;
+      /** Required or optional. */
+      requiredChoice: RequiredChoice;
+      /** How to find the field: by label, placeholder, or role and name. */
+      fieldTarget: PlanTarget;
+      /** Typed or picked. */
+      stepAction: "fill" | "selectOption";
+      /** The parameter it is typed after. */
+      fillAfterKey: string;
+    };
+
+/**
+ * Validates how a field the steps don't fill is found: a `{ label }`,
+ * `{ placeholder }`, or `{ role, name }` target with non-blank text of at most
+ * `MAX_PLAN_TEXT_LENGTH` characters and no `{{`.
+ * @param rawTarget - The `fieldTarget` as it arrived
+ * @returns The target, or the problem
+ */
+function readNewFieldTarget(rawTarget: unknown): ValidationResult<PlanTarget> {
+  const targetParse = PlanTargetSchema.safeParse(rawTarget);
+  const targetProblem = "The field must be found by its label, its placeholder, or its role and name";
+  if (!targetParse.success) return { isValid: false, errorMessage: targetProblem };
+  const target = targetParse.data;
+  const targetText = "label" in target ? target.label : "placeholder" in target ? target.placeholder : "role" in target ? target.name : null;
+  if (targetText === null) return { isValid: false, errorMessage: targetProblem };
+  if (targetText.trim() === "") return { isValid: false, errorMessage: "The field's label, placeholder, or name may not be blank" };
+  const textProblem = findParameterValueProblem(targetText);
+  if (textProblem !== null) return { isValid: false, errorMessage: `The field's label, placeholder, or name ${textProblem}` };
+  return { isValid: true, input: target };
+}
+
+/**
+ * Validates the body of an "add a parameter" request. Every kind needs a
+ * `label` (non-blank text of at most `MAX_PARAMETER_TEXT_LENGTH` characters)
+ * and takes `requiredChoice` (`required` or `optional`; left out, a value is
+ * required and a field optional). Then, by `addKind`:
+ * - `value` ("a value in the steps"): `matchText`, the literal (non-blank,
+ *   at most `MAX_PLAN_TEXT_LENGTH` characters, no `{{`), and `valueKind`
+ *   `text` or `object` - an object one needs `objectTypeKey` and is always
+ *   required;
+ * - `field` ("a field the steps don't fill"): `fieldTarget` (see
+ *   `readNewFieldTarget`), `stepAction` `fill` or `selectOption`, and
+ *   `fillAfterKey`, the parameter it is typed after.
+ * @param body - The parsed request body
+ * @returns The cleaned input, or the first problem found as a message
+ */
+export function validateNewActionParameterInput(body: unknown): ValidationResult<NewActionParameterRequestInput> {
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object" };
+  }
+  const label = readOptionalLimitedText(body, "label", MAX_PARAMETER_TEXT_LENGTH, "label");
+  if (!label.isValid) return label;
+  if (label.input === null) return { isValid: false, errorMessage: "A label is required" };
+  const rawRequiredChoice = readRequiredChoice(body.requiredChoice);
+  if (rawRequiredChoice === undefined) {
+    return { isValid: false, errorMessage: `Required must be one of: ${REQUIRED_CHOICES.join(", ")}` };
+  }
+
+  if (body.addKind === "value") {
+    const valueKind = body.valueKind ?? "text";
+    if (valueKind !== "text" && valueKind !== "object") {
+      return { isValid: false, errorMessage: "The value kind must be text or object" };
+    }
+    const objectTypeKey = readOptionalLimitedText(body, "objectTypeKey", MAX_OBJECT_TYPE_KEY_LENGTH, "object type");
+    if (!objectTypeKey.isValid) return objectTypeKey;
+    if (valueKind === "object" && objectTypeKey.input === null) {
+      return { isValid: false, errorMessage: "An object parameter needs its object type" };
+    }
+    const matchText = body.matchText;
+    if (typeof matchText !== "string" || matchText.trim() === "") {
+      return { isValid: false, errorMessage: "Pick the value in the steps to make a parameter of" };
+    }
+    const matchTextProblem = findParameterValueProblem(matchText);
+    if (matchTextProblem !== null) return { isValid: false, errorMessage: `The value ${matchTextProblem}` };
+    return {
+      isValid: true,
+      input: {
+        addKind: "value",
+        label: label.input,
+        requiredChoice: valueKind === "object" ? "required" : (rawRequiredChoice ?? "required"),
+        valueKind,
+        objectTypeKey: valueKind === "object" ? objectTypeKey.input : null,
+        matchText,
+      },
+    };
+  }
+
+  if (body.addKind === "field") {
+    const fieldTarget = readNewFieldTarget(body.fieldTarget);
+    if (!fieldTarget.isValid) return fieldTarget;
+    const stepAction = body.stepAction ?? "fill";
+    if (stepAction !== "fill" && stepAction !== "selectOption") {
+      return { isValid: false, errorMessage: "The field must be filled in (fill) or picked from (selectOption)" };
+    }
+    const fillAfterKey = readOptionalLimitedText(body, "fillAfterKey", MAX_PARAMETER_TEXT_LENGTH, "parameter to fill it after");
+    if (!fillAfterKey.isValid) return fillAfterKey;
+    if (fillAfterKey.input === null) {
+      return { isValid: false, errorMessage: "Pick the parameter this field is filled in after" };
+    }
+    return {
+      isValid: true,
+      input: {
+        addKind: "field",
+        label: label.input,
+        requiredChoice: rawRequiredChoice ?? "optional",
+        fieldTarget: fieldTarget.input,
+        stepAction,
+        fillAfterKey: fillAfterKey.input,
+      },
+    };
+  }
+
+  return { isValid: false, errorMessage: "The parameter kind must be value or field" };
 }
 
 /** A "save edited plan" request, as validated. */

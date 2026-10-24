@@ -69,6 +69,9 @@ async function pickFromSelect(user: UserEvent, selectName: RegExp, optionName: s
   await user.click(await screen.findByRole("option", { name: optionName }));
 }
 
+/** What an action form sends for its object role when every choice is left on "Detect". */
+const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null, userDeletesObject: null };
+
 /**
  * Builds what `useJsonMutation` sends to save an action's title, description, and credential.
  * @param credentialId - The credential the action should log in as, or null for logged out
@@ -78,7 +81,7 @@ function buildActionSaveRequestInit(credentialId: string | null): RequestInit {
   return {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: "Log in", description: "Sign in with a valid account", credentialId }),
+    body: JSON.stringify({ title: "Log in", description: "Sign in with a valid account", credentialId, ...DETECT_EVERY_ROLE_CHOICE }),
   };
 }
 
@@ -89,7 +92,7 @@ describe.each(ITEM_KIND_TEST_CASES)(
     const editPath = `${itemPath}/edit`;
     const itemApiUrl = `${WEBSITE_API_URL}/${segment}/item-1`;
     /** What the save request adds for this kind: an action says who it logs in as (nobody, by default). */
-    const expectedCredentialFields = segment === "actions" ? { credentialId: null } : {};
+    const expectedCredentialFields = segment === "actions" ? { credentialId: null, ...DETECT_EVERY_ROLE_CHOICE } : {};
 
     /** History as it is after clicking Edit on the item's page. */
     const openedFromItem: RouterStart = {

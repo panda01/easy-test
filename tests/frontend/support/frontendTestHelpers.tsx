@@ -11,6 +11,13 @@ import {
 } from "react-router-dom";
 import { expect, vi, type Mock } from "vitest";
 import { type ActionScriptRunRecord } from "../../../src/hooks/useActionScriptRuns";
+import { type CreatedObjectRecord } from "../../../src/hooks/useCreatedObjects";
+import {
+  type ActionObjectRoleRecord,
+  type ObjectChoiceRecord,
+  type VersionParameterRecord,
+  type VersionParametersRecord,
+} from "../../../src/utils/actionParameters";
 import {
   type ActionScriptRecord,
   type ActionScriptRefinementRecord,
@@ -676,9 +683,152 @@ export function buildActionScriptRunRecord(
     failingPageUrl: null,
     failingPageAriaSnapshot: null,
     durationMs: 4321,
+    parameterValues: [],
+    finalPageUrl: null,
+    confirmStepNumber: null,
+    confirmStepSucceeded: null,
+    createdObject: null,
+    deletedObjects: [],
     createdAt: "2026-04-03T03:04:05.000Z",
     updatedAt: "2026-04-03T03:04:05.000Z",
     deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds an action's object role as the action read returns it: by default a
+ * Parameters action whose title matched no object or create word.
+ * @param overrides - Fields to replace in the default role
+ * @returns A complete object role record
+ */
+export function buildActionObjectRoleRecord(
+  overrides: Partial<ActionObjectRoleRecord> = {},
+): ActionObjectRoleRecord {
+  return {
+    kind: "parameters",
+    kindSource: "detected",
+    detectedKind: {
+      kind: "parameters",
+      reason: "noMatch",
+      confidence: "low",
+      confidenceShare: 0,
+      objectScore: 0,
+      createScore: 0,
+      evidence: [],
+    },
+    objectTypeKey: null,
+    objectTypeName: null,
+    objectTypeSource: null,
+    detectedObjectType: null,
+    deletesObject: false,
+    deletesObjectSource: "detected",
+    detectedDeletesObject: { deletesObject: false, evidence: [] },
+    warnings: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Builds one parameter of a version: by default the required "Project name"
+ * the version's step 1 types ("Apollo 7") and step 3 checks.
+ * @param overrides - Fields to replace in the default parameter
+ * @returns A complete version parameter record
+ */
+export function buildVersionParameterRecord(
+  overrides: Partial<VersionParameterRecord> = {},
+): VersionParameterRecord {
+  return {
+    id: "parameter-1",
+    key: "projectName",
+    label: "Project name",
+    detectedLabel: "Project name",
+    userLabel: null,
+    kind: "text",
+    source: "steps",
+    foundBy: ["plan"],
+    isSecret: false,
+    isRequired: true,
+    requiredReason: "default",
+    userRequiredChoice: null,
+    defaultValue: "Apollo 7",
+    uses: [
+      { stepNumber: 1, field: "value" },
+      { stepNumber: 3, field: "targetName" },
+    ],
+    addedField: null,
+    objectTypeKey: null,
+    containerName: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a version's parameters view as the parameters route answers it: by
+ * default a Parameters action's version with no parameters.
+ * @param overrides - Fields to replace in the default view
+ * @returns A complete version parameters record
+ */
+export function buildVersionParametersRecord(
+  overrides: Partial<VersionParametersRecord> = {},
+): VersionParametersRecord {
+  return {
+    role: buildActionObjectRoleRecord(),
+    parameters: [],
+    objectChoices: [],
+    confirmStepNumber: null,
+    nameParameterKey: null,
+    bindableTexts: [],
+    warnings: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Builds one object an Object action can be run on: by default "Mercury",
+ * seen on the latest crawl.
+ * @param overrides - Fields to replace in the default choice
+ * @returns A complete object choice record
+ */
+export function buildObjectChoiceRecord(overrides: Partial<ObjectChoiceRecord> = {}): ObjectChoiceRecord {
+  return {
+    name: "Mercury",
+    url: "http://localhost:3099/projects/cmercury",
+    source: "crawl",
+    createdObjectId: null,
+    createdByActionTitle: null,
+    createdAt: null,
+    seenOnCrawl: true,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a created object as the record lists it: by default "Apollo 7", a
+ * Project made by a run of "Create a project", not crawled since.
+ * @param overrides - Fields to replace in the default object
+ * @returns A complete created object record
+ */
+export function buildCreatedObjectRecord(overrides: Partial<CreatedObjectRecord> = {}): CreatedObjectRecord {
+  return {
+    id: "created-object-1",
+    websiteId: "website-1",
+    actionId: "item-1",
+    actionScriptId: "script-1",
+    actionScriptRunId: "script-run-1",
+    objectTypeKey: "/projects/{project}",
+    objectTypeName: "Project",
+    name: "Apollo 7",
+    url: "http://localhost:3099/projects/capollo",
+    lastSeenAt: null,
+    notSeenSince: null,
+    deletedOnSiteAt: null,
+    deletedByActionScriptRunId: null,
+    createdAt: "2026-04-03T03:04:05.000Z",
+    updatedAt: "2026-04-03T03:04:05.000Z",
+    deletedAt: null,
+    action: { id: "item-1", title: "Create a project", deletedAt: null },
+    deletedByActionScriptRun: null,
     ...overrides,
   };
 }

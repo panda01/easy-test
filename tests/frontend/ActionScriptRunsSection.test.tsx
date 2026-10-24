@@ -4,7 +4,12 @@ import { userEvent } from "@testing-library/user-event";
 import ActionScriptRunsSection, {
   type ActionScriptRunsSectionProps,
 } from "../../src/components/ActionScriptRunsSection";
-import { buildActionScriptRunRecord } from "./support/frontendTestHelpers";
+import {
+  buildActionScriptRunRecord,
+  buildObjectChoiceRecord,
+  buildVersionParameterRecord,
+  buildVersionParametersRecord,
+} from "./support/frontendTestHelpers";
 
 const newestRun = buildActionScriptRunRecord({ id: "run-2", succeeded: false, failedStepNumber: 2 });
 const olderRun = buildActionScriptRunRecord({ id: "run-1" });
@@ -51,6 +56,8 @@ function buildSectionProps(
     onRefine: vi.fn(),
     nextVersionNumber: 3,
     isPhoneLayout: false,
+    parametersView: buildVersionParametersRecord(),
+    parametersErrorMessage: null,
     ...overrides,
   };
 }
@@ -250,6 +257,153 @@ describe("ActionScriptRunsSection", () => {
       expect(readBannerOutcome()).toBe("Failed before the first step");
       expect(screen.getByRole("textbox", { name: NOTE_FIELD_NAME })).toHaveValue("");
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("the run's values", () => {
+    /** A Create version: the required name, an optional added field, and a secret. */
+    const createParametersView = buildVersionParametersRecord({
+      parameters: [
+        buildVersionParameterRecord(),
+        buildVersionParameterRecord({
+          id: "parameter-2",
+          key: "description",
+          label: "Description",
+          source: "page",
+          isRequired: false,
+          defaultValue: "",
+          uses: [],
+          addedField: { target: { label: "Description" }, stepAction: "fill", afterStepNumber: 1 },
+        }),
+        buildVersionParameterRecord({
+          id: "parameter-3",
+          key: "password",
+          label: "Password",
+          isSecret: true,
+          defaultValue: "hunter2",
+          uses: [{ stepNumber: 2, field: "value" }],
+        }),
+      ],
+    });
+
+    it("prefills each value, and runs with only the values the user changed", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      renderSection({ parametersView: createParametersView, onRunClick });
+
+      expect(screen.getByRole("group", { name: "Values for this run" })).toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: "Project name" })).toHaveValue("Apollo 7");
+      expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("");
+      expect(
+        screen.getByText("A field the steps don't fill - typed after step 1 when you give it a value"),
+      ).toBeInTheDocument();
+      const passwordField = screen.getByLabelText("Password *");
+      expect(passwordField).toHaveAttribute("type", "password");
+      expect(screen.getByText("Secret - never stored on the run")).toBeInTheDocument();
+
+      const nameField = screen.getByRole("textbox", { name: "Project name" });
+      await user.clear(nameField);
+      await user.type(nameField, "Voyager");
+      await user.click(screen.getByRole("button", { name: "Run again" }));
+
+      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" });
+    });
+
+    it("blocks the run while a required value is blank or a value holds {{", async () => {
+      const user = userEvent.setup();
+      renderSection({ parametersView: createParametersView });
+      const nameField = screen.getByRole("textbox", { name: "Project name" });
+
+      await user.clear(nameField);
+      expect(screen.getByRole("button", { name: "Run again" })).toBeDisabled();
+      expect(screen.getByText("Fill in Project name to run.")).toBeInTheDocument();
+
+      await user.click(nameField);
+      await user.paste("{{credential.password}}");
+      expect(screen.getByText("May not contain {{")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Run again" })).toBeDisabled();
+    });
+
+    it("waits for the parameters before it lets a run start, and says when they could not load", () => {
+      const { rerender } = renderSection({ parametersView: null });
+      expect(screen.getByRole("button", { name: "Run again" })).toBeDisabled();
+
+      rerender(
+        <ActionScriptRunsSection
+          {...buildSectionProps({ parametersView: null, parametersErrorMessage: "Script not found" })}
+        />,
+      );
+      expect(screen.getByRole("alert")).toHaveTextContent("Could not load this version's parameters: Script not found");
+      expect(screen.getByRole("button", { name: "Run again" })).toBeEnabled();
+    });
+
+    it("offers the known objects for the object, created ones described, and takes a typed name", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      const objectParametersView = buildVersionParametersRecord({
+        parameters: [
+          buildVersionParameterRecord({
+            key: "object",
+            label: "Project",
+            kind: "object",
+            requiredReason: "object",
+            defaultValue: "Mercury",
+            uses: [{ stepNumber: 1, field: "targetName" }],
+          }),
+        ],
+        objectChoices: [
+          buildObjectChoiceRecord({
+            name: "Apollo 7",
+            source: "created",
+            createdObjectId: "created-object-1",
+            createdByActionTitle: "Create a project",
+            createdAt: "2026-04-03T03:04:05.000Z",
+            seenOnCrawl: true,
+          }),
+          buildObjectChoiceRecord({
+            name: "Apollo 9",
+            source: "created",
+            createdObjectId: "created-object-2",
+            createdByActionTitle: null,
+            createdAt: null,
+            seenOnCrawl: false,
+          }),
+          buildObjectChoiceRecord(),
+        ],
+      });
+      renderSection({ parametersView: objectParametersView, onRunClick });
+
+      const objectField = screen.getByRole("combobox", { name: "Project" });
+      expect(objectField).toHaveValue("Mercury");
+      await user.click(objectField);
+      await user.keyboard("{ArrowDown}");
+      const listbox = await screen.findByRole("listbox");
+      const optionNames = within(listbox)
+        .getAllByRole("option")
+        .map((option) => option.firstChild?.textContent);
+      expect(optionNames).toEqual(["Apollo 7", "Apollo 9", "Mercury"]);
+      expect(within(listbox).getByText(/created by a run of Create a project · .*, seen on crawl/)).toBeInTheDocument();
+      expect(within(listbox).getByText("created by a run of an action")).toBeInTheDocument();
+      expect(within(listbox).getByText("seen on crawl")).toBeInTheDocument();
+
+      await user.clear(objectField);
+      await user.type(objectField, "apollo");
+      const narrowedNames = within(await screen.findByRole("listbox"))
+        .getAllByRole("option")
+        .map((option) => option.firstChild?.textContent);
+      expect(narrowedNames).toEqual(["Apollo 7", "Apollo 9"]);
+
+      await user.clear(objectField);
+      await user.type(objectField, "Gemini 5");
+      await user.keyboard("{Escape}");
+      expect(screen.getByText("Pick a known one, or type any name")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Run again" }));
+      expect(onRunClick).toHaveBeenCalledWith({ object: "Gemini 5" });
+    });
+
+    it("shows no values form for a version without parameters", () => {
+      renderSection();
+      expect(screen.queryByRole("group", { name: "Values for this run" })).not.toBeInTheDocument();
     });
   });
 });

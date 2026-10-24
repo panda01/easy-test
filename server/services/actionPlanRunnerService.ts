@@ -16,6 +16,15 @@ import {
   type PlanTarget,
 } from "../utils/actionPlanSchema.js";
 import { capSnapshot } from "../utils/selectRelevantCrawledPages.js";
+import {
+  FORM_CONTAINER_SELECTOR,
+  FORM_FIELD_SELECTOR,
+  FORM_FIELD_SELECTORS,
+  cleanRawFormFields,
+  readRawFormFields,
+} from "../utils/formFields.js";
+import type { InsertedPlanStep } from "../utils/actionParameters.js";
+import type { RunFieldReading } from "../utils/detectActionParameters.js";
 
 /** How long a run may take before it is stopped: 5 minutes (the user's choice). */
 export const PLAN_RUN_TIMEOUT_MS = 300_000;
@@ -47,6 +56,53 @@ const SCRUBBED_SECRET = "••••••";
 /** The 1280x720 viewport every browser in the app uses. */
 const PLAN_RUN_VIEWPORT = { width: 1280, height: 720 };
 
+/** How long the runner reads the fields around a step it typed into, before giving up on the reading. */
+export const FIELD_READ_TIMEOUT_MS = 2000;
+
+/** How long after the confirm step the runner watches for an error before calling it a success. */
+export const CONFIRM_CHECK_WINDOW_MS = 2000;
+
+/** How often the confirm check looks at the page within its window. */
+const CONFIRM_CHECK_INTERVAL_MS = 200;
+
+/** The elements that show a message the page wants noticed: alerts and alert dialogs. */
+const ALERT_SELECTOR = "[role=alert], [role=alertdialog]";
+
+/** Words that make a new alert read as an error. */
+const ERROR_ALERT_PATTERN =
+  /\b(error|fail(ed|ure|s)?|invalid|required|already|taken|exists|could ?n[o']t|cannot|can't|unable|wrong|denied|not allowed|missing)\b/i;
+
+/** Words that make a new alert read as a success (when no error word is in it). */
+const SUCCESS_ALERT_PATTERN = /\b(success(ful(ly)?)?|created|saved|added|updated|done|thank you)\b/i;
+
+/**
+ * What a run does differently because of its parameter values (see
+ * `applyParameterValues`): steps it skips, steps it adds, values it scrubs,
+ * steps after which it reads the form's fields, and - for a Create action -
+ * the confirm step it checks.
+ */
+export interface PlanParameterRun {
+  /** The plan steps (1-based) to skip, because a blank optional parameter uses them. */
+  skippedStepNumbers: number[];
+  /** Steps to add after plan steps (added fields with a value). */
+  insertedSteps: InsertedPlanStep[];
+  /** Secret parameter values, scrubbed like the credential's. */
+  secretValues: string[];
+  /** The plan steps (1-based) after which the fields of the step's form are read. */
+  readFieldsAfterStepNumbers: number[];
+  /** The step that submits a Create action's form, or null. */
+  confirmStepNumber: number | null;
+}
+
+/** A run with no parameter changes: nothing skipped, added, read, or checked. */
+export const NO_PARAMETER_RUN: PlanParameterRun = {
+  skippedStepNumbers: [],
+  insertedSteps: [],
+  secretValues: [],
+  readFieldsAfterStepNumbers: [],
+  confirmStepNumber: null,
+};
+
 /** The credential a run logs in as, already decrypted. */
 export interface PlanRunLogin {
   /** The credential's name, for the log. */
@@ -69,6 +125,8 @@ export interface ActionPlanRunRequest {
   runDirectory: string;
   /** Absolute path of the folder `uploadFile` steps pick their files from. */
   uploadsDirectory: string;
+  /** What the run's parameter values change (see `PlanParameterRun`). */
+  parameterRun: PlanParameterRun;
 }
 
 /** What one run produced. */
@@ -93,6 +151,24 @@ export interface ActionPlanRunResult {
   failingPageAriaSnapshot: string | null;
   /** Milliseconds from browser launch to browser close. */
   durationMs: number;
+  /** The fields read around each step the run typed a parameter into. */
+  fieldReadings: RunFieldReading[];
+  /** Whether the confirm step ran with no error showing; null when the run has none or never reached it. */
+  confirmStepSucceeded: boolean | null;
+  /** The address right after the confirm step (scrubbed), or null. */
+  pageUrlAfterConfirm: string | null;
+  /** The address the browser was on when the run ended (scrubbed), or null when it could not be read. */
+  finalPageUrl: string | null;
+}
+
+/** What a run noticed along the way, beside passing or failing. */
+interface RunObservations {
+  /** See `ActionPlanRunResult.fieldReadings`. */
+  fieldReadings: RunFieldReading[];
+  /** See `ActionPlanRunResult.confirmStepSucceeded`. */
+  confirmStepSucceeded: boolean | null;
+  /** See `ActionPlanRunResult.pageUrlAfterConfirm`. */
+  pageUrlAfterConfirm: string | null;
 }
 
 /**
@@ -127,7 +203,7 @@ interface PlanRunFailure {
 }
 
 /** What a step needs besides the page: the credential values, the allowed origins, and where to log and pick files from. */
-interface PlanStepContext {
+export interface PlanStepContext {
   /** The credential's username and password, or null for a logged-out run. */
   credentialValues: { username: string; password: string } | null;
   /** The origins credential values may be typed on. */
@@ -482,19 +558,194 @@ export function scrubSecrets(message: string, secrets: string[]): string {
 }
 
 /**
- * Logs in (when the run has a credential), opens the start URL, and runs
- * every step in order, stopping at the first one that fails.
+ * Reads the fields of the form or dialog around the field a step just typed
+ * into (see `readRawFormFields`), so the run learns which of them the page
+ * marks required, and which other fields sit beside it. A reading is a bonus:
+ * one that fails or takes longer than `FIELD_READ_TIMEOUT_MS` gives none.
  * @param page - The run's page
- * @param request - The plan, login, and folders
+ * @param step - The step that typed
+ * @param stepNumber - Its 1-based number
+ * @returns The reading, or null when none could be taken
+ */
+async function readFieldsAroundStep(page: Page, step: PlanStep, stepNumber: number): Promise<RunFieldReading | null> {
+  try {
+    const rawFieldRead = await requireTarget(page, step)
+      .first()
+      .evaluate(readRawFormFields, FORM_FIELD_SELECTORS, { timeout: FIELD_READ_TIMEOUT_MS });
+    return {
+      stepNumber,
+      pageUrl: page.url(),
+      fields: cleanRawFormFields(rawFieldRead.fields),
+      targetFieldIndex: rawFieldRead.startFieldIndex,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads the text of every alert the page shows now.
+ * @param page - The run's page
+ * @returns Each non-empty alert's text; empty when none could be read
+ */
+async function readAlertTexts(page: Page): Promise<string[]> {
+  try {
+    const alertTexts = await page.locator(ALERT_SELECTOR).allInnerTexts();
+    return alertTexts.map((alertText) => alertText.trim()).filter((alertText) => alertText !== "");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Decides whether an alert reads as an error: it has an error word, or it
+ * has no success word ("Saved", "Created", ...).
+ * @param alertText - The alert's text
+ * @returns True when it reads as an error
+ */
+export function alertReadsAsAnError(alertText: string): boolean {
+  if (ERROR_ALERT_PATTERN.test(alertText)) return true;
+  return !SUCCESS_ALERT_PATTERN.test(alertText);
+}
+
+/**
+ * Checks whether the form a confirm step submitted is still there and shows
+ * a field the browser or the page marks invalid (`aria-invalid="true"`, or
+ * the browser's own `:user-invalid` after a submit attempt).
+ * @param container - The form or dialog the confirm button sat in, or null when it sat in none
+ * @returns Whether the form is gone, and whether it shows an invalid field
+ */
+async function readSubmittedFormState(
+  container: Awaited<ReturnType<Locator["evaluateHandle"]>> | null,
+): Promise<{ formIsGone: boolean; formShowsAnInvalidField: boolean }> {
+  if (container === null) return { formIsGone: false, formShowsAnInvalidField: false };
+  try {
+    return await container.evaluate(
+      (element, fieldSelector) => {
+        const formIsGone = !(element instanceof Element) || !element.isConnected;
+        if (formIsGone) return { formIsGone: true, formShowsAnInvalidField: false };
+        const invalidFields = Array.from(element.querySelectorAll(fieldSelector)).filter((field) => {
+          try {
+            return field.getAttribute("aria-invalid") === "true" || field.matches(":user-invalid");
+          } catch {
+            return field.getAttribute("aria-invalid") === "true";
+          }
+        });
+        return { formIsGone: false, formShowsAnInvalidField: invalidFields.length > 0 };
+      },
+      FORM_FIELD_SELECTOR,
+    );
+  } catch {
+    return { formIsGone: false, formShowsAnInvalidField: false };
+  }
+}
+
+/**
+ * Runs a Create action's confirm step - the click that submits its form -
+ * and checks it did not error out: for `CONFIRM_CHECK_WINDOW_MS` afterwards
+ * it watches for a new alert that reads as an error (see
+ * `alertReadsAsAnError`) and for an invalid field in the submitted form. The
+ * watch ends early once the form is gone or the address changed.
+ * @param page - The run's page
+ * @param step - The confirm step
  * @param context - What each step needs
+ * @returns Null when the step succeeded; otherwise why the page says it did not (the step itself throwing is rethrown)
+ * @throws Whatever the step itself throws
+ */
+async function runConfirmStep(page: Page, step: PlanStep, context: PlanStepContext): Promise<string | null> {
+  const alertsBefore = await readAlertTexts(page);
+  const urlBefore = page.url();
+  const container =
+    step.target === null
+      ? null
+      : await requireTarget(page, step)
+          .first()
+          .evaluateHandle(
+            (element, containerSelector) => element.closest(containerSelector),
+            FORM_CONTAINER_SELECTOR,
+            { timeout: FIELD_READ_TIMEOUT_MS },
+          )
+          .catch(() => null);
+  await runPlanStep(page, step, context);
+
+  const watchEndsAt = performance.now() + CONFIRM_CHECK_WINDOW_MS;
+  while (performance.now() < watchEndsAt) {
+    const newErrorAlert = (await readAlertTexts(page)).find(
+      (alertText) => !alertsBefore.includes(alertText) && alertReadsAsAnError(alertText),
+    );
+    if (newErrorAlert !== undefined) return `the page showed "${newErrorAlert.split("\n")[0]}"`;
+    const formState = await readSubmittedFormState(container);
+    if (formState.formShowsAnInvalidField) return "the form still shows a field marked invalid";
+    const pageMovedOn = formState.formIsGone || page.url() !== urlBefore;
+    if (pageMovedOn) return null;
+    await new Promise((resolve) => setTimeout(resolve, CONFIRM_CHECK_INTERVAL_MS));
+  }
+  return null;
+}
+
+/**
+ * Runs one plan step - through the confirm check when it is the confirm
+ * step (an error the page shows is noted, not thrown: the run goes on, and
+ * only the created object is not recorded) - then reads its form's fields
+ * when it typed a parameter.
+ * @param page - The run's page
+ * @param step - The step
+ * @param stepNumber - Its 1-based number
+ * @param request - The run's request (its parameter changes)
+ * @param context - What each step needs
+ * @param observations - What the run noticed (changed in place)
+ * @returns Resolves once the step is done
+ * @throws Whatever the step throws
+ */
+async function runWalkedStep(
+  page: Page,
+  step: PlanStep,
+  stepNumber: number,
+  request: ActionPlanRunRequest,
+  context: PlanStepContext,
+  observations: RunObservations,
+): Promise<void> {
+  const { parameterRun } = request;
+  const stepIsTheConfirmStep = stepNumber === parameterRun.confirmStepNumber;
+  if (stepIsTheConfirmStep) {
+    observations.confirmStepSucceeded = false;
+    const confirmError = await runConfirmStep(page, step, context);
+    observations.pageUrlAfterConfirm = page.url();
+    const confirmShowedNoError = confirmError === null;
+    observations.confirmStepSucceeded = confirmShowedNoError;
+    context.log(
+      confirmShowedNoError
+        ? "✔ Confirmed - no error showed, so the new object is recorded"
+        : `✘ The confirm step showed an error (${confirmError}), so no new object is recorded`,
+    );
+  } else {
+    await runPlanStep(page, step, context);
+  }
+  if (parameterRun.readFieldsAfterStepNumbers.includes(stepNumber)) {
+    const fieldReading = await readFieldsAroundStep(page, step, stepNumber);
+    if (fieldReading !== null) observations.fieldReadings.push(fieldReading);
+  }
+}
+
+/**
+ * Logs in (when the run has a credential), opens the start URL, and runs
+ * every step in order, stopping at the first one that fails. Steps a blank
+ * optional parameter uses are skipped (and logged as skipped); the steps an
+ * added field brings run right after the step they follow, and a failure in
+ * one is reported at that step.
+ * @param page - The run's page
+ * @param request - The plan, login, folders, and parameter changes
+ * @param context - What each step needs
+ * @param observations - What the run noticed (changed in place)
  * @returns Null when everything ran; otherwise where it stopped and why
  */
 async function walkPlan(
   page: Page,
   request: ActionPlanRunRequest,
   context: PlanStepContext,
+  observations: RunObservations,
 ): Promise<PlanRunFailure | null> {
-  const { plan, login } = request;
+  const { plan, login, parameterRun } = request;
   if (login !== null) {
     context.log(`Log in as "${login.credentialName}"`);
     const loginAttempt = await logInWithCredential(page, login.details, request.timingSettings);
@@ -519,11 +770,28 @@ async function walkPlan(
 
   for (const [stepIndex, step] of plan.steps.entries()) {
     const stepNumber = stepIndex + 1;
-    context.log(`Step ${stepNumber}: ${describePlanStep(step)}`);
-    try {
-      await runPlanStep(page, step, context);
-    } catch (error: unknown) {
-      return { failedStepNumber: stepNumber, errorMessage: summarizeError(error) };
+    const stepIsSkipped = parameterRun.skippedStepNumbers.includes(stepNumber);
+    if (stepIsSkipped) {
+      context.log(`Step ${stepNumber}: skipped (its parameter was left blank) - ${describePlanStep(step)}`);
+    } else {
+      context.log(`Step ${stepNumber}: ${describePlanStep(step)}`);
+      try {
+        await runWalkedStep(page, step, stepNumber, request, context, observations);
+      } catch (error: unknown) {
+        return { failedStepNumber: stepNumber, errorMessage: summarizeError(error) };
+      }
+    }
+    const addedSteps = parameterRun.insertedSteps.filter((insertedStep) => insertedStep.afterStepNumber === stepNumber);
+    for (const addedStep of addedSteps) {
+      context.log(`Step ${stepNumber} (added field): ${describePlanStep(addedStep.step)}`);
+      try {
+        await runPlanStep(page, addedStep.step, context);
+      } catch (error: unknown) {
+        return {
+          failedStepNumber: stepNumber,
+          errorMessage: `The added field after step ${stepNumber} could not be filled in: ${summarizeError(error)}`,
+        };
+      }
     }
   }
   return null;
@@ -547,13 +815,14 @@ async function captureFailureScreenshot(page: Page, screenshotPath: string): Pro
 }
 
 /**
- * Reads the address the browser was on when the run failed. Never throws: a
- * page that can no longer be asked (e.g. already closed) just has no address.
+ * Reads the address the browser is on (when the run failed, or ended).
+ * Never throws: a page that can no longer be asked (e.g. already closed)
+ * just has no address.
  * @param page - The run's page
  * @param secrets - The credential values to scrub from the address
  * @returns The scrubbed address, or null when it is blank or could not be read
  */
-function readFailingPageUrl(page: Page, secrets: string[]): string | null {
+function readScrubbedPageUrl(page: Page, secrets: string[]): string | null {
   try {
     const pageUrl = page.url();
     const pageHasNoAddress = pageUrl === "" || pageUrl === BLANK_PAGE_URL;
@@ -602,7 +871,7 @@ async function captureFailureEvidence(
   secrets: string[],
 ): Promise<FailureEvidence> {
   const failureScreenshotWasCaptured = await captureFailureScreenshot(page, screenshotPath);
-  const failingPageUrl = readFailingPageUrl(page, secrets);
+  const failingPageUrl = readScrubbedPageUrl(page, secrets);
   const failingPageAriaSnapshot = await takeFailingPageAriaSnapshot(page, secrets);
   return { failureScreenshotWasCaptured, failingPageUrl, failingPageAriaSnapshot };
 }
@@ -628,11 +897,16 @@ async function captureFailureEvidence(
  *    page's address and takes its aria snapshot. A passing run captures none
  *    of it.
  *
- * Credential values are only ever in memory: they are scrubbed from every
- * error message, the failing page's address, and its snapshot, and the log
- * never includes typed text.
- * @param request - The plan, login, timing settings, origins, and folders
- * @returns The outcome, the log, whether a failure screenshot was written, and the failing page's address and aria snapshot
+ * Credential values - and secret parameter values - are only ever in
+ * memory: they are scrubbed from every error message, the failing page's
+ * address, its snapshot, and the final address, and the log never includes
+ * typed text.
+ *
+ * The run's parameter changes (`request.parameterRun`) skip and add steps,
+ * read the fields around each parameter step, and check a Create action's
+ * confirm step (see `walkPlan`).
+ * @param request - The plan, login, timing settings, origins, folders, and parameter changes
+ * @returns The outcome, the log, whether a failure screenshot was written, the failing page's address and aria snapshot, the field readings, the confirm check, and the final address
  * @throws When the run folder cannot be created or the browser cannot be launched
  */
 export async function runActionPlan(request: ActionPlanRunRequest): Promise<ActionPlanRunResult> {
@@ -640,7 +914,9 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
   const screenshotPath = path.join(request.runDirectory, FAILURE_SCREENSHOT_FILE_NAME);
   const outputCollector = new RunOutputCollector();
   const { login } = request;
-  const secrets = login === null ? [] : [login.details.password, login.details.username];
+  const credentialSecrets = login === null ? [] : [login.details.password, login.details.username];
+  const secrets = [...credentialSecrets, ...request.parameterRun.secretValues];
+  const observations: RunObservations = { fieldReadings: [], confirmStepSucceeded: null, pageUrlAfterConfirm: null };
   /**
    * Appends one line to the run log, with any credential value scrubbed.
    * @param line - The line
@@ -665,6 +941,7 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
   };
   let failure: PlanRunFailure | null = null;
   let failureEvidence: FailureEvidence = NO_FAILURE_EVIDENCE;
+  let finalPageUrl: string | null = null;
 
   try {
     const page = await browser.newPage({ viewport: PLAN_RUN_VIEWPORT });
@@ -690,7 +967,7 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
     const timeoutTimer = setTimeout(handleTimeLimit, PLAN_RUN_TIMEOUT_MS);
 
     try {
-      failure = await walkPlan(page, request, context);
+      failure = await walkPlan(page, request, context, observations);
     } finally {
       clearTimeout(timeoutTimer);
     }
@@ -702,6 +979,8 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
     if (runFailedInTime) {
       failureEvidence = await captureFailureEvidence(page, screenshotPath, secrets);
     }
+    // A failed run's evidence already read the address; a passed run reads it now.
+    finalPageUrl = failure === null ? readScrubbedPageUrl(page, secrets) : failureEvidence.failingPageUrl;
   } finally {
     await closeBrowserQuietly(browser);
   }
@@ -733,5 +1012,10 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
     failingPageUrl: failureEvidence.failingPageUrl,
     failingPageAriaSnapshot: failureEvidence.failingPageAriaSnapshot,
     durationMs: measureElapsedMs(startedAt),
+    fieldReadings: observations.fieldReadings,
+    confirmStepSucceeded: observations.confirmStepSucceeded,
+    pageUrlAfterConfirm:
+      observations.pageUrlAfterConfirm === null ? null : scrubSecrets(observations.pageUrlAfterConfirm, secrets),
+    finalPageUrl,
   };
 }

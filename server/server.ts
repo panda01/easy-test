@@ -21,6 +21,8 @@ import { registerScriptModelRoutes } from "./controllers/scriptModels.js";
 import { registerCrawlRunRoutes } from "./controllers/crawlRuns.js";
 import { registerCredentialRoutes } from "./controllers/credentials.js";
 import { registerWebObjectRoutes } from "./controllers/webObjects.js";
+import { registerActionParameterRoutes } from "./controllers/actionParameters.js";
+import { registerCreatedObjectRoutes } from "./controllers/createdObjects.js";
 import { markUnfinishedCrawlRunsInterrupted } from "./services/crawlRunService.js";
 
 const app = express();
@@ -74,6 +76,8 @@ registerScriptModelRoutes(app);
 registerCrawlRunRoutes(app, SCREENSHOT_DIRECTORY);
 registerCredentialRoutes(app);
 registerWebObjectRoutes(app);
+registerActionParameterRoutes(app);
+registerCreatedObjectRoutes(app);
 
 // Production only, and after every route so the API always wins: any other
 // page load answers index.html, so react-router can render a client route.

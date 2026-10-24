@@ -20,6 +20,7 @@ import {
   listActionScriptRunsForScript,
   findActionScriptRunForScript,
   createActionScriptRunForScript,
+  findActionScriptRunWithObjects,
 } from "../services/dbService.js";
 import {
   type FailedRunDetails,
@@ -39,10 +40,18 @@ import {
 } from "../services/actionPlanRunnerService.js";
 import { buildCrawlLoginDetails } from "../services/crawlerLoginService.js";
 import {
+  followUpRecordedRun,
+  loadVersionParameters,
+  prepareParameterRun,
+  syncActionParametersQuietly,
+} from "../services/actionParameterService.js";
+import {
   buildAllowedPlanOrigins,
   planUsesCredentialPlaceholders,
   validateActionPlan,
+  type ActionPlan,
 } from "../utils/actionPlanSchema.js";
+import { applyParameterValues, expandAppliedPlan, readUsedParameterValues } from "../utils/actionParameters.js";
 import {
   CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE,
   credentialEncryptionIsConfigured,
@@ -59,6 +68,7 @@ import { statusForScriptGenerationFailure } from "../utils/statusForScriptGenera
 import {
   validateActionPlanEditInput,
   validateActionPlanRefineInput,
+  validateRunParameterValuesInput,
   validateScriptModelChoiceInput,
 } from "../utils/validateRequestBodies.js";
 
@@ -260,16 +270,22 @@ function buildRunFolderName(websiteId: string): string {
 /**
  * The body of the "run a version" route, after the lookups and the
  * one-run-per-action claim: checks the action's credential and the stored
- * plan, runs the plan, records the run, and answers the request.
+ * plan, puts the run's parameter values in (see `prepareParameterRun`) and
+ * checks the plan they make, runs it, records the run with the values it
+ * used, follows the run up (see `followUpRecordedRun`: the parameters learn
+ * from it, and a Create or deleting run updates the created objects), and
+ * answers the request.
  * @param res - The route's response
  * @param actionScriptDirectory - Absolute path of the action script directory
  * @param found - The active website, action, and version to run
+ * @param parameterValues - The run's values, by parameter key (validated as text)
  * @returns Resolves once the response is sent (errors reject, for the route's catch)
  */
 async function runPlanAndRecordRun(
   res: Response,
   actionScriptDirectory: string,
   found: WebsiteActionAndScript,
+  parameterValues: Record<string, string>,
 ): Promise<void> {
   const { website, action, script } = found;
   const { credentialId } = action;
@@ -313,9 +329,21 @@ async function runPlanAndRecordRun(
       ? null
       : { credentialName: credential.name, details: buildCrawlLoginDetails(credential, website) };
 
+  const parametersView = await loadVersionParameters(website.id, action, script);
+  const preparedRun = prepareParameterRun(parametersView, plan, parameterValues);
+  if (!preparedRun.isReady) {
+    res.status(400).json({ error: preparedRun.errorMessage });
+    return;
+  }
+  const valuedPlanValidation = validateActionPlan(expandAppliedPlan(preparedRun.applied), allowedOrigins);
+  if (!valuedPlanValidation.isValid) {
+    res.status(400).json({ error: `With these values the plan cannot run: ${valuedPlanValidation.errorMessage}` });
+    return;
+  }
+
   const runFolderName = buildRunFolderName(website.id);
   const run = await runActionPlan({
-    plan,
+    plan: preparedRun.applied.plan,
     login,
     timingSettings: {
       networkIdleTimeoutMs: website.networkIdleTimeoutMs,
@@ -324,6 +352,7 @@ async function runPlanAndRecordRun(
     allowedOrigins,
     runDirectory: path.join(actionScriptDirectory, runFolderName),
     uploadsDirectory: path.join(actionScriptDirectory, UPLOADS_FOLDER_NAME),
+    parameterRun: preparedRun.parameterRun,
   });
 
   const created = await createActionScriptRunForScript(website.id, action.id, script.id, {
@@ -340,8 +369,51 @@ async function runPlanAndRecordRun(
     failingPageUrl: run.failingPageUrl,
     failingPageAriaSnapshot: run.failingPageAriaSnapshot,
     durationMs: run.durationMs,
+    parameterValues: preparedRun.applied.usedValues,
+    finalPageUrl: run.finalPageUrl,
+    confirmStepNumber: preparedRun.parameterRun.confirmStepNumber,
+    confirmStepSucceeded: preparedRun.parameterRun.confirmStepNumber === null ? null : run.confirmStepSucceeded,
   });
-  res.status(201).json(created);
+  await followUpRecordedRun({
+    websiteId: website.id,
+    action,
+    actionScriptId: script.id,
+    plan: script.plan,
+    actionScriptRunId: created.id,
+    view: parametersView,
+    applied: preparedRun.applied,
+    runResult: run,
+  });
+  const createdWithObjects = await findActionScriptRunWithObjects(website.id, created.id);
+  res.status(201).json(createdWithObjects ?? created);
+}
+
+/**
+ * Puts the values a failed run used back into its version's plan, so Claude
+ * refines the plan that actually ran. When the values no longer fit (the
+ * parameters changed since), the version's own plan is sent as it is.
+ * @param websiteId - The owning website's cuid
+ * @param action - The action
+ * @param script - The version that ran
+ * @param run - The failed run
+ * @returns The plan with the run's values in
+ */
+async function planWithRunValues(
+  websiteId: string,
+  action: ActionWithCredential,
+  script: ActionScriptWithPlan,
+  run: ActionScriptRun,
+): Promise<ActionPlan> {
+  const runValues = Object.fromEntries(
+    readUsedParameterValues(run.parameterValues).map((usedValue) => [usedValue.key, usedValue.value]),
+  );
+  const runUsedNoValues = Object.keys(runValues).length === 0;
+  if (runUsedNoValues) return script.plan;
+  const view = await loadVersionParameters(websiteId, action, script);
+  const knownKeys = new Set(view.parameters.map((parameter) => parameter.key));
+  const knownRunValues = Object.fromEntries(Object.entries(runValues).filter(([parameterKey]) => knownKeys.has(parameterKey)));
+  const applied = applyParameterValues(script.plan, view.parameters, knownRunValues, view.objectChoices);
+  return applied.problems.length === 0 ? applied.plan : script.plan;
 }
 
 /**
@@ -462,8 +534,10 @@ async function readFailureScreenshotAsBase64(
  * Claude is shown the SOURCE version's snapshots (website, action, and
  * credential name, like the edit route copies them), the action's current
  * allowed origins, the source version's context pages, its summary,
- * assumptions, and plan, how the run failed, the failure screenshot when its
- * file is still on disk, and the user's note.
+ * assumptions, and plan - with the run's parameter values put back in (see
+ * `planWithRunValues`) - how the run failed, the failure screenshot when its
+ * file is still on disk, and the user's note. The new version's parameters
+ * are synced once it is saved.
  * @param res - The route's response
  * @param actionScriptDirectory - Absolute path of the action script directory (where the run's failure screenshot lives)
  * @param source - The failed run, the version it ran, and their website and action
@@ -485,6 +559,7 @@ async function refineRunAndSaveVersion(
     return;
   }
   const effort = chooseRefinementEffort(model, script.effort);
+  const planThatRan = await planWithRunValues(website.id, action, script, run);
 
   const actionCredential = await findActionCredential(website, action);
   const allowedOrigins = allowedOriginsFor(website, actionCredential);
@@ -508,7 +583,7 @@ async function refineRunAndSaveVersion(
       contextPages,
       previousSummary: script.summary,
       previousAssumptions: script.assumptions,
-      previousPlan: script.plan,
+      previousPlan: planThatRan,
       failedRun,
       failureScreenshotPngBase64,
       note,
@@ -541,6 +616,7 @@ async function refineRunAndSaveVersion(
       screenshotWasSent: refinement.screenshotWasSent,
     },
   );
+  await syncActionParametersQuietly(website.id, action);
   res.status(201).json(created);
 }
 
@@ -604,8 +680,8 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * (`selectRelevantCrawledPages`, from the newest crawl done the same way the
    * action runs). The reply must pass every plan rule; the same snapshots are
    * stored on the version, with the pages' URLs (`contextPageUrls`), the
-   * model that answered, and the effort level sent. The request lasts as long
-   * as Claude takes.
+   * model that answered, and the effort level sent. The action's parameters
+   * are synced once it is saved. The request lasts as long as Claude takes.
    * @route POST /api/websites/:websiteId/actions/:actionId/scripts
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action to convert
@@ -668,6 +744,7 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
         effort: conversion.effort,
         editedFromActionScriptId: null,
       });
+      await syncActionParametersQuietly(website.id, action);
       res.status(201).json(created);
     } catch (error: unknown) {
       res.status(statusForScriptGenerationFailure(error)).json({ error: describeError(error) });
@@ -684,7 +761,8 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * target and value it needs, and nothing that leaves the website's
    * origins. The new version copies its source's snapshots, summary,
    * assumptions, and context pages; `editedFromActionScriptId` names the
-   * source, and `modelId` and `effort` are null (no model wrote it).
+   * source, and `modelId` and `effort` are null (no model wrote it). The
+   * action's parameters are synced once it is saved.
    * @route POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/edits
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the owning action's cuid
@@ -732,6 +810,7 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
           effort: null,
           editedFromActionScriptId: sourceScript.id,
         });
+        await syncActionParametersQuietly(website.id, action);
         res.status(201).json(created);
       } catch (error: unknown) {
         res.status(500).json({ error: describeError(error) });
@@ -740,7 +819,9 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
   );
 
   /**
-   * Lists a script's active runs, newest first.
+   * Lists a script's active runs, newest first, each with the object it
+   * created (`createdObject`, or null) and the created objects it deleted
+   * (`deletedObjects`).
    * @route GET /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the owning action's cuid
@@ -780,6 +861,17 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * runner's fixed list of allowed actions - the plan is never turned into
    * code. One action runs one plan at a time.
    *
+   * PARAMETERS: the body may give a value for each of the version's
+   * parameters (see the parameters route); a key left out keeps the
+   * version's own value. A blank optional parameter skips the steps that use
+   * it, an added field with a value adds a step, and the plan the values make
+   * must pass every plan rule. The run records the values it used (secrets
+   * left out), its final address, and - for a Create action - its confirm
+   * step and whether it succeeded; a Create run whose confirm step succeeded
+   * records the object it made, and a passed deleting Object run marks the
+   * created object it deleted. The parameters then learn from the fields the
+   * run read.
+   *
    * A run that FAILED (a failed login, a step that could not be done, or the
    * 5 minute time limit) is still a successfully recorded run, so it answers
    * 201 with `succeeded: false`, plus the address (`failingPageUrl`) and aria
@@ -790,11 +882,17 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the owning action's cuid
    * @param actionScriptId - Path parameter: the version to run
-   * @returns 201 with the recorded run; 400 with `{ error }` when the action's credential has no login URL and neither does the website; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the action is already running, its credential is gone, the plan no longer passes the plan rules, or the plan types a credential the action does not have; 503 with `{ error }` when the action has a credential but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when the password cannot be decrypted, the run folder cannot be written, the browser cannot start, or a query fails
+   * @param body - Optional JSON `{ parameterValues }`: the values by parameter key, each text of at most 1000 characters without `{{`
+   * @returns 201 with the recorded run (with `createdObject` and `deletedObjects`); 400 with `{ error }` when the body is invalid, a key is not one of the version's parameters, a required value is blank, an object value has no known address for a version that opens it by address, the plan the values make breaks a plan rule, or the action's credential has no login URL and neither does the website; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the action is already running, its credential is gone, the plan no longer passes the plan rules, or the plan types a credential the action does not have; 503 with `{ error }` when the action has a credential but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when the password cannot be decrypted, the run folder cannot be written, the browser cannot start, or a query fails
    */
   app.post(
     "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs",
     async (req, res) => {
+      const valuesValidation = validateRunParameterValuesInput(req.body);
+      if (!valuesValidation.isValid) {
+        res.status(400).json({ error: valuesValidation.errorMessage });
+        return;
+      }
       try {
         const lookup = await findWebsiteActionAndScript(
           req.params.websiteId,
@@ -816,7 +914,12 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
         // together cannot both start a run; released however this ends.
         actionIdsBeingRun.add(action.id);
         try {
-          await runPlanAndRecordRun(res, actionScriptDirectory, { website, action, script });
+          await runPlanAndRecordRun(
+            res,
+            actionScriptDirectory,
+            { website, action, script },
+            valuesValidation.input.parameterValues,
+          );
         } finally {
           actionIdsBeingRun.delete(action.id);
         }

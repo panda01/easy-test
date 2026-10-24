@@ -4,6 +4,7 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Typography from "@mui/material/Typography";
 import ActionScriptDetails from "../components/ActionScriptDetails";
+import ActionScriptParameters from "../components/ActionScriptParameters";
 import ActionScriptRunHistory from "../components/ActionScriptRunHistory";
 import ActionScriptRunOutput, { describeOutputLineCount } from "../components/ActionScriptRunOutput";
 import ActionScriptRunsSection from "../components/ActionScriptRunsSection";
@@ -14,6 +15,7 @@ import LoadStatusNotice from "../components/LoadStatusNotice";
 import MoreActionsMenu from "../components/MoreActionsMenu";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import PageContainer from "../components/PageContainer";
+import { useActionParameters } from "../hooks/useActionParameters";
 import { type ActionScriptRunRecord, useActionScriptRuns } from "../hooks/useActionScriptRuns";
 import { type ActionScriptRecord, useActionScripts } from "../hooks/useActionScripts";
 import { useIsNarrowerThan } from "../hooks/useIsNarrowerThan";
@@ -22,18 +24,30 @@ import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { type ReturnState, useReturnToHereState } from "../hooks/useReturnNavigation";
 import { type ScriptModelOption, useScriptModels } from "../hooks/useScriptModels";
 import { type WebsiteItemDeletion, useWebsiteItemDeletion } from "../hooks/useWebsiteItemDeletion";
+import { useWebObjects } from "../hooks/useWebObjects";
 import { type WebsiteItemRecord, useWebsiteItem } from "../hooks/useWebsiteItems";
 import { useWebsite } from "../hooks/useWebsites";
 import { nocturneTokens } from "../theme/nocturneTheme";
+import { describeObjectRole } from "../utils/actionObjectRole";
+import {
+  type NewParameterRequestBody,
+  type ParameterChoicesRequestBody,
+  type ParameterValues,
+  type VersionParametersRecord,
+  buildStepParameterTags,
+} from "../utils/actionParameters";
 import { type ActionPlan } from "../utils/actionPlanSteps";
 import {
   WEBSITE_LIST_PATH,
+  actionParameterApiUrl,
   actionScriptComparePath,
+  actionScriptParametersApiUrl,
   actionScriptEditsApiUrl,
   actionScriptRunRefinementsApiUrl,
   actionScriptRunsApiUrl,
   actionScriptsApiUrl,
   websiteDetailPath,
+  websiteItemApiUrl,
   websiteItemEditPath,
 } from "../utils/routePaths";
 import { ACTION_KIND } from "../utils/websiteItemKinds";
@@ -118,19 +132,22 @@ interface ActionHeaderProps {
   deletion: WebsiteItemDeletion;
   /** True for the phone layout: a smaller title, no description, and Edit / Delete behind "⋯". */
   isPhoneLayout: boolean;
+  /** What the action does with an object, in one line ("Takes a Project (detected, High)"), or null for none. */
+  objectRoleLine: string | null;
 }
 
 /**
  * The top of an action's page, as the mockups draw it: the title, then the
  * description and who the action runs as ("Runs as **Admin**." or "Runs
- * logged out."), with Edit and Delete beside it - behind a "⋯" menu on a
+ * logged out."), then what it does with an object ("Creates a Project, named
+ * by Project name"), with Edit and Delete beside it - behind a "⋯" menu on a
  * phone, where the description is left out - and the delete confirmation
  * dialog.
  * @param props - The action, the edit link, the delete wiring, and the layout
  * @returns The rendered header
  */
 function ActionHeader(props: ActionHeaderProps): ReactElement {
-  const { action, editPath, editLinkState, deletion, isPhoneLayout } = props;
+  const { action, editPath, editLinkState, deletion, isPhoneLayout, objectRoleLine } = props;
   const credentialName = action.credential?.name ?? null;
   const runsAsText: ReactNode =
     credentialName === null ? (
@@ -163,6 +180,11 @@ function ActionHeader(props: ActionHeaderProps): ReactElement {
           {!isPhoneLayout && `${action.description} `}
           {runsAsText}
         </Typography>
+        {objectRoleLine !== null && (
+          <Typography sx={{ fontSize: isPhoneLayout ? 12.5 : 13, color: nocturneTokens.neutral[300], mt: "4px" }}>
+            {objectRoleLine}
+          </Typography>
+        )}
       </Box>
       {isPhoneLayout ? (
         <MoreActionsMenu editPath={editPath} editLinkState={editLinkState} onDeleteClick={deletion.openDeleteDialog} />
@@ -213,6 +235,13 @@ function ActionHeader(props: ActionHeaderProps): ReactElement {
  *   version, which becomes the shown one. Versions saved from the step editor
  *   have no model, so their runs cannot be refined.
  *
+ * PARAMETERS: the shown version's parameters (see `useActionParameters`)
+ * feed the run panel's values form, the steps' tags, the Parameters row
+ * (change, add, and remove them, and pick what names a created object), and
+ * the header's object role line. A run sends the values the user changed;
+ * after it, and after any parameter change, the parameters are fetched
+ * again.
+ *
  * Narrower (the phone layout, 2c), it is one column: a Version dropdown, the
  * latest run card (with "Run again" and "Refine" side by side), the steps,
  * then collapsed rows for the run history, the output log, and the rest.
@@ -230,7 +259,14 @@ export default function ActionDetailPage(): ReactElement {
   const websiteResource = useWebsite(websiteId);
   const actionResource = useWebsiteItem(ACTION_KIND, websiteId, actionId);
   const website = websiteResource.data;
-  const action = actionResource.data;
+  // An action saved on this page (its name parameter) replaces the fetched one.
+  const [savedAction, setSavedAction] = useState<WebsiteItemRecord | null>(null);
+  const action = savedAction !== null && savedAction.id === actionId ? savedAction : actionResource.data;
+  const webObjectsResource = useWebObjects(websiteId);
+  const objectTypes = (webObjectsResource.data ?? []).map((webObject) => ({
+    key: webObject.instancePatternKey,
+    name: webObject.name ?? webObject.detectedName,
+  }));
   const isPhoneLayout = useIsNarrowerThan("lg");
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -313,6 +349,13 @@ export default function ActionDetailPage(): ReactElement {
 
   const { runs, isLoading: runsAreLoading, errorMessage: runsErrorMessage, addFinishedRun } =
     useActionScriptRuns(websiteId, actionId, selectedScript?.id ?? null);
+  const {
+    view: parametersView,
+    isLoading: parametersAreLoading,
+    errorMessage: parametersErrorMessage,
+    reloadParameters,
+    showParameters,
+  } = useActionParameters(websiteId, actionId, selectedScript?.id ?? null);
   const [pickedRunId, setPickedRunId] = useState<string | null>(null);
   const selectedRun = runs.find((run) => run.id === pickedRunId) ?? runs.at(0) ?? null;
 
@@ -336,6 +379,77 @@ export default function ActionDetailPage(): ReactElement {
     isSubmitting: refineIsInFlight,
     errorMessage: refineErrorMessage,
   } = useJsonMutation();
+  const {
+    sendJsonRequest: sendParameterRequest,
+    isSubmitting: parameterSaveIsInFlight,
+    errorMessage: parameterSaveErrorMessage,
+  } = useJsonMutation();
+
+  /**
+   * PUTs a parameter's new label and required choice, then fetches the
+   * parameters again.
+   * @param parameterKey - The parameter's key
+   * @param choices - The new label and required choice
+   * @returns True when saved
+   */
+  const changeParameter = async (parameterKey: string, choices: ParameterChoicesRequestBody): Promise<boolean> => {
+    const result = await sendParameterRequest("PUT", actionParameterApiUrl(websiteId, actionId, parameterKey), choices);
+    if (result.succeeded) reloadParameters();
+    return result.succeeded;
+  };
+
+  /**
+   * DELETEs one of the user's own parameters, then fetches the parameters again.
+   * @param parameterKey - The parameter's key
+   */
+  const removeParameter = (parameterKey: string): void => {
+    void sendParameterRequest("DELETE", actionParameterApiUrl(websiteId, actionId, parameterKey)).then((result) => {
+      if (result.succeeded) reloadParameters();
+    });
+  };
+
+  /**
+   * POSTs a parameter the user adds to the shown version, and shows the
+   * parameters the server answers with.
+   * @param body - The new parameter
+   * @returns True when added
+   */
+  const addParameter = async (body: NewParameterRequestBody): Promise<boolean> => {
+    if (selectedScript === null) return false;
+    const result = await sendParameterRequest(
+      "POST",
+      actionScriptParametersApiUrl(websiteId, actionId, selectedScript.id),
+      body,
+    );
+    if (result.succeeded) showParameters(result.data as VersionParametersRecord);
+    return result.succeeded;
+  };
+
+  /**
+   * Saves which parameter names the objects a Create action makes - a PUT of
+   * the whole action with only that choice changed - then fetches the
+   * parameters again.
+   * @param parameterKey - The parameter's key, or null for "Detect"
+   */
+  const changeNameParameter = (parameterKey: string | null): void => {
+    if (action === null) return;
+    const actionBody = {
+      title: action.title,
+      description: action.description,
+      credentialId: action.credentialId ?? null,
+      userActionKind: action.userActionKind ?? null,
+      userObjectTypeKey: action.userObjectTypeKey ?? null,
+      userNameParameterKey: parameterKey,
+      userDeletesObject: action.userDeletesObject ?? null,
+    };
+    void sendParameterRequest("PUT", websiteItemApiUrl(ACTION_KIND, websiteId, actionId), actionBody).then(
+      (result) => {
+        if (!result.succeeded) return;
+        setSavedAction(result.data as WebsiteItemRecord);
+        reloadParameters();
+      },
+    );
+  };
 
   /**
    * POSTs a conversion with the chosen model and effort level and, when it
@@ -420,29 +534,37 @@ export default function ActionDetailPage(): ReactElement {
   const versionCanBeRefined = selectedScript !== null && selectedScript.modelId !== null;
 
   /**
-   * POSTs a run of the shown script and, when it is recorded, adds it to the
-   * history, shows it, and makes it the version's latest run (so the
-   * version's status icon updates at once). A failed RUN is still a recorded
-   * run; only a failed REQUEST is shown from `runErrorMessage`.
+   * POSTs a run of the shown script with the values the user changed and,
+   * when it is recorded, adds it to the history, shows it, and makes it the
+   * version's latest run (so the version's status icon updates at once) -
+   * then fetches the parameters again (the run taught them new readings,
+   * and may have created an object). A failed RUN is still a recorded run;
+   * only a failed REQUEST is shown from `runErrorMessage`.
+   * @param parameterValues - The changed values, by parameter key
    * @returns Resolves once the request is done
    */
-  const runSelectedScript = async (): Promise<void> => {
+  const runSelectedScript = async (parameterValues: ParameterValues): Promise<void> => {
     const thereIsNoScriptToRun = selectedScript === null;
     if (thereIsNoScriptToRun) return;
     const result = await sendRunRequest(
       "POST",
       actionScriptRunsApiUrl(websiteId, actionId, selectedScript.id),
+      { parameterValues },
     );
     if (!result.succeeded) return;
     const finishedRun = result.data as ActionScriptRunRecord;
     addFinishedRun(finishedRun);
     recordFinishedRun(finishedRun);
     setPickedRunId(finishedRun.id);
+    reloadParameters();
   };
 
-  /** Starts a run without returning its promise (the button expects a void callback). */
-  const handleRunClick = (): void => {
-    void runSelectedScript();
+  /**
+   * Starts a run without returning its promise (the button expects a void callback).
+   * @param parameterValues - The changed values, by parameter key
+   */
+  const handleRunClick = (parameterValues: ParameterValues): void => {
+    void runSelectedScript(parameterValues);
   };
 
   const breadcrumbs = (
@@ -502,7 +624,13 @@ export default function ActionDetailPage(): ReactElement {
 
   const runPanel = selectedScript !== null && (
     <ActionScriptRunsSection
+      // Keyed by version, so values typed for one version never carry over. The
+      // prefix keeps the key apart from the version details' own key - on a
+      // phone both are children of the same column.
+      key={`run-panel-${selectedScript.id}`}
       websiteId={websiteId}
+      parametersView={parametersView}
+      parametersErrorMessage={parametersErrorMessage}
       versionNumber={selectedScriptVersionNumber}
       runs={runs}
       isLoading={runsAreLoading}
@@ -564,8 +692,36 @@ export default function ActionDetailPage(): ReactElement {
         highlightedRun={selectedRun}
         isPhoneLayout={isPhoneLayout}
         leadingDisclosures={phoneRunDisclosures}
+        stepTags={buildStepParameterTags(parametersView)}
+        parameterCount={parametersView?.parameters.length ?? null}
+        parametersSection={
+          <ActionScriptParameters
+            view={parametersView}
+            isLoading={parametersAreLoading}
+            errorMessage={parametersErrorMessage}
+            objectTypes={objectTypes}
+            userNameParameterKey={action.userNameParameterKey ?? null}
+            isSaving={parameterSaveIsInFlight}
+            saveErrorMessage={parameterSaveErrorMessage}
+            onChangeParameter={changeParameter}
+            onRemoveParameter={removeParameter}
+            onAddParameter={addParameter}
+            onNameParameterChange={changeNameParameter}
+          />
+        }
       />
     );
+
+  const nameParameterLabel =
+    parametersView?.parameters.find((parameter) => parameter.key === parametersView.nameParameterKey)?.label ?? null;
+  const objectRole = parametersView?.role ?? action.objectRole ?? null;
+  const objectRoleLine =
+    objectRole === null
+      ? null
+      : describeObjectRole(objectRole, {
+          nameParameterLabel,
+          confirmStepNumber: parametersView?.confirmStepNumber ?? null,
+        });
 
   return (
     <PageContainer>
@@ -576,6 +732,7 @@ export default function ActionDetailPage(): ReactElement {
         editLinkState={returnToHereState}
         deletion={deletion}
         isPhoneLayout={isPhoneLayout}
+        objectRoleLine={objectRoleLine}
       />
 
       {isPhoneLayout ? (

@@ -23,7 +23,7 @@ const { mockChromium, mockBrowser, mockPage, mockBodyLocator, mockLinkLocator, M
       isClosed: vi.fn(),
       on: vi.fn(),
     },
-    mockBodyLocator: { ariaSnapshot: vi.fn() },
+    mockBodyLocator: { ariaSnapshot: vi.fn(), evaluate: vi.fn() },
     mockLinkLocator: { evaluateAll: vi.fn() },
     /** Stands in for Playwright's `errors.TimeoutError`, which the readiness wait checks with instanceof. */
     MockTimeoutError: class MockTimeoutError extends Error {},
@@ -207,6 +207,7 @@ describe("crawlWebsite", () => {
     mockBodyLocator.ariaSnapshot.mockImplementation(() =>
       Promise.resolve(readShownPage().ariaSnapshot ?? `- text: ${currentUrl}`),
     );
+    mockBodyLocator.evaluate.mockResolvedValue({ fields: [], startFieldIndex: -1 });
     mockLinkLocator.evaluateAll.mockImplementation(() =>
       Promise.resolve({ baseUrl: currentUrl, hrefs: readShownPage().hrefs ?? [] }),
     );
@@ -287,6 +288,7 @@ describe("crawlWebsite", () => {
       title: "Home",
       ariaSnapshot: '- heading "Home" [level=1]',
       linkedUrls: ["https://example.com/about", "https://example.com/blog"],
+      formFields: [],
       durationMs: expect.any(Number),
     });
     expect(findRecordedPage("https://example.com/about").linkedUrls).toEqual([
@@ -462,9 +464,53 @@ describe("crawlWebsite", () => {
       title: null,
       ariaSnapshot: null,
       linkedUrls: [],
+      formFields: [],
       durationMs: expect.any(Number),
     });
     expect(findRecordedPage("https://example.com/ok").succeeded).toBe(true);
+  });
+
+  it("records each page's form fields, read in the browser, and none when they cannot be read", async () => {
+    installFakeSite({
+      "https://example.com/": { title: "Home", hrefs: ["/signup"] },
+      "https://example.com/signup": { title: "Sign up" },
+    });
+    mockBodyLocator.evaluate
+      .mockRejectedValueOnce(new Error("Execution context was destroyed"))
+      .mockResolvedValueOnce({
+        fields: [
+          {
+            tagName: "select",
+            typeAttribute: null,
+            roleAttribute: null,
+            allowsMultiple: false,
+            label: "Plan",
+            placeholder: null,
+            isRequired: true,
+            containerNumber: 1,
+            containerName: "Sign up",
+          },
+        ],
+        startFieldIndex: -1,
+      });
+
+    await crawlWebsite(START_URL, TIMING_SETTINGS, recordVisitedPage, recordStructureSkeletons);
+
+    expect(findRecordedPage("https://example.com/").formFields).toEqual([]);
+    expect(findRecordedPage("https://example.com/signup").formFields).toEqual([
+      {
+        role: "combobox",
+        inputType: "select",
+        label: "Plan",
+        placeholder: null,
+        isRequired: true,
+        containerNumber: 1,
+        containerName: "Sign up",
+      },
+    ]);
+    expect(mockBodyLocator.evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ field: expect.any(String) }), {
+      timeout: 10_000,
+    });
   });
 
   it("records an HTTP 404 page as failed, but still keeps its snapshot and follows its links", async () => {

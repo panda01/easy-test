@@ -13,9 +13,16 @@ const mockDbService = vi.hoisted(() => ({
   findCredentialForWebsite: vi.fn(),
 }));
 
+/** The parameter service is replaced: its own spec covers what it reads and syncs. */
+const mockActionParameterService = vi.hoisted(() => ({
+  loadActionRole: vi.fn(),
+  syncActionParametersQuietly: vi.fn(),
+}));
+
 // The real dbService builds a PrismaClient at load time; this spec is about
 // the HTTP contract of the routes, so the whole service is replaced.
 vi.mock("../../../server/services/dbService.js", () => mockDbService);
+vi.mock("../../../server/services/actionParameterService.js", () => mockActionParameterService);
 
 import { registerActionRoutes } from "../../../server/controllers/actions.js";
 
@@ -50,6 +57,17 @@ const foundWebsite = {
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,
+};
+
+/** What the single-action routes add: the action's object role (shape only; see `scoreActionObjectRole`). */
+const SAMPLE_OBJECT_ROLE = { kind: "parameters", kindSource: "detected", warnings: [] };
+
+/** What an action body leaves as "detect" when it names no object role choice. */
+const DETECT_EVERY_ROLE_CHOICE = {
+  userActionKind: null,
+  userObjectTypeKey: null,
+  userNameParameterKey: null,
+  userDeletesObject: null,
 };
 
 const ACTIONS_PATH = `/api/websites/${REQUESTED_WEBSITE_ID}/actions`;
@@ -94,6 +112,8 @@ const sampleLinkedAction = {
 describe("action routes", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mockActionParameterService.loadActionRole.mockResolvedValue(SAMPLE_OBJECT_ROLE);
+    mockActionParameterService.syncActionParametersQuietly.mockResolvedValue(undefined);
     // Every route checks the website first; it exists unless a test says not.
     mockDbService.findWebsiteById.mockResolvedValue(foundWebsite);
   });
@@ -182,12 +202,13 @@ describe("action routes", () => {
         .send({ title: " Log in  ", description: "  Enter credentials and submit the form " });
 
       expect(res.status).toBe(201);
-      expect(res.body).toEqual(sampleAction);
+      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE });
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.createActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, {
         title: "Log in",
         description: "Enter credentials and submit the form",
         credentialId: null,
+        ...DETECT_EVERY_ROLE_CHOICE,
       });
       expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
     });
@@ -205,7 +226,7 @@ describe("action routes", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body).toEqual(sampleLinkedAction);
+      expect(res.body).toEqual({ ...sampleLinkedAction, objectRole: SAMPLE_OBJECT_ROLE });
       expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         foundCredential.id,
@@ -214,6 +235,7 @@ describe("action routes", () => {
         title: "Log in",
         description: "Enter credentials and submit the form",
         credentialId: foundCredential.id,
+        ...DETECT_EVERY_ROLE_CHOICE,
       });
     });
 
@@ -230,6 +252,7 @@ describe("action routes", () => {
         title: "Log in",
         description: "Enter credentials",
         credentialId: null,
+        ...DETECT_EVERY_ROLE_CHOICE,
       });
     });
 
@@ -326,7 +349,7 @@ describe("action routes", () => {
       const res = await request(createActionsApp()).get(ACTION_PATH);
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(sampleAction);
+      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE });
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.findActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
@@ -373,12 +396,12 @@ describe("action routes", () => {
         .send({ title: "  Log out", description: "Open the menu and log out  " });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(updatedAction);
+      expect(res.body).toEqual({ ...updatedAction, objectRole: SAMPLE_OBJECT_ROLE });
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         "action-1",
-        { title: "Log out", description: "Open the menu and log out", credentialId: null },
+        { title: "Log out", description: "Open the menu and log out", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE },
       );
     });
 
@@ -391,7 +414,7 @@ describe("action routes", () => {
         .send({ title: "Log in", description: "Enter credentials", credentialId: foundCredential.id });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(sampleLinkedAction);
+      expect(res.body).toEqual({ ...sampleLinkedAction, objectRole: SAMPLE_OBJECT_ROLE });
       expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         foundCredential.id,
@@ -399,7 +422,7 @@ describe("action routes", () => {
       expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         "action-1",
-        { title: "Log in", description: "Enter credentials", credentialId: foundCredential.id },
+        { title: "Log in", description: "Enter credentials", credentialId: foundCredential.id, ...DETECT_EVERY_ROLE_CHOICE },
       );
     });
 
@@ -411,12 +434,12 @@ describe("action routes", () => {
         .send({ title: "Log in", description: "Enter credentials" });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(sampleAction);
+      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE });
       expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
       expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         "action-1",
-        { title: "Log in", description: "Enter credentials", credentialId: null },
+        { title: "Log in", description: "Enter credentials", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE },
       );
     });
 
@@ -534,6 +557,61 @@ describe("action routes", () => {
 
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: "database offline" });
+    });
+  });
+
+  describe("object role", () => {
+    it("saves the role choices a body names, and answers with the action's role", async () => {
+      mockDbService.createActionForWebsite.mockResolvedValue(sampleAction);
+
+      const res = await request(createActionsApp()).post(ACTIONS_PATH).send({
+        title: "Create a project",
+        description: "Adds one",
+        userActionKind: "create",
+        userObjectTypeKey: "/projects/{project}",
+        userNameParameterKey: "projectName",
+        userDeletesObject: null,
+      });
+
+      expect(res.status).toBe(201);
+      expect(mockDbService.createActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, {
+        title: "Create a project",
+        description: "Adds one",
+        credentialId: null,
+        userActionKind: "create",
+        userObjectTypeKey: "/projects/{project}",
+        userNameParameterKey: "projectName",
+        userDeletesObject: null,
+      });
+      expect(mockActionParameterService.loadActionRole).toHaveBeenCalledWith(foundWebsite.id, sampleAction);
+    });
+
+    it("refuses an unknown kind before touching anything", async () => {
+      const res = await request(createActionsApp())
+        .put(ACTION_PATH)
+        .send({ title: "Log in", description: "Enter credentials", userActionKind: "destroy" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "The action kind must be one of: detect, parameters, object, create" });
+      expect(mockDbService.updateActionForWebsite).not.toHaveBeenCalled();
+    });
+
+    it("syncs the action's parameters after a replace, since its kind or type may have changed", async () => {
+      mockDbService.updateActionForWebsite.mockResolvedValue(sampleAction);
+
+      await request(createActionsApp()).put(ACTION_PATH).send({ title: "Log in", description: "Enter credentials" });
+
+      expect(mockActionParameterService.syncActionParametersQuietly).toHaveBeenCalledWith(foundWebsite.id, sampleAction);
+    });
+
+    it("answers 500 when the role cannot be worked out", async () => {
+      mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
+      mockActionParameterService.loadActionRole.mockRejectedValue(new Error("web objects unavailable"));
+
+      const res = await request(createActionsApp()).get(ACTION_PATH);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "web objects unavailable" });
     });
   });
 });

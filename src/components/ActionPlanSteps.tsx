@@ -1,6 +1,7 @@
 import { type ReactElement } from "react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
+import StatusTag from "./StatusTag";
 import { MONOSPACE_FONT_FAMILY, nocturneTokens, statusColors } from "../theme/nocturneTheme";
 import { type ActionPlan, describePlanStepParts } from "../utils/actionPlanSteps";
 
@@ -22,6 +23,8 @@ export interface ActionPlanStepsProps {
   highlightedRun: HighlightedRunFields | null;
   /** True for the phone list: tighter rows, and no "Failed here" note (the run card above says it). */
   isCompact: boolean;
+  /** Tags to show on steps, by 1-based step number - the parameters each step uses, and "Confirm" (see `buildStepParameterTags`); omit for none. */
+  stepTags?: ReadonlyMap<number, string[]>;
 }
 
 /** How a step is drawn against the highlighted run. */
@@ -75,11 +78,14 @@ function firstLineOf(errorMessage: string | null): string {
  * the run got through have green numbers, the step it failed at is tinted red
  * with "Failed here — <the error's first line>", and the steps it never
  * reached are dimmed. With no run, the steps are unmarked.
- * @param props - The plan, the run to mark it by, and the layout
+ *
+ * A step a parameter writes into carries that parameter's name as a tag, and
+ * a Create action's confirm step a "Confirm" tag (`stepTags`).
+ * @param props - The plan, the run to mark it by, the step tags, and the layout
  * @returns The numbered step list
  */
 export default function ActionPlanSteps(props: ActionPlanStepsProps): ReactElement {
-  const { plan, highlightedRun, isCompact } = props;
+  const { plan, highlightedRun, isCompact, stepTags } = props;
   return (
     <Box>
       <Typography sx={{ fontSize: 12.5, color: nocturneTokens.neutral[400], mb: 1, overflowWrap: "anywhere" }}>
@@ -131,6 +137,11 @@ export default function ActionPlanSteps(props: ActionPlanStepsProps): ReactEleme
                   {verb}
                 </Box>{" "}
                 {rest}
+                {(stepTags?.get(stepNumber) ?? []).map((stepTag) => (
+                  <Box component="span" key={stepTag} sx={{ ml: "6px" }}>
+                    <StatusTag label={stepTag} tone={stepTag === "Confirm" ? "loggedIn" : "accent"} isCompact />
+                  </Box>
+                ))}
                 {stepFailedHere && !isCompact && (
                   <Box sx={{ fontSize: 12.5, color: statusColors.failedStepNote, mt: "2px" }}>
                     Failed here — {firstLineOf(highlightedRun?.errorMessage ?? null)}

@@ -363,3 +363,53 @@ export function webObjectApiUrl(websiteId: string, webObjectId: string): string 
 export function credentialApiUrl(websiteId: string, credentialId: string): string {
   return `${credentialsApiUrl(websiteId)}/${encodeURIComponent(credentialId)}`;
 }
+
+/**
+ * Builds the API url of one version's parameters: GET reads them (with the
+ * action's object role, the object choices, and a Create action's confirm
+ * step and name parameter), POST adds one of the user's own.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The version's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/parameters`
+ */
+export function actionScriptParametersApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+): string {
+  return `${actionScriptsApiUrl(websiteId, actionId)}/${encodeURIComponent(actionScriptId)}/parameters`;
+}
+
+/**
+ * Builds the API url of one of an action's parameters: PUT
+ * `{ userLabel, userRequiredChoice }` changes it, DELETE removes one the user
+ * added.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param parameterKey - The parameter's key
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/parameters/<parameterKey>`
+ */
+export function actionParameterApiUrl(websiteId: string, actionId: string, parameterKey: string): string {
+  return `${websiteItemApiUrl(ACTION_KIND, websiteId, actionId)}/parameters/${encodeURIComponent(parameterKey)}`;
+}
+
+/**
+ * Builds the API url of a website's created objects: GET lists the record of
+ * the objects its Create actions made.
+ * @param websiteId - The owning website's cuid
+ * @returns `/api/websites/<websiteId>/created-objects`
+ */
+export function createdObjectsApiUrl(websiteId: string): string {
+  return `${websiteApiUrl(websiteId)}/created-objects`;
+}
+
+/**
+ * Builds the API url of one created object: DELETE removes it from the record.
+ * @param websiteId - The owning website's cuid
+ * @param createdObjectId - The created object's cuid
+ * @returns `/api/websites/<websiteId>/created-objects/<createdObjectId>`
+ */
+export function createdObjectApiUrl(websiteId: string, createdObjectId: string): string {
+  return `${createdObjectsApiUrl(websiteId)}/${encodeURIComponent(createdObjectId)}`;
+}

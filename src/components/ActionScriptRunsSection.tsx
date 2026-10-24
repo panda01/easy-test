@@ -1,15 +1,22 @@
-import { type ReactElement } from "react";
+import { type ReactElement, useState } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import LinearProgress from "@mui/material/LinearProgress";
 import Typography from "@mui/material/Typography";
+import ActionRunParameterFields from "./ActionRunParameterFields";
 import ActionScriptRunDetails from "./ActionScriptRunDetails";
 import ActionScriptRunHistory from "./ActionScriptRunHistory";
 import { PlayArrowIcon } from "./icons";
 import LoadStatusNotice from "./LoadStatusNotice";
 import { type ActionScriptRunRecord } from "../hooks/useActionScriptRuns";
 import { nocturneTokens } from "../theme/nocturneTheme";
+import {
+  type ParameterValues,
+  type VersionParametersRecord,
+  listChangedParameterValues,
+  listParametersToFix,
+} from "../utils/actionParameters";
 
 const HEADING_ID = "action-script-runs-section-heading";
 const HISTORY_HEADING_ID = "action-script-run-history-heading";
@@ -34,8 +41,12 @@ export interface ActionScriptRunsSectionProps {
   isRunning: boolean;
   /** Why the last "Run" request failed, or null. */
   runErrorMessage: string | null;
-  /** Called when the user clicks "Run" / "Run again". */
-  onRunClick: () => void;
+  /** Called with the values the user changed (by parameter key) when they click "Run" / "Run again". */
+  onRunClick: (parameterValues: ParameterValues) => void;
+  /** The version's parameters view, or null while it loads (the run waits for it). */
+  parametersView: VersionParametersRecord | null;
+  /** Why the parameters could not be loaded, or null. */
+  parametersErrorMessage: string | null;
   /** True when the version was written by Claude (not saved from the step editor), so its failed runs can be refined. */
   versionCanBeRefined: boolean;
   /** True while a "Refine" request is in flight. */
@@ -64,7 +75,14 @@ export interface ActionScriptRunsSectionProps {
  * The heading says "Latest run" while the newest run is shown, and "Run"
  * once the user picks an older one. The details are keyed by the run's id,
  * so the note and whether a refine was tried start over for each run.
- * @param props - The runs, the shown run, the request states, the callbacks, and the layout
+ *
+ * Above the run's details sit the run's values (see
+ * `ActionRunParameterFields`): prefilled with the version's own, and sent -
+ * only the ones the user changed - with "Run". Run is disabled while a
+ * required value is blank or a value breaks a rule, and until the
+ * parameters have loaded. The page keys this panel by version, so values
+ * typed for one version never carry over to another.
+ * @param props - The runs, the shown run, the parameters, the request states, the callbacks, and the layout
  * @returns The rendered panel
  */
 export default function ActionScriptRunsSection(props: ActionScriptRunsSectionProps): ReactElement {
@@ -85,7 +103,28 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     onRefine,
     nextVersionNumber,
     isPhoneLayout,
+    parametersView,
+    parametersErrorMessage,
   } = props;
+  const [editedValues, setEditedValues] = useState<ParameterValues>({});
+  const parameters = parametersView?.parameters ?? [];
+  const parametersToFix = listParametersToFix(parameters, editedValues);
+  const parametersAreLoading = parametersView === null && parametersErrorMessage === null;
+  const runIsBlocked = isRunning || parametersAreLoading || parametersToFix.length > 0;
+
+  /**
+   * Remembers a value the user typed or picked.
+   * @param parameterKey - The parameter's key
+   * @param value - Its new value
+   */
+  const handleValueChange = (parameterKey: string, value: string): void => {
+    setEditedValues((previousValues) => ({ ...previousValues, [parameterKey]: value }));
+  };
+
+  /** Runs with the values the user changed. */
+  const handleRunClick = (): void => {
+    onRunClick(listChangedParameterValues(parameters, editedValues));
+  };
 
   const runFailedToStart = runErrorMessage !== null;
   const runListLoadedWithoutError = !isLoading && errorMessage === null;
@@ -101,8 +140,8 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
   }
   const runButton = (
     <Button
-      onClick={onRunClick}
-      disabled={isRunning}
+      onClick={handleRunClick}
+      disabled={runIsBlocked}
       variant="outlined"
       // On the phone card Refine is the primary action beside it, as in the mockup.
       color={isPhoneLayout ? "secondary" : "primary"}
@@ -148,6 +187,24 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
           </Typography>
           {runButton}
         </Box>
+      )}
+
+      {parametersView !== null && (
+        <ActionRunParameterFields
+          parameters={parameters}
+          objectChoices={parametersView.objectChoices}
+          values={editedValues}
+          onValueChange={handleValueChange}
+          isDisabled={isRunning}
+        />
+      )}
+      {parametersErrorMessage !== null && (
+        <Alert severity="warning">Could not load this version's parameters: {parametersErrorMessage}</Alert>
+      )}
+      {parametersToFix.length > 0 && !isRunning && (
+        <Typography sx={{ fontSize: 12.5, color: nocturneTokens.neutral[400] }}>
+          Fill in {parametersToFix.join(", ")} to run.
+        </Typography>
       )}
 
       {runStatusNotices}

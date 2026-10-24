@@ -26,6 +26,7 @@ import { measureElapsedMs } from "./playwrightService.js";
 import { describeError } from "../utils/describeError.js";
 import { DEFAULT_CRAWL_BUTTON_MODE, type CrawlButtonMode } from "../utils/crawlButtonModes.js";
 import { saveCrawlWebObjects } from "./webObjectService.js";
+import { checkCreatedObjectsAfterCrawl, syncWebsiteActionParameters } from "./actionParameterService.js";
 import type { NewStructureSkeleton } from "../utils/crawlPatternSampling.js";
 
 /**
@@ -233,6 +234,9 @@ function describeCrawlRunEnding(
  * ended - with the links its sampling skipped - and, when it recorded at
  * least one page, the web objects it found, which replace the website's
  * previous ones (see `saveCrawlWebObjects`; a failure there is only logged).
+ * After those it checks the website's created objects against the crawl
+ * (`checkCreatedObjectsAfterCrawl`) and syncs every action's parameters with
+ * its pages (`syncWebsiteActionParameters`) - both only log a failure.
  *
  * NEVER rejects - every failure becomes a `failed` run (or a log line) -
  * because nothing awaits it in production. When the run was deleted with its
@@ -327,6 +331,8 @@ async function runCrawlInBackground(
         crawlRun.id,
         crawlOutcome.skippedSimilarUrlCountsByPattern,
       );
+      await checkCreatedObjectsAfterCrawl(website.id, crawlRun.id, crawlRun.createdAt);
+      await syncWebsiteActionParameters(website.id);
     }
   } catch (crawlError: unknown) {
     await recordCrawlFailure(crawlRun, crawlStartedAt, crawlError);
