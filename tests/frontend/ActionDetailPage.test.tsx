@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act, screen, waitFor, within, type RenderResult } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 import { userEvent, type UserEvent } from "@testing-library/user-event";
 import { type ReactElement } from "react";
 import { Route, useLocation, useNavigationType } from "react-router-dom";
@@ -9,6 +9,7 @@ import {
   buildActionScriptRecord,
   buildActionScriptRefinementRecord,
   buildActionScriptRunRecord,
+  buildAutoRefineJobRecord,
   buildJsonResponse,
   buildScriptModelCatalog,
   buildActionObjectRoleRecord,
@@ -35,6 +36,7 @@ const WEBSITE_API_URL = "/api/websites/website-1";
 const ACTION_PATH = `${WEBSITE_PATH}/actions/item-1`;
 const ACTION_API_URL = `${WEBSITE_API_URL}/actions/item-1`;
 const SCRIPTS_API_URL = `${ACTION_API_URL}/scripts`;
+const AUTO_REFINE_JOBS_API_URL = `${ACTION_API_URL}/auto-refine-jobs`;
 const SCRIPT_MODELS_API_URL = "/api/script-models";
 
 /** Matches the Model dropdown, whose accessible name may also carry the chosen model. */
@@ -171,6 +173,7 @@ function stubLoadedAction(scripts: unknown[], extraRoutes: StubbedRouteTable = {
     [`GET ${SCRIPTS_API_URL}`]: { status: 200, body: scripts },
     [`GET ${SCRIPT_MODELS_API_URL}`]: { status: 200, body: buildScriptModelCatalog() },
     [`GET ${WEBSITE_API_URL}/web-objects`]: { status: 200, body: [] },
+    [`GET ${AUTO_REFINE_JOBS_API_URL}`]: { status: 200, body: [] },
     ...buildEmptyParametersRoutes(),
     ...extraRoutes,
   });
@@ -1574,6 +1577,315 @@ describe("ActionDetailPage", () => {
           }),
         });
       });
+    });
+  });
+
+  describe("auto-refining the shown version", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /**
+     * Moves the fake clock forward and lets whatever it triggered settle -
+     * the next poll of the job, and then the refetches of the versions and
+     * runs it causes (two more passes, since they start only once the poll's
+     * reply has been rendered, and their own replies render after that).
+     * @param milliseconds - How far to move the clock
+     * @returns Resolves once the triggered work has settled
+     */
+    async function advanceClock(milliseconds: number): Promise<void> {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(milliseconds);
+      });
+      const settlingPassCount = 2;
+      for (let settlingPass = 0; settlingPass < settlingPassCount; settlingPass += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+      }
+    }
+
+    /**
+     * Reads the shown run's outcome banner inside the run panel (the versions
+     * column has a `role="status"` line of its own while a job runs).
+     * @returns The run panel's status banner
+     */
+    function readRunPanelStatus(): HTMLElement {
+      return within(screen.getByRole("region", { name: "Latest run" })).getByRole("status");
+    }
+
+    /**
+     * Builds the start route's url for a version.
+     * @param actionScriptId - The version to auto-refine
+     * @returns The POST url
+     */
+    function autoRefineStartUrl(actionScriptId: string): string {
+      return `${SCRIPTS_API_URL}/${actionScriptId}/auto-refine-jobs`;
+    }
+
+    const JOB_API_URL = `${AUTO_REFINE_JOBS_API_URL}/auto-refine-job-1`;
+    const JOB_STOP_API_URL = `${JOB_API_URL}/stop`;
+
+    /** Version 1's parameters: one required name, prefilled from the plan. */
+    const parametersOfOlderScript = buildVersionParametersRecord({
+      parameters: [buildVersionParameterRecord({ uses: [{ stepNumber: 1, field: "value" }] })],
+    });
+
+    /** Version 2, as the job's first refinement saves it. */
+    const refinedScript = buildActionScriptRecord({
+      id: "script-2",
+      summary: "Refined by the job.",
+      refinement: buildActionScriptRefinementRecord({
+        sourceActionScriptId: "script-1",
+        actionScriptRunId: "script-run-9",
+        refinedActionScriptId: "script-2",
+      }),
+      createdAt: "2026-04-06T00:00:00.000Z",
+    });
+
+    /** The run of Version 2 that passed. */
+    const passedRunOfRefinedScript = buildActionScriptRunRecord({
+      id: "script-run-10",
+      actionScriptId: "script-2",
+      succeeded: true,
+      createdAt: "2026-04-06T00:01:00.000Z",
+    });
+
+    it("starts a job for the shown version with the typed values, then follows it: each new run and version is fetched and shown, and the outcome is reported", async () => {
+      const startedJob = buildAutoRefineJobRecord({ parameterValues: { projectName: "Apollo 8" } });
+      const jobAfterFirstRun = buildAutoRefineJobRecord({
+        ...startedJob,
+        phase: "refining",
+        actionScriptRunIds: ["script-run-9"],
+      });
+      const jobAfterRefinement = buildAutoRefineJobRecord({
+        ...jobAfterFirstRun,
+        phase: "running",
+        currentActionScriptId: "script-2",
+        refinementsDone: 1,
+        createdActionScriptIds: ["script-2"],
+      });
+      const passedJob = buildAutoRefineJobRecord({
+        ...jobAfterRefinement,
+        status: "passed",
+        phase: null,
+        actionScriptRunIds: ["script-run-9", "script-run-10"],
+        finishedAt: "2026-04-06T00:01:00.000Z",
+      });
+      // The job is fetched as soon as it is watched, then every 2 seconds.
+      const polledJobs = [startedJob, jobAfterFirstRun, jobAfterRefinement, passedJob];
+      // What the server knows grows with each poll: the lists answer from these flags.
+      let latestPolledJob = startedJob;
+      const theFirstRunHasBeenRecorded = (): boolean => latestPolledJob.actionScriptRunIds.length >= 1;
+      const theRefinementHasBeenSaved = (): boolean => latestPolledJob.createdActionScriptIds.length >= 1;
+      const theSecondRunHasBeenRecorded = (): boolean => latestPolledJob.actionScriptRunIds.length >= 2;
+      const fetchStub = stubLoadedAction([olderScript], {
+        [`GET ${SCRIPTS_API_URL}`]: () =>
+          Promise.resolve(
+            buildJsonResponse(200, theRefinementHasBeenSaved() ? [refinedScript, olderScript] : [olderScript]),
+          ),
+        [`GET ${runsApiUrl("script-1")}`]: () =>
+          Promise.resolve(buildJsonResponse(200, theFirstRunHasBeenRecorded() ? [failedRunOfOlderScript] : [])),
+        [`GET ${runsApiUrl("script-2")}`]: () =>
+          Promise.resolve(
+            buildJsonResponse(200, theSecondRunHasBeenRecorded() ? [passedRunOfRefinedScript] : []),
+          ),
+        [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: parametersOfOlderScript },
+        [`POST ${autoRefineStartUrl("script-1")}`]: { status: 201, body: startedJob },
+        [`GET ${JOB_API_URL}`]: () => {
+          latestPolledJob = polledJobs.shift() ?? passedJob;
+          return Promise.resolve(buildJsonResponse(200, latestPolledJob));
+        },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      const autoRefineButton = screen.getByRole("button", { name: "Auto-refine Version 1" });
+      expect(autoRefineButton).toBeEnabled();
+      // Changed with fireEvent: user-event's own timers would stall under the fake clock.
+      fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), { target: { value: "Apollo 8" } });
+      fireEvent.click(autoRefineButton);
+      await advanceClock(0);
+
+      expect(fetchStub).toHaveBeenCalledWith(autoRefineStartUrl("script-1"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parameterValues: { projectName: "Apollo 8" } }),
+      });
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Convert to new version" })).toBeDisabled();
+      expect(screen.getByRole("progressbar", { name: "Auto-refining" })).toBeInTheDocument();
+      expect(screen.getByText("Refinement 0 of 5 · Running Version 1…")).toBeInTheDocument();
+      expect(countRequests(fetchStub, "GET", JOB_API_URL)).toBe(1);
+
+      // The first poll: the run of Version 1 failed and is being refined.
+      await advanceClock(2000);
+      expect(screen.getByText("Refining Version 1 into Version 2…")).toBeInTheDocument();
+      expect(countRequests(fetchStub, "GET", runsApiUrl("script-1"))).toBe(2);
+      expect(readRunPanelStatus()).toHaveTextContent("Failed at step 2");
+
+      // The second poll: Version 2 was saved and is being run - the list is
+      // fetched again and the page moves to the newest version.
+      await advanceClock(2000);
+      expect(countRequests(fetchStub, "GET", SCRIPTS_API_URL)).toBe(2);
+      expect(screen.getByRole("heading", { name: "Version 2" })).toBeInTheDocument();
+      expect(screen.getByTestId("readout-search").textContent).toBe("?version=2");
+      expect(screen.getByTestId("readout-navigation-type").textContent).toBe("REPLACE");
+      expect(screen.getByText("Refinement 1 of 5 · Running Version 2…")).toBeInTheDocument();
+      expect(getVersionButtons()).toHaveLength(2);
+
+      // The third poll: Version 2 passed, the job is over.
+      await advanceClock(2000);
+      expect(screen.getByRole("alert")).toHaveTextContent("Version 2 passed after 1 refinement.");
+      expect(screen.queryByRole("progressbar", { name: "Auto-refining" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeEnabled();
+      expect(readRunPanelStatus()).toHaveTextContent("Passed");
+      expect(countRequests(fetchStub, "GET", runsApiUrl("script-2"))).toBe(2);
+      expect(countRequests(fetchStub, "GET", parametersApiUrl("script-2"))).toBeGreaterThanOrEqual(2);
+
+      // The job has ended, so it is not fetched again.
+      await advanceClock(10_000);
+      expect(countRequests(fetchStub, "GET", JOB_API_URL)).toBe(4);
+    });
+
+    it("picks up a job already running when the page opens, and Stop asks it to stop after the current step", async () => {
+      const runningJob = buildAutoRefineJobRecord();
+      const stopRequestedJob = buildAutoRefineJobRecord({
+        stopRequestedAt: "2026-04-05T03:05:00.000Z",
+        updatedAt: "2026-04-05T03:05:00.000Z",
+      });
+      const stoppedJob = buildAutoRefineJobRecord({
+        ...stopRequestedJob,
+        status: "stopped",
+        phase: null,
+        actionScriptRunIds: ["script-run-9"],
+        updatedAt: "2026-04-05T03:06:00.000Z",
+        finishedAt: "2026-04-05T03:06:00.000Z",
+      });
+      let jobWasStopped = false;
+      const fetchStub = stubLoadedAction([olderScript], {
+        [`GET ${AUTO_REFINE_JOBS_API_URL}`]: { status: 200, body: [runningJob] },
+        [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+        [`GET ${JOB_API_URL}`]: () =>
+          Promise.resolve(buildJsonResponse(200, jobWasStopped ? stoppedJob : runningJob)),
+        [`POST ${JOB_STOP_API_URL}`]: () => {
+          jobWasStopped = true;
+          return Promise.resolve(buildJsonResponse(200, stopRequestedJob));
+        },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeDisabled();
+      expect(screen.getByText("Refinement 0 of 5 · Running Version 1…")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+      await advanceClock(0);
+      expect(fetchStub).toHaveBeenCalledWith(JOB_STOP_API_URL, { method: "POST" });
+      expect(screen.getByText(/Stopping after this step…$/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+
+      await advanceClock(2000);
+      expect(screen.getByRole("alert")).toHaveTextContent("Stopped at your request after Version 1.");
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
+    });
+
+    it("converts first when the action has no version yet, then starts the job for the new version with its default values", async () => {
+      const startedJob = buildAutoRefineJobRecord();
+      let theConversionHasBeenSaved = false;
+      const fetchStub = stubLoadedAction([], {
+        [`GET ${SCRIPTS_API_URL}`]: () =>
+          Promise.resolve(buildJsonResponse(200, theConversionHasBeenSaved ? [olderScript] : [])),
+        [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+        [`POST ${SCRIPTS_API_URL}`]: () => {
+          theConversionHasBeenSaved = true;
+          return Promise.resolve(buildJsonResponse(201, olderScript));
+        },
+        [`POST ${autoRefineStartUrl("script-1")}`]: { status: 201, body: startedJob },
+        [`GET ${JOB_API_URL}`]: { status: 200, body: startedJob },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      expect(screen.getByText("No versions yet.")).toBeInTheDocument();
+      const convertAndAutoRefineButton = screen.getByRole("button", { name: "Convert and auto-refine" });
+      expect(convertAndAutoRefineButton).toBeEnabled();
+      fireEvent.click(convertAndAutoRefineButton);
+      await advanceClock(0);
+
+      expect(fetchStub).toHaveBeenCalledWith(SCRIPTS_API_URL, buildConvertRequestInit("claude-opus-5-5", "high"));
+      expect(fetchStub).toHaveBeenCalledWith(autoRefineStartUrl("script-1"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parameterValues: {} }),
+      });
+      expect(screen.getByRole("heading", { name: "Version 1" })).toBeInTheDocument();
+      expect(screen.getByTestId("readout-search").textContent).toBe("?version=1");
+      expect(screen.getByText("Refinement 0 of 5 · Running Version 1…")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Convert to new version" })).toBeDisabled();
+    });
+
+    it("keeps Convert and auto-refine off until a model is known, like Convert", async () => {
+      stubLoadedAction([], {
+        [`GET ${SCRIPT_MODELS_API_URL}`]: { status: 503, body: { error: "No models" } },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      expect(screen.getByRole("button", { name: "Convert and auto-refine" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Convert to new version" })).toBeDisabled();
+    });
+
+    it("cannot start for a version saved from the step editor, and says why", async () => {
+      const editedScript = buildActionScriptRecord({
+        id: "script-2",
+        modelId: null,
+        effort: null,
+        editedFromActionScriptId: "script-1",
+        createdAt: "2026-04-06T00:00:00.000Z",
+      });
+      stubLoadedAction([editedScript, olderScript], {
+        [`GET ${runsApiUrl("script-2")}`]: { status: 200, body: [] },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeDisabled();
+      expect(screen.getByText("Saved from the step editor, so Claude cannot refine it")).toBeInTheDocument();
+    });
+
+    it("keeps Auto-refine off while a required value is blank, and shows the server's reason when the start fails", async () => {
+      stubLoadedAction([olderScript], {
+        [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+        [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: parametersOfOlderScript },
+        [`POST ${autoRefineStartUrl("script-1")}`]: {
+          status: 409,
+          body: { error: "This action is already running; wait for that run to finish before starting another" },
+        },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      const nameField = screen.getByRole("textbox", { name: "Project name" });
+      fireEvent.change(nameField, { target: { value: "" } });
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeDisabled();
+      expect(screen.getByText("Fill in Project name to run")).toBeInTheDocument();
+
+      fireEvent.change(nameField, { target: { value: "Apollo 9" } });
+      fireEvent.click(screen.getByRole("button", { name: "Auto-refine Version 1" }));
+      await advanceClock(0);
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Could not start auto-refine: This action is already running; wait for that run to finish before starting another",
+      );
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeEnabled();
     });
   });
 });

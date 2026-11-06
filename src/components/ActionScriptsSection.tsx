@@ -14,8 +14,14 @@ import ScriptModelPicker, { type ScriptModelPickerProps } from "./ScriptModelPic
 import ScriptRunStatusIcon from "./ScriptRunStatusIcon";
 import StatusTag from "./StatusTag";
 import { type ActionScriptRecord } from "../hooks/useActionScripts";
+import { type AutoRefineJobRecord } from "../hooks/useAutoRefineJob";
 import { type ReturnState } from "../hooks/useReturnNavigation";
 import { nocturneTokens } from "../theme/nocturneTheme";
+import {
+  type VersionNumberOfScriptId,
+  describeAutoRefineOutcome,
+  describeAutoRefineProgress,
+} from "../utils/describeAutoRefineJob";
 import { findScriptModelName, shortenScriptModelName } from "../utils/describeScriptModel";
 import { describeScriptRunStatusBriefly, findScriptRunStatus } from "../utils/describeScriptRunStatus";
 import { type CurrentActionText, findChangedActionFields } from "../utils/describeScriptStaleness";
@@ -23,6 +29,36 @@ import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeT
 
 const HEADING_ID = "action-script-versions-heading";
 const VERSION_SELECT_LABEL_ID = "action-script-version-select-label";
+
+/**
+ * The "Auto-refine Version N" controls' props, grouped like `modelPicker`:
+ * the shown version, whether a job can start and why not, the start and stop
+ * requests' states, and the job being watched.
+ */
+export interface AutoRefineControlsProps {
+  /** The shown version's number, for the button's label; null when no version is shown (the button then reads "Convert and auto-refine"). */
+  shownVersionNumber: number | null;
+  /** False when a job cannot start: no model is chosen (with no version yet), the version was saved from the step editor, or the run form has values to fix. */
+  canStart: boolean;
+  /** Why a job cannot start, shown as a caption under the button (e.g. "Fill in Name to run"); null when it can, or there is nothing to explain. */
+  blockedReason: string | null;
+  /** True while the start request is in flight (with no version yet, the conversion before it too). */
+  isStarting: boolean;
+  /** Why the last start request failed, or null. */
+  startErrorMessage: string | null;
+  /** The job being watched on this visit - running or ended - or null (see `useAutoRefineJob`). */
+  job: AutoRefineJobRecord | null;
+  /** Maps a version's id to its number in the list, or null when it is not listed yet (the page knows the list). */
+  versionNumberOfScriptId: VersionNumberOfScriptId;
+  /** Why the latest poll of the job failed (the last record stays shown and polling goes on), or null. */
+  pollErrorMessage: string | null;
+  /** Called when the user clicks "Auto-refine Version N". */
+  onStart: () => void;
+  /** Called when the user clicks "Stop". */
+  onStop: () => void;
+  /** True while the stop request is in flight. */
+  isStopping: boolean;
+}
 
 /** Props for `ActionScriptsSection`. */
 export interface ActionScriptsSectionProps {
@@ -46,6 +82,8 @@ export interface ActionScriptsSectionProps {
   canConvert: boolean;
   /** The Model / Effort dropdowns' props (see `ScriptModelPicker`). */
   modelPicker: ScriptModelPickerProps;
+  /** The "Auto-refine Version N" controls' props (see `AutoRefineControlsProps`). */
+  autoRefine: AutoRefineControlsProps;
   /** The action as it is now, to mark versions generated from older text as out of date. */
   currentAction: CurrentActionText;
   /** Where "Compare" goes (see `actionScriptComparePath`). */
@@ -69,7 +107,18 @@ export interface ActionScriptsSectionProps {
  * Under it sit the Model and Effort dropdowns and "Convert to new version":
  * Claude turns the action into a JSON step plan with the chosen model, saved
  * as a new version.
- * @param props - The scripts, the model choice, the request states, the callbacks, and the layout
+ *
+ * Under those sits "Auto-refine Version N" (see `AutoRefineControlsProps`):
+ * the server runs the shown version with the run form's values and, while it
+ * fails, refines it and runs the refined version, up to five times. While
+ * the job runs the column shows a progress bar, a `role="status"` line
+ * ("Refinement 2 of 5 · Running Version 4…", "Refining Version 4 into
+ * Version 5…", "… · Stopping after this step…"), a "Stop" button, and a
+ * warning when a poll failed; Convert, the model picker, and Auto-refine
+ * itself are disabled meanwhile. Once the job has ended, one alert says how
+ * (see `describeAutoRefineOutcome`). A caption under the button says why it
+ * cannot start, when the page gives a reason.
+ * @param props - The scripts, the model choice, the auto-refine controls, the request states, the callbacks, and the layout
  * @returns The rendered column
  */
 export default function ActionScriptsSection(props: ActionScriptsSectionProps): ReactElement {
@@ -84,6 +133,7 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
     onConvertClick,
     canConvert,
     modelPicker,
+    autoRefine,
     currentAction,
     comparePath,
     compareLinkState,
@@ -96,7 +146,26 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
   const thereAreNoScripts = scripts.length === 0;
   const thereAreScripts = !thereAreNoScripts;
   const thereAreVersionsToCompare = scripts.length >= 2;
-  const convertIsBlocked = isConverting || !canConvert;
+  const autoRefineJob = autoRefine.job;
+  const autoRefineJobIsRunning = autoRefineJob !== null && autoRefineJob.status === "running";
+  const autoRefineJobHasEnded = autoRefineJob !== null && !autoRefineJobIsRunning;
+  const convertIsBlocked = isConverting || !canConvert || autoRefineJobIsRunning;
+  const autoRefineIsBlocked =
+    !autoRefine.canStart || autoRefine.isStarting || isConverting || autoRefineJobIsRunning;
+  const autoRefineBlockedReasonIsShown = autoRefine.blockedReason !== null && !autoRefineJobIsRunning;
+  const stopWasRequested = autoRefineJob !== null && autoRefineJob.stopRequestedAt !== null;
+  const stopIsBlocked = autoRefine.isStopping || stopWasRequested;
+  const autoRefineOutcome =
+    autoRefineJobHasEnded ? describeAutoRefineOutcome(autoRefineJob, autoRefine.versionNumberOfScriptId) : null;
+  const buttonMinHeight = isPhoneLayout ? 44 : 36;
+
+  // With no version yet, the button converts first, then auto-refines the new version.
+  let autoRefineButtonText = "Convert and auto-refine";
+  if (autoRefine.isStarting) {
+    autoRefineButtonText = "Starting…";
+  } else if (autoRefine.shownVersionNumber !== null) {
+    autoRefineButtonText = `Auto-refine Version ${String(autoRefine.shownVersionNumber)}`;
+  }
 
   /**
    * Numbers versions by age: the list is newest first, so the oldest is 1.
@@ -160,6 +229,48 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
     onSelectScript(event.target.value);
   };
 
+  const autoRefineControls = (
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+      <Button
+        onClick={autoRefine.onStart}
+        disabled={autoRefineIsBlocked}
+        variant="outlined"
+        color="secondary"
+        fullWidth
+        sx={{ minHeight: buttonMinHeight }}
+      >
+        {autoRefineButtonText}
+      </Button>
+      {autoRefineBlockedReasonIsShown && (
+        <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: -0.5 }}>
+          {autoRefine.blockedReason}
+        </Typography>
+      )}
+      {autoRefineJobIsRunning && (
+        <Box>
+          <LinearProgress aria-label="Auto-refining" />
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5 }}>
+            <Typography role="status" variant="caption" color="text.secondary" component="p" sx={{ mr: "auto" }}>
+              {describeAutoRefineProgress(autoRefineJob, autoRefine.versionNumberOfScriptId)}
+            </Typography>
+            <Button onClick={autoRefine.onStop} disabled={stopIsBlocked} variant="text" size="small" sx={{ flex: "none" }}>
+              Stop
+            </Button>
+          </Box>
+        </Box>
+      )}
+      {autoRefineJobIsRunning && autoRefine.pollErrorMessage !== null && (
+        <Alert severity="warning">
+          Could not refresh the auto-refine ({autoRefine.pollErrorMessage}); still trying.
+        </Alert>
+      )}
+      {autoRefineOutcome !== null && <Alert severity={autoRefineOutcome.severity}>{autoRefineOutcome.text}</Alert>}
+      {autoRefine.startErrorMessage !== null && (
+        <Alert severity="error">Could not start auto-refine: {autoRefine.startErrorMessage}</Alert>
+      )}
+    </Box>
+  );
+
   const convertControls = (
     <Box
       sx={{
@@ -171,14 +282,14 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
           : { mt: 2, pt: "14px", borderTop: `1px solid ${nocturneTokens.divider}` }),
       }}
     >
-      <ScriptModelPicker {...modelPicker} />
+      <ScriptModelPicker {...modelPicker} isDisabled={modelPicker.isDisabled || autoRefineJobIsRunning} />
       <Button
         onClick={onConvertClick}
         disabled={convertIsBlocked}
         variant="outlined"
         color="secondary"
         fullWidth
-        sx={{ minHeight: isPhoneLayout ? 44 : 36 }}
+        sx={{ minHeight: buttonMinHeight }}
       >
         {isConverting ? "Converting…" : "Convert to new version"}
       </Button>
@@ -191,6 +302,7 @@ export default function ActionScriptsSection(props: ActionScriptsSectionProps): 
         </Box>
       )}
       {convertFailed && <Alert severity="error">Could not convert: {convertErrorMessage}</Alert>}
+      {autoRefineControls}
     </Box>
   );
 

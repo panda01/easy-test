@@ -31,6 +31,8 @@ export interface ActionScriptRunDetailsProps {
   isRefining: boolean;
   /** True while a "Run" request is in flight; refining is blocked meanwhile. */
   isRunning: boolean;
+  /** True while an auto-refine job of this action is running; refining is blocked meanwhile (the label and progress are unchanged). */
+  isAutoRefining: boolean;
   /** Why the last "Refine" request failed, or null. */
   refineErrorMessage: string | null;
   /** Called with this run and the trimmed note (null when blank) when the user clicks Refine. */
@@ -95,8 +97,9 @@ function noteToSend(noteText: string): string | null {
  * A refine error is shown only once THIS run's details have tried to refine
  * - the page keeps the last error until the next request, and this
  * component is keyed by the run's id, so picking another run never shows a
- * stale error. Refine is disabled while a refine or a run is in flight; the
- * note field only while refining, since it is what is being sent.
+ * stale error. Refine is disabled while a refine or a run is in flight, and
+ * while an auto-refine job runs; the note field only while refining, since
+ * it is what is being sent.
  *
  * The banner is a `role="status"` alert: it is a result to read, not an
  * error the user must act on.
@@ -110,6 +113,7 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
     versionCanBeRefined,
     isRefining,
     isRunning,
+    isAutoRefining,
     refineErrorMessage,
     onRefine,
     refinedVersionNumber,
@@ -123,7 +127,7 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
   const runFailedWithoutScreenshot = !run.succeeded && !runHasFailureScreenshot;
   const runHasAnErrorMessage = run.errorMessage !== null;
   const refineAreaIsShown = runHasAnErrorMessage && versionCanBeRefined;
-  const refineIsBlocked = isRefining || isRunning;
+  const refineIsBlocked = isRefining || isRunning || isAutoRefining;
   const refineErrorIsShown = refineWasAttemptedForThisRun && refineErrorMessage !== null;
   const usedValues = readUsedParameterValues(run.parameterValues);
   const objectChangeLines = describeRunObjectChanges(run);

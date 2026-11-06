@@ -54,7 +54,7 @@ function renderSection(
  * @returns A loaded list request
  */
 function loadedItems(items: WebsiteItemRecord[]): JsonResourceState<WebsiteItemRecord[]> {
-  return { data: items, isLoading: false, errorMessage: null };
+  return { data: items, isLoading: false, errorMessage: null, reload: vi.fn() };
 }
 
 /** Four actions, one per status: passed 12 minutes ago, failed at step 9, timed out, and not run (no versions). */
@@ -177,13 +177,13 @@ describe.each([
     });
 
     it("shows a spinner while the list loads", () => {
-      renderSection(itemKind, { data: null, isLoading: true, errorMessage: null });
+      renderSection(itemKind, { data: null, isLoading: true, errorMessage: null, reload: vi.fn() });
       expect(screen.getByRole("progressbar", { name: loadingLabel })).toBeInTheDocument();
       expect(screen.queryByText(emptyText)).not.toBeInTheDocument();
     });
 
     it("shows the list request's error in an alert", () => {
-      renderSection(itemKind, { data: null, isLoading: false, errorMessage: "Website not found" });
+      renderSection(itemKind, { data: null, isLoading: false, errorMessage: "Website not found", reload: vi.fn() });
       expect(screen.getByRole("alert")).toHaveTextContent("Website not found");
       expect(screen.queryByText(emptyText)).not.toBeInTheDocument();
     });

@@ -5,7 +5,7 @@ here; services never touch `req`/`res`.
 
 | File | Owns |
 |---|---|
-| `dbService.ts` | The one `PrismaClient` for the process, and every `Website`, `UseCase`, `Action`, `ScreenshotRun`, `ActionScript`, `ActionScriptRun`, `CrawlRun`, `CrawledPage`, and `Credential` query. |
+| `dbService.ts` | The one `PrismaClient` for the process, and every `Website`, `UseCase`, `Action`, `ScreenshotRun`, `ActionScript`, `ActionScriptRun`, `CrawlRun`, `CrawledPage`, `Credential`, and `AutoRefineJob` query. |
 | `playwrightService.ts` | `captureWebsiteScreenshot(url, screenshotFilePath, timingSettings)`: launches headless Chromium on this machine, visits the URL in a 1280x720 viewport, writes a viewport PNG, and reports the outcome. Also exports the page helpers the crawler reuses (`navigateToUrl`, `waitForPageReadiness`, `summarizeError`, `closeBrowserQuietly`, ...). |
 | `crawlerService.ts` | `crawlWebsite(startUrl, timingSettings, recordVisitedPage, login?, buttonMode?)`: crawls a website breadth first with headless Chromium, following same-origin links - and, with a button mode, the pages its buttons open - recording each page's aria snapshot and its visible form fields (`readRawFormFields`: the aria snapshot cannot say which are required), after logging in first when given a `login`. Browser only - it saves nothing itself. |
 | `crawlerButtonService.ts` | `followPageButtons(...)`: clicks a page's buttons one at a time (reloading the page before every click but the first) and reports the same-site pages they landed on; `chooseButtonsToClick(buttons, mode)` picks which (see below). |
@@ -15,6 +15,8 @@ here; services never touch `req`/`res`.
 | `anthropicClient.ts` | `createAnthropicClient()` / `readAnthropicApiKey()` (per call, key passed explicitly) and `ScriptGenerationError`, shared by the two Claude services below. |
 | `scriptModelService.ts` | The live model catalog: `listScriptModels()`, `findScriptModel(id)`, `chooseEffortForModel()`, `chooseDefaultScriptModel()`. |
 | `scriptGenerationService.ts` | `convertActionToPlan(request, { model, effort })`: asks the chosen Claude model to turn an action into a JSON step plan, following `../prompts/actionPlanGuidelines.md` verbatim, with the relevant crawled pages' aria snapshots in the user message; only a plan that passes every rule is returned. `refineActionPlan(request, { model, effort })`: asks the model that wrote a version to fix it from a failed run (error, step log, failure screenshot, failing-page snapshot, the user's note), returning the new plan plus the call's token usage. |
+| `actionScriptExecutionService.ts` | The WORK behind running and refining a version, shared by the action script routes and the auto-refine job: `performActionScriptRun(actionScriptDirectory, { website, action, script }, parameterValues)` (checks the credential and the plan, puts the values in, runs the plan, records the run, follows it up) and `performRefinement(actionScriptDirectory, source, note)` (asks the version's model to fix a failed run and saves the reply as a new version). A problem with the request - not with the work - is thrown as an `ActionScriptRequestProblem` carrying its `httpStatus` (400 / 409 / 503), recognized with `isActionScriptRequestProblem`. Also the in-memory claims `claimActionRun` / `releaseActionRun` (one run per action) and `claimRunRefinement` / `releaseRunRefinement` (one refine per run), the helpers both routes use (`describeFailedRun`, `planWithRunValues`, `chooseRefinementEffort`, `selectRefinementContextPages`, `readFailureScreenshotAsBase64`, `findActionCredential`, `allowedOriginsFor`, `resolveEffortForModel`, `buildRunFolderName`, `UPLOADS_FOLDER_NAME`), and the shared messages. |
+| `autoRefineService.ts` | `startAutoRefineJob(actionScriptDirectory, { website, action, script }, parameterValues)`: claims the action and runs an auto-refine job in the background - run the version, refine it on failure (no note), run the refined version - until a run passes, `MAX_AUTO_REFINEMENTS` (5) refinements were made, a refinement comes back with the plan it refined, a stop was requested, or a step breaks; `markUnfinishedAutoRefineJobsInterrupted()` for boot. |
 | `actionPlanRunnerService.ts` | `runActionPlan(request)`: runs a validated plan in a visible browser in this process - logs in first when there is a credential, opens `startUrl`, then each step through `runPlanStep`'s fixed `switch` - enforcing the 5 minute limit; a failed run writes `failure.png` and returns the failing page's URL and aria snapshot. Its `parameterRun` (see `PlanParameterRun`) skips the steps a blank optional parameter uses, adds the steps of added fields, scrubs secret values, reads the fields of the form around each parameter step (`readRawFormFields`, 2 s), and checks a Create action's confirm step: for 2 s after the click it watches for a new alert that reads as an error or an invalid field in the submitted form (`confirmStepSucceeded`; an error is noted, never thrown). It also returns `finalPageUrl`. |
 | `actionParameterService.ts` | Action parameters (no LLM). `syncActionParameters(websiteId, action, runReadings?)`: reads the action's versions, the latest crawl's pages they visit (snapshots and form fields), its failed runs' snapshots, and a run's field readings; detects the rows it should have (`detectActionParameters`) and saves them (`saveSyncedActionParameters`). `ensureActionParametersSynced` (first read), `syncActionParametersQuietly` (never fails the request), `syncWebsiteActionParameters` (after a crawl). `loadVersionParameters(websiteId, action, script)`: the parameters view a version's page and run use - the role, `resolveVersionParameters`, the object choices (`loadObjectChoices`: created objects first, then the instance links the latest crawl saw), the confirm step, the name parameter, the bindable texts, and the warnings. `prepareParameterRun(view, plan, values)`: checks a run's values and puts them in. `followUpRecordedRun(followUp)`: syncs with the run's readings, records a `CreatedObject`, marks a deleted one (never rejects). `checkCreatedObjectsAfterCrawl(websiteId, crawlRunId, crawledAt)`: marks created objects seen / Not seen by the type's list page (never rejects). `loadActionRole` / `resolveRoleForAction`: an action's `objectRole`. |
 
@@ -36,6 +38,7 @@ functions:
 | CreatedObject | `createCreatedObject`, `listCreatedObjectsForWebsite` (with the making action and the deleting run - `CreatedObjectWithSources`), `listChoosableCreatedObjects` (in the record, not Not seen, not deleted), `removeCreatedObject`, `markCreatedObjectDeletedByRun`, `listCreatedObjectsToCheck`, `saveCreatedObjectChecks` - a crawl never deletes a row |
 | ActionScriptRefinement | created only by `createRefinedActionScriptForAction`, read only through a version's `refinement` include; soft deleted with its action or website |
 | CrawlRun | `listCrawlRunsForWebsite`, `findCrawlRunForWebsite`, `createCrawlRunForWebsite` (created `running`; all three include `credential: { id, name }`), `markCrawlRunLoggedIn`, `finishCrawlRun`, `markRunningCrawlRunsInterrupted` |
+| AutoRefineJob | `createAutoRefineJob` (created `running`, phase `running`, the start version as the current one), `listAutoRefineJobsForAction` (newest first), `findAutoRefineJobForAction`; the conditional writes `markAutoRefineJobPhase` (`{ phase, currentActionScriptId }`), `appendAutoRefineJobRun` (Prisma `push` onto `actionScriptRunIds`), `appendAutoRefineJobScript` (`push` onto `createdActionScriptIds` plus `refinementsDone`), `requestAutoRefineJobStop` (sets `stopRequestedAt`), and `finishAutoRefineJob` (`{ status, errorMessage, currentActionScriptId }`, sets `finishedAt`, clears `phase`) - each `updateMany` with `where: { id, websiteId, actionId, status: "running", deletedAt: null }` and a boolean result, so a job whose action or website was deleted matches no row and stops; `markRunningAutoRefineJobsInterrupted` for boot. Types `AutoRefineJobStatus`, `FinishedAutoRefineJobStatus`, `AutoRefineJobPhase`, `AutoRefineJobInput`, `AutoRefineJobPhaseChange`, `AutoRefineJobFinish` |
 | CrawledPage | `recordCrawledPage` (create-only, see below; stores `formFields`), `listCrawledPageSummariesForRun` (no `ariaSnapshot` / `linkedUrls` / `buttonUrls` / `formFields`, via Prisma `omit`), `findCrawledPageForRun`, `findLatestCrawledPagesForWebsite(websiteId, credentialId)` (the successful, snapshotted pages of ONE run: the newest finished crawl done the same way an action runs - logged in as its credential, or logged out - else the newest of any kind), `findLatestCrawlPagesMatching` / `readCrawlRunPagesMatching` (the pages of that crawl, or of one run, whose address passes a test - addresses first, then only those pages' snapshots and form fields) |
 | Credential | `listCredentialsForWebsite`, `findCredentialForWebsite`, `createCredentialForWebsite`, `updateCredentialForWebsite` (a null password keeps the saved one), `softDeleteCredentialForWebsite` (one transaction that also unlinks the actions running as it) - all **without** `encryptedPassword` (Prisma `omit`, the `CredentialSummary` type); `findCredentialWithPasswordForWebsite` is the only read that returns it, used only by crawl start and action runs |
 | Errors | `isUniqueConstraintViolation` (P2002), `isRecordNotFound` (P2025) |
@@ -57,7 +60,8 @@ directly. See `../prisma/README.md`.
   moment earlier cannot be edited back to life.
 - **`softDeleteWebsite` is one interactive transaction:** it stamps the website
   and its active use cases, actions, screenshot runs, action scripts, action
-  script runs, crawl runs, crawled pages, and credentials with the same
+  script runs, crawl runs, crawled pages, credentials, and auto-refine jobs
+  (`softDeleteActionForWebsite` likewise stamps the action's jobs) with the same
   `deletedAt`.
 - **A credential's password never leaves through a summary read.** Every
   credential function that feeds an API response omits `encryptedPassword`;
@@ -315,6 +319,89 @@ rejecting, so a screenshot problem never replaces the login's own error.
 `dbService.ts` reads `DATABASE_URL` **at module load time**, so anything that
 imports it must import `server/bootEnv.js` first. `server.ts` does; a standalone
 script must do the same.
+
+## actionScriptExecutionService does the run and refine work
+
+The "run a version" and "refine a failed run" routes used to hold their work
+inline and write the response themselves. The work now lives here, with no
+`req` / `res`, so the auto-refine job can call the very same code:
+
+- **`performActionScriptRun(actionScriptDirectory, { website, action, script }, parameterValues)`**
+  checks the action's credential (the key must be configured, the credential
+  must exist and have a login URL somewhere), validates the stored plan
+  against the website's CURRENT origins, puts the run's values in
+  (`prepareParameterRun`) and validates the plan they make, runs it
+  (`runActionPlan`) in a fresh `<websiteId>/<uuid>` folder, records the run
+  with the values it used, follows it up (`followUpRecordedRun`), and returns
+  the run with its objects (or the bare row when they cannot be read). A run
+  that FAILED is a successfully recorded run (`succeeded: false`).
+- **`performRefinement(actionScriptDirectory, source, note)`** asks the model
+  that wrote the version to fix it from the failed run (the version's effort
+  when the model still offers it, the version's context pages, the plan with
+  the run's values put back in, the failure screenshot when still on disk)
+  and saves the reply with its refinement row, then syncs the parameters.
+- **`ActionScriptRequestProblem`** is how either reports a problem with the
+  REQUEST rather than a failure of the work: a missing credential (409), a
+  plan that no longer passes the rules (409), a model no longer offered
+  (409), no encryption key (503), a bad value or a credential without a login
+  URL (400). It is an `Error` whose `name` is `ActionScriptRequestProblem`
+  and whose `httpStatus` is `400 | 409 | 503`; `isActionScriptRequestProblem`
+  recognizes it structurally (like `statusForScriptGenerationFailure` does a
+  `ScriptGenerationError`). A route answers `res.status(httpStatus)` with the
+  message - the status codes are exactly what the routes answered before -
+  and an auto-refine job ends `failed` with the message. Anything else
+  (a `ScriptGenerationError`, a runner or query failure) rejects as it is.
+- **The claims are shared.** `claimActionRun(actionId)` /
+  `releaseActionRun(actionId)` keep one run per action at a time (a second
+  visible browser logging in as the same credential would fight the first);
+  `claimRunRefinement(runId)` / `releaseRunRefinement(runId)` keep one refine
+  per failed run (a double click would ask Claude twice). Each claim checks
+  and records synchronously - no `await` in between - and returns false when
+  already held, so two requests that arrive together cannot both pass. The
+  routes and the auto-refine job use the same Sets, which is why a manual
+  "Run" during a job answers 409 "already running" for the job's whole loop.
+
+## autoRefineService runs auto-refine jobs in the background
+
+- **`startAutoRefineJob(actionScriptDirectory, { website, action, script }, parameterValues)`**
+  claims the action with `claimActionRun` **before** anything is awaited
+  (so two simultaneous requests cannot both start one, and a manual run gets
+  the usual 409), creates the `running` job row (the shown version as its
+  start, `MAX_AUTO_REFINEMENTS` = 5 as its cap, the run-form values the user
+  had changed), releases the claim and rethrows if that create fails, and
+  starts the loop **without awaiting it**. It returns
+  `{ started: false, reason: "actionIsRunning" }` when a run of the action is
+  already in progress, else `{ started: true, job, completion }` - production
+  ignores `completion`; tests await it.
+- **The loop**, with `version` = the start version and `refinementsDone` = 0:
+  1. a stop requested (`stopRequestedAt`, re-read with
+     `findAutoRefineJobForAction`) ends the job `stopped`;
+  2. `markAutoRefineJobPhase("running", version.id)` matching no row means
+     the job was deleted with its action or website: the loop ends quietly;
+  3. the stored values minus the keys this version does not know
+     (`loadVersionParameters`) go to `performActionScriptRun`; the run's id
+     is appended to the job;
+  4. a passed run ends the job `passed`; `refinementsDone` at the cap ends
+     it `gaveUp`; a stop requested meanwhile ends it `stopped`;
+  5. otherwise the phase turns `refining`, the run is claimed
+     (`claimRunRefinement`) and `performRefinement` is called with no note
+     (a failed run without an error message, or a version no model wrote,
+     ends the job `failed` instead); the new version's id and the count are
+     appended to the job;
+  6. a refined plan identical to the plan it refined (`plansAreIdentical`,
+     `plan` only with keys sorted) ends the job `unchanged` on the copy -
+     refining the same plan again would go nowhere; otherwise the refined
+     version is the next one to run.
+- **The background loop never rejects** (Node crashes the process on an
+  unhandled rejection): any error - an `ActionScriptRequestProblem`, a
+  `ScriptGenerationError`, a query failure - ends the job `failed` with the
+  error's message as `errorMessage` (what the page shows), logging instead if
+  even that write fails. The action's claim is released in a `finally`. A run
+  or a Claude call in flight is never cut short: a stop takes effect between
+  steps.
+- **`markUnfinishedAutoRefineJobsInterrupted()`** marks every job still
+  `running` as `interrupted`, next to the crawl sweep at boot; it never
+  rejects.
 
 ## scriptModelService lists the models live
 

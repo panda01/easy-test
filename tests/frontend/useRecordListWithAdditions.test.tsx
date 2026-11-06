@@ -125,4 +125,51 @@ describe("useRecordListWithAdditions", () => {
     });
     expect(result.current.records).toEqual([]);
   });
+
+  it("reload refetches the list, keeping the current records (and added ones) shown meanwhile", async () => {
+    const reloadedList = createDeferred<Response>();
+    let requestCount = 0;
+    const fetchStub = stubFetchRoutes({
+      [`GET ${LIST_URL}`]: () => {
+        requestCount += 1;
+        const thisIsTheFirstRequest = requestCount === 1;
+        return thisIsTheFirstRequest
+          ? Promise.resolve(new Response(JSON.stringify([{ id: "a", ownerId: "owner-1" }]), { status: 200 }))
+          : reloadedList.promise;
+      },
+    });
+    const { result } = renderHook(() =>
+      useRecordListWithAdditions<OwnedRecord>(LIST_URL, belongsToOwnerOne),
+    );
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+    act(() => {
+      result.current.addRecord({ id: "b", ownerId: "owner-1" });
+    });
+
+    act(() => {
+      result.current.reload();
+    });
+    expect(countRequests(fetchStub, "GET", LIST_URL)).toBe(2);
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.records.map((record) => record.id)).toEqual(["b", "a"]);
+
+    await act(async () => {
+      reloadedList.resolve(
+        new Response(
+          JSON.stringify([
+            { id: "c", ownerId: "owner-1" },
+            { id: "b", ownerId: "owner-1" },
+            { id: "a", ownerId: "owner-1" },
+          ]),
+          { status: 200 },
+        ),
+      );
+      await reloadedList.promise;
+    });
+
+    // The added "b" stays in front; the fetched copy of it is dropped.
+    expect(result.current.records.map((record) => record.id)).toEqual(["b", "c", "a"]);
+  });
 });

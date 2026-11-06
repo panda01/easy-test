@@ -1,4 +1,4 @@
-import { type ReactElement, type ReactNode, useState } from "react";
+import { type ReactElement, type ReactNode, useEffect, useRef, useState } from "react";
 import { Link as RouterLink, useSearchParams } from "react-router-dom";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -18,6 +18,7 @@ import PageContainer from "../components/PageContainer";
 import { useActionParameters } from "../hooks/useActionParameters";
 import { type ActionScriptRunRecord, useActionScriptRuns } from "../hooks/useActionScriptRuns";
 import { type ActionScriptRecord, useActionScripts } from "../hooks/useActionScripts";
+import { type AutoRefineJobRecord, useAutoRefineJob } from "../hooks/useAutoRefineJob";
 import { useIsNarrowerThan } from "../hooks/useIsNarrowerThan";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
@@ -35,6 +36,8 @@ import {
   type ParameterValues,
   type VersionParametersRecord,
   buildStepParameterTags,
+  listChangedParameterValues,
+  listParametersToFix,
 } from "../utils/actionParameters";
 import { type ActionPlan } from "../utils/actionPlanSteps";
 import {
@@ -46,6 +49,8 @@ import {
   actionScriptRunRefinementsApiUrl,
   actionScriptRunsApiUrl,
   actionScriptsApiUrl,
+  autoRefineJobStopApiUrl,
+  autoRefineJobsApiUrl,
   websiteDetailPath,
   websiteItemApiUrl,
   websiteItemEditPath,
@@ -57,6 +62,45 @@ const VERSION_QUERY_PARAMETER = "version";
 
 /** The effort level a newly picked model starts on when it offers it. */
 const PREFERRED_EFFORT = "high";
+
+/** The message under "Auto-refine" for a version saved from the step editor, which no model wrote. */
+const EDITED_VERSION_CANNOT_BE_AUTO_REFINED_REASON = "Saved from the step editor, so Claude cannot refine it";
+
+/**
+ * The run form's values, remembered with the version they were typed for, so
+ * values typed for one version never carry over to another.
+ */
+interface RunFormState {
+  /** The version the values belong to, or null before anything was typed. */
+  scriptId: string | null;
+  /** The typed or picked values, by parameter key. */
+  values: ParameterValues;
+}
+
+/**
+ * What the page last saw of the watched auto-refine job, to notice what the
+ * next poll adds: a version, a run, or the job's end.
+ */
+interface SeenJobProgress {
+  jobId: string;
+  createdScriptCount: number;
+  runCount: number;
+  wasRunning: boolean;
+}
+
+/**
+ * Reads the counts the page compares each polled job against.
+ * @param job - The polled job
+ * @returns Its id, how many versions and runs it has made, and whether it is running
+ */
+function readJobProgress(job: AutoRefineJobRecord): SeenJobProgress {
+  return {
+    jobId: job.id,
+    createdScriptCount: job.createdActionScriptIds.length,
+    runCount: job.actionScriptRunIds.length,
+    wasRunning: job.status === "running",
+  };
+}
 
 /** The model and effort level "Convert to script" sends. */
 interface ScriptModelChoice {
@@ -279,6 +323,7 @@ export default function ActionDetailPage(): ReactElement {
     errorMessage: scriptsErrorMessage,
     addCreatedScript,
     recordFinishedRun,
+    reloadScripts,
   } = useActionScripts(websiteId, actionId);
   const selectedScriptIndex = findShownVersionIndex(searchParams.get(VERSION_QUERY_PARAMETER), scripts.length);
   const selectedScript = scripts.at(selectedScriptIndex) ?? null;
@@ -347,8 +392,13 @@ export default function ActionDetailPage(): ReactElement {
     setPickedModelChoice({ modelId: modelChoice.modelId, effort });
   };
 
-  const { runs, isLoading: runsAreLoading, errorMessage: runsErrorMessage, addFinishedRun } =
-    useActionScriptRuns(websiteId, actionId, selectedScript?.id ?? null);
+  const {
+    runs,
+    isLoading: runsAreLoading,
+    errorMessage: runsErrorMessage,
+    addFinishedRun,
+    reloadRuns,
+  } = useActionScriptRuns(websiteId, actionId, selectedScript?.id ?? null);
   const {
     view: parametersView,
     isLoading: parametersAreLoading,
@@ -358,6 +408,25 @@ export default function ActionDetailPage(): ReactElement {
   } = useActionParameters(websiteId, actionId, selectedScript?.id ?? null);
   const [pickedRunId, setPickedRunId] = useState<string | null>(null);
   const selectedRun = runs.find((run) => run.id === pickedRunId) ?? runs.at(0) ?? null;
+
+  // The run form's values live here (not in the run panel) because the versions
+  // column's "Auto-refine" sends them too.
+  const [runFormState, setRunFormState] = useState<RunFormState>({ scriptId: null, values: {} });
+  const runFormValuesAreForShownVersion = selectedScript !== null && runFormState.scriptId === selectedScript.id;
+  const runFormValues: ParameterValues = runFormValuesAreForShownVersion ? runFormState.values : {};
+  const shownParameters = parametersView?.parameters ?? [];
+  const changedRunFormValues = listChangedParameterValues(shownParameters, runFormValues);
+  const runFormParametersToFix = listParametersToFix(shownParameters, runFormValues);
+
+  /**
+   * Remembers a value the user typed or picked in the run form, for the shown version.
+   * @param parameterKey - The parameter's key
+   * @param value - Its new value
+   */
+  const handleRunFormValueChange = (parameterKey: string, value: string): void => {
+    if (selectedScript === null) return;
+    setRunFormState({ scriptId: selectedScript.id, values: { ...runFormValues, [parameterKey]: value } });
+  };
 
   const {
     sendJsonRequest: sendConvertRequest,
@@ -384,6 +453,66 @@ export default function ActionDetailPage(): ReactElement {
     isSubmitting: parameterSaveIsInFlight,
     errorMessage: parameterSaveErrorMessage,
   } = useJsonMutation();
+  const {
+    sendJsonRequest: sendAutoRefineStartRequest,
+    isSubmitting: autoRefineStartIsInFlight,
+    errorMessage: autoRefineStartErrorMessage,
+  } = useJsonMutation();
+  const { sendJsonRequest: sendAutoRefineStopRequest, isSubmitting: autoRefineStopIsInFlight } =
+    useJsonMutation();
+
+  const { job: autoRefineJob, pollErrorMessage: autoRefinePollErrorMessage, watchJob } = useAutoRefineJob(
+    websiteId,
+    actionId,
+  );
+  const autoRefineJobIsRunning = autoRefineJob !== null && autoRefineJob.status === "running";
+  // True while "Convert and auto-refine" (an action with no version yet) is converting.
+  const [autoRefineIsConverting, setAutoRefineIsConverting] = useState(false);
+  const seenJobProgressRef = useRef<SeenJobProgress | null>(null);
+  // Set when the job has made a version the list does not show yet: the count
+  // the list must reach before the page switches to its newest version.
+  const [versionCountToFollow, setVersionCountToFollow] = useState<number | null>(null);
+
+  // Each poll of the job is compared with the last one seen: a new version
+  // refetches the versions list (and the page will show the newest), a new
+  // run refetches the shown version's runs (and shows the newest), and the
+  // job's end refetches both plus the parameters the runs taught.
+  useEffect(() => {
+    if (autoRefineJob === null) return;
+    const progress = readJobProgress(autoRefineJob);
+    const lastSeen = seenJobProgressRef.current;
+    seenJobProgressRef.current = progress;
+    const thisJobWasNotSeenBefore = lastSeen === null || lastSeen.jobId !== progress.jobId;
+    if (thisJobWasNotSeenBefore) return;
+
+    const aVersionWasAdded = progress.createdScriptCount > lastSeen.createdScriptCount;
+    const aRunWasAdded = progress.runCount > lastSeen.runCount;
+    const theJobJustEnded = lastSeen.wasRunning && !progress.wasRunning;
+    if (aVersionWasAdded) {
+      setVersionCountToFollow(scripts.length + (progress.createdScriptCount - lastSeen.createdScriptCount));
+      reloadScripts();
+    }
+    if (aRunWasAdded) {
+      setPickedRunId(null);
+      reloadRuns();
+    }
+    if (theJobJustEnded) {
+      if (!aVersionWasAdded) reloadScripts();
+      if (!aRunWasAdded) reloadRuns();
+      reloadParameters();
+    }
+    // A changed `scripts.length` alone re-runs this with nothing new seen, so it refetches nothing.
+  }, [autoRefineJob, scripts.length, reloadScripts, reloadRuns, reloadParameters]);
+
+  // Once the refetched list has the version the job made, show it.
+  useEffect(() => {
+    const noVersionIsAwaited = versionCountToFollow === null;
+    if (noVersionIsAwaited) return;
+    const theListHasCaughtUp = scripts.length >= versionCountToFollow;
+    if (!theListHasCaughtUp) return;
+    setVersionCountToFollow(null);
+    setSearchParams({ [VERSION_QUERY_PARAMETER]: String(scripts.length) }, { replace: true });
+  }, [scripts.length, versionCountToFollow, setSearchParams]);
 
   /**
    * PUTs a parameter's new label and required choice, then fetches the
@@ -534,6 +663,104 @@ export default function ActionDetailPage(): ReactElement {
   const versionCanBeRefined = selectedScript !== null && selectedScript.modelId !== null;
 
   /**
+   * POSTs the start of an auto-refine job for a version with the given run
+   * values, and watches the job the server answers with. A failure is shown
+   * by the versions column from `autoRefineStartErrorMessage`.
+   * @param actionScriptId - The version to run and refine
+   * @param parameterValues - The run values to send with every run
+   * @returns Resolves once the request is done
+   */
+  const startAutoRefineOfVersion = async (
+    actionScriptId: string,
+    parameterValues: ParameterValues,
+  ): Promise<void> => {
+    const result = await sendAutoRefineStartRequest(
+      "POST",
+      autoRefineJobsApiUrl(websiteId, actionId, actionScriptId),
+      { parameterValues },
+    );
+    if (!result.succeeded) return;
+    watchJob(result.data as AutoRefineJobRecord);
+  };
+
+  /**
+   * Starts an auto-refine job for the shown version with the run form's
+   * changed values - or, when the action has no version yet, converts it
+   * first (with the picked model and effort, like "Convert to new version")
+   * and starts the job for the version that made, with no run values (its
+   * own defaults). A failed conversion is shown by the versions column from
+   * `convertErrorMessage`, like any conversion.
+   * @returns Resolves once the requests are done
+   */
+  const startAutoRefine = async (): Promise<void> => {
+    const thereIsAVersionToRefine = selectedScript !== null;
+    if (thereIsAVersionToRefine) {
+      await startAutoRefineOfVersion(selectedScript.id, changedRunFormValues);
+      return;
+    }
+    if (modelChoice === null) return;
+    setAutoRefineIsConverting(true);
+    try {
+      const conversion = await sendConvertRequest("POST", actionScriptsApiUrl(websiteId, actionId), modelChoice);
+      if (!conversion.succeeded) return;
+      const createdScript = conversion.data as ActionScriptRecord;
+      addAndShowCreatedScript(createdScript);
+      await startAutoRefineOfVersion(createdScript.id, {});
+    } finally {
+      setAutoRefineIsConverting(false);
+    }
+  };
+
+  /** Starts an auto-refine job without returning its promise (the button expects a void callback). */
+  const handleAutoRefineStart = (): void => {
+    void startAutoRefine();
+  };
+
+  /**
+   * POSTs a stop request for the watched job, and shows the job as the server
+   * answers with it (its `stopRequestedAt` set).
+   * @returns Resolves once the request is done
+   */
+  const stopAutoRefine = async (): Promise<void> => {
+    if (autoRefineJob === null) return;
+    const result = await sendAutoRefineStopRequest(
+      "POST",
+      autoRefineJobStopApiUrl(websiteId, actionId, autoRefineJob.id),
+    );
+    if (!result.succeeded) return;
+    watchJob(result.data as AutoRefineJobRecord);
+  };
+
+  /** Asks the job to stop without returning the promise (the button expects a void callback). */
+  const handleAutoRefineStop = (): void => {
+    void stopAutoRefine();
+  };
+
+  /**
+   * Says why "Auto-refine" cannot start right now, when there is a reason worth
+   * showing: the shown version was saved from the step editor, or the run
+   * form has values to fix.
+   * @returns The reason, or null when it can start or nothing needs explaining
+   */
+  const describeAutoRefineBlock = (): string | null => {
+    if (selectedScript === null) return null;
+    if (!versionCanBeRefined) return EDITED_VERSION_CANNOT_BE_AUTO_REFINED_REASON;
+    const valuesNeedFixing = runFormParametersToFix.length > 0;
+    if (valuesNeedFixing) return `Fill in ${runFormParametersToFix.join(", ")} to run`;
+    return null;
+  };
+  const autoRefineBlockedReason = describeAutoRefineBlock();
+  const anotherRequestIsInFlight = runIsInFlight || refineIsInFlight || editSaveIsInFlight;
+  const thereAreNoVersionsYet = !scriptsAreLoading && scriptsErrorMessage === null && scripts.length === 0;
+  // With no version yet the button converts first, so it needs a model, like Convert.
+  const autoRefineCanStart = thereAreNoVersionsYet
+    ? modelChoice !== null && !conversionIsInFlight
+    : selectedScript !== null &&
+      autoRefineBlockedReason === null &&
+      parametersView !== null &&
+      !anotherRequestIsInFlight;
+
+  /**
    * POSTs a run of the shown script with the values the user changed and,
    * when it is recorded, adds it to the history, shows it, and makes it the
    * version's latest run (so the version's status icon updates at once) -
@@ -611,6 +838,19 @@ export default function ActionDetailPage(): ReactElement {
         onModelChange: handleModelChange,
         onEffortChange: handleEffortChange,
       }}
+      autoRefine={{
+        shownVersionNumber: selectedScript === null ? null : selectedScriptVersionNumber,
+        canStart: autoRefineCanStart,
+        blockedReason: autoRefineBlockedReason,
+        isStarting: autoRefineStartIsInFlight || autoRefineIsConverting,
+        startErrorMessage: autoRefineStartErrorMessage,
+        job: autoRefineJob,
+        versionNumberOfScriptId: (scriptId) => findVersionNumberOfScriptId(scripts, scriptId),
+        pollErrorMessage: autoRefinePollErrorMessage,
+        onStart: handleAutoRefineStart,
+        onStop: handleAutoRefineStop,
+        isStopping: autoRefineStopIsInFlight,
+      }}
       currentAction={{
         title: action.title,
         description: action.description,
@@ -624,9 +864,10 @@ export default function ActionDetailPage(): ReactElement {
 
   const runPanel = selectedScript !== null && (
     <ActionScriptRunsSection
-      // Keyed by version, so values typed for one version never carry over. The
-      // prefix keeps the key apart from the version details' own key - on a
-      // phone both are children of the same column.
+      // Keyed by version, so the shown run and any refine error start over for
+      // each version (the run form's values are the page's, kept per version).
+      // The prefix keeps the key apart from the version details' own key - on
+      // a phone both are children of the same column.
       key={`run-panel-${selectedScript.id}`}
       websiteId={websiteId}
       parametersView={parametersView}
@@ -640,6 +881,9 @@ export default function ActionDetailPage(): ReactElement {
       isRunning={runIsInFlight}
       runErrorMessage={runErrorMessage}
       onRunClick={handleRunClick}
+      values={runFormValues}
+      onValueChange={handleRunFormValueChange}
+      isAutoRefining={autoRefineJobIsRunning}
       versionCanBeRefined={versionCanBeRefined}
       isRefining={refineIsInFlight}
       refineErrorMessage={refineErrorMessage}

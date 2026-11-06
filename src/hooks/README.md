@@ -5,20 +5,21 @@ than inline in a component.
 
 | Hook | Returns |
 |---|---|
-| `useJsonResource` | `{ data, isLoading, errorMessage }` for any `GET` url; `data` is `unknown`. A `null` url stays idle (no request, not loading) |
+| `useJsonResource` | `{ data, isLoading, errorMessage, reload }` for any `GET` url; `data` is `unknown`. A `null` url stays idle (no request, not loading). `reload()` fetches the url again while the current `data` stays shown (no spinner flash) |
 | `useWebsites` / `useWebsite` | Typed `useJsonResource` wrappers for the website list / one website; `WebsiteRecord.loginUrl` is null when the website doesn't require login. The LIST answers `WebsiteWithSummaryRecord`s: each website plus its dashboard `summary` (`WebsiteSummaryRecord`: passed / failed / not run action counts, `latestRunAt`, and `latestCrawlRun`) |
 | `useWebsiteItems` / `useWebsiteItem` | Typed wrappers for a website's use cases or actions / one of them; the action LIST also carries each action's `newestScript` (a `NewestActionScriptRecord`: the newest version's id, its `versionNumber`, the `actionTitle` / `actionDescription` / `credentialId` it was generated from, and its `latestRun`; or null when it has no versions) |
 | `useScreenshotRuns` | `{ runs, isLoading, errorMessage, addTakenRun }` for a website's screenshot runs; see below |
-| `useRecordListWithAdditions` | `{ records, isLoading, errorMessage, addRecord }`: the generic "fetched list plus rows a POST just created" behind the two hooks below |
-| `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript, recordFinishedRun }` for an action's saved plan versions (each with its `plan`, see `../utils/actionPlanSteps.ts`; its `refinement`: an `ActionScriptRefinementRecord` - the note, token usage, `screenshotWasSent`, and the failed run's `RefinedActionScriptRunSummary` - or null when it was not refined; and its `latestRun`: a `LatestActionScriptRunRecord` - `{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run - or null when it has not been run). `recordFinishedRun(run)` makes a run a "Run script" POST just recorded its version's `latestRun` for the rest of the visit, so the version's status icon updates without refetching |
-| `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun }` for one version's runs (each with `failingPageUrl` and `failingPageAriaSnapshot`, null when it passed or none was captured); a `null` script id fetches nothing |
+| `useRecordListWithAdditions` | `{ records, isLoading, errorMessage, addRecord, reload }`: the generic "fetched list plus rows a POST just created" behind the two hooks below; `reload` is `useJsonResource`'s, for rows created on the server without a POST from the page |
+| `useActionScripts` | `{ scripts, isLoading, errorMessage, addCreatedScript, recordFinishedRun, reloadScripts }` for an action's saved plan versions (each with its `plan`, see `../utils/actionPlanSteps.ts`; its `refinement`: an `ActionScriptRefinementRecord` - the note, token usage, `screenshotWasSent`, and the failed run's `RefinedActionScriptRunSummary` - or null when it was not refined; and its `latestRun`: a `LatestActionScriptRunRecord` - `{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run - or null when it has not been run). `recordFinishedRun(run)` makes a run a "Run script" POST just recorded its version's `latestRun` for the rest of the visit, so the version's status icon updates without refetching. `reloadScripts()` refetches the list without blanking it (an auto-refine job saved a version) |
+| `useActionScriptRuns` | `{ runs, isLoading, errorMessage, addFinishedRun, reloadRuns }` for one version's runs (each with `failingPageUrl` and `failingPageAriaSnapshot`, null when it passed or none was captured); a `null` script id fetches nothing. `reloadRuns()` refetches the list without blanking it (an auto-refine job recorded a run) |
 | `useActionParameters` | `{ view, isLoading, errorMessage, reloadParameters, showParameters }` for one version's parameters (`VersionParametersRecord`: role, parameters, object choices, confirm step, name parameter, bindable texts, warnings - see `../utils/actionParameters.ts`). Reloadable (a run or a parameter change) without blanking the shown view; a `null` version fetches nothing |
 | `useCreatedObjects` | `{ createdObjects, isLoading, errorMessage, removeCreatedObject, isRemoving, removeErrorMessage }` for a website's record of created objects (`CreatedObjectRecord`); removing refetches |
 | `useScriptModels` | Typed `useJsonResource` wrapper for `GET /api/script-models`: the live model list, each model's effort levels and fallback, and the default choice |
 | `useCrawlRuns` | A website's crawl runs (newest first, no pages), polled every 2 s (`usePolledJsonResource`) while one of them is `running`, so the website page's progress card counts pages live; exports `CrawlRunRecord` (with `credentialId`, `isLoggedIn`, `credential: { id, name }`, and `buttonMode`) and `CrawlButtonModeRecord` |
 | `useCredentials` / `useCredential` | Typed wrappers for a website's credentials / one of them; export `CredentialRecord` (no password - only `hasPassword: true`) and `CredentialRequestBody` |
-| `usePolledJsonResource` | `useJsonResource` plus `pollErrorMessage`, GETting the url again every interval while a `keepPolling(data)` check says so; see below |
+| `usePolledJsonResource` | `useJsonResource` plus `pollErrorMessage`, GETting the url again every interval while a `keepPolling(data)` check says so; its `reload()` fetches at once and counts as the next poll; see below |
 | `useCrawlRunProgress` | One crawl run with its page summaries, polled every 2 s while it is `running` (`CRAWL_RUN_POLL_INTERVAL_MS`); exports `CrawlRunWithPagesRecord`, `CrawledPageSummaryRecord` |
+| `useAutoRefineJob` | `{ job, pollErrorMessage, watchJob }` for an action's auto-refine job (the server runs a version and, while it fails, refines and reruns it, up to 5 times): reads the action's job list once on mount and watches a job still `running` (a reload mid-job resumes), polls the watched job every 2 s (`AUTO_REFINE_POLL_INTERVAL_MS`) while it runs, and `watchJob(job)` switches to the record a start (201) or stop (200) POST answered with, showing it until the first poll replaces it; exports `AutoRefineJobRecord`, `AutoRefineJobStatus`, `AutoRefineJobPhase` |
 | `useCrawledPage` | One crawled page in full (aria snapshot and links); a `null` page id fetches nothing |
 | `useWebsiteItemDeletion` | The delete dialog's state and handlers shared by the use case and action pages: DELETE, then a history-aware return to the website |
 | `useJsonMutation` | `{ sendJsonRequest, isSubmitting, errorMessage }` for `POST`/`PUT`/`DELETE` |
@@ -43,6 +44,16 @@ Each data hook:
 reports `isLoading` again the moment the url changes, so navigating between two
 records that use the same page never flashes the previous record.
 
+It also returns `reload()`: a `reloadCount` state the fetch effect depends on
+is bumped, so the url is GET again, while the finished result for that url
+stays reported - `data` is kept and `isLoading` stays false until the new
+response lands (the pattern `useActionParameters` introduced). Pages use it
+when the server changed a list without a POST from the page, e.g. the
+versions and runs an auto-refine job creates. `useRecordListWithAdditions`
+passes it through as `reload`; `useActionScripts` as `reloadScripts`,
+`useActionScriptRuns` as `reloadRuns`. `usePolledJsonResource` has one too
+(it fetches at once and counts as the next poll).
+
 A failed request's `errorMessage` is the server's `{ error }` text when the
 response has one ("Website not found"), else `Server responded with <status>`
 (`readResponseErrorMessage` in `../utils/describeError.ts`). Thrown values are
@@ -56,10 +67,10 @@ typed wrappers state the response shape in one place each.
 ## `useScreenshotRuns`: showing a new run without refetching
 
 "Take screenshot" POSTs a new run, and the POST's response already is the
-saved row. So rather than giving `useJsonResource` a `reload()` (an extra GET,
-and a spinner flash, on a hook every page shares), `useScreenshotRuns` keeps
-the runs taken on this visit in local state and returns them ahead of the
-fetched list:
+saved row. So rather than refetching the whole list with `reload()` (an extra
+GET for a row the page already holds), `useScreenshotRuns` keeps the runs
+taken on this visit in local state and returns them ahead of the fetched
+list:
 
 - taken runs are filtered by `websiteId`, because React Router reuses the page
   when navigating straight from one website to another, and a slow POST can
@@ -76,7 +87,10 @@ apart from any runs taken in the meantime.
 records are kept only while a caller-supplied check says they belong to the
 list on screen (the same action / the same script), and a fetched record
 whose id was also added is dropped. `useScreenshotRuns` predates it and is
-left as is.
+left as is. Rows the server creates without a POST from the page - an
+auto-refine job's versions and runs - have no response to add, so the page
+calls `reload` instead (`reloadScripts` / `reloadRuns`), which keeps the
+list shown while it refetches.
 
 ## `usePolledJsonResource`: watching a background crawl
 

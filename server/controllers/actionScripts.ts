@@ -1,69 +1,34 @@
-import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { type Express, type Response } from "express";
+import { type Express } from "express";
 import {
-  type ActionScriptRun,
-  type ActionScriptWithPlan,
-  type ActionWithCredential,
-  type CredentialSummary,
-  type Website,
-  findWebsiteById,
-  findActionForWebsite,
-  findCredentialForWebsite,
-  findCredentialWithPasswordForWebsite,
   findLatestCrawledPagesForWebsite,
   listActionScriptsForAction,
-  findActionScriptForAction,
   createActionScriptForAction,
-  createRefinedActionScriptForAction,
   listActionScriptRunsForScript,
   findActionScriptRunForScript,
-  createActionScriptRunForScript,
-  findActionScriptRunWithObjects,
 } from "../services/dbService.js";
+import { convertActionToPlan } from "../services/scriptGenerationService.js";
+import { findScriptModel } from "../services/scriptModelService.js";
+import { syncActionParametersQuietly } from "../services/actionParameterService.js";
 import {
-  type FailedRunDetails,
-  convertActionToPlan,
-  refineActionPlan,
-} from "../services/scriptGenerationService.js";
-import {
-  type EffortLevel,
-  type ScriptModelOption,
-  chooseEffortForModel,
-  findScriptModel,
-} from "../services/scriptModelService.js";
-import {
-  FAILURE_SCREENSHOT_FILE_NAME,
-  runActionPlan,
-  type PlanRunLogin,
-} from "../services/actionPlanRunnerService.js";
-import { buildCrawlLoginDetails } from "../services/crawlerLoginService.js";
-import {
-  followUpRecordedRun,
-  loadVersionParameters,
-  prepareParameterRun,
-  syncActionParametersQuietly,
-} from "../services/actionParameterService.js";
-import {
-  buildAllowedPlanOrigins,
-  planUsesCredentialPlaceholders,
-  validateActionPlan,
-  type ActionPlan,
-} from "../utils/actionPlanSchema.js";
-import { applyParameterValues, expandAppliedPlan, readUsedParameterValues } from "../utils/actionParameters.js";
-import {
-  CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE,
-  credentialEncryptionIsConfigured,
-} from "../utils/credentialEncryption.js";
+  ACTION_ALREADY_RUNNING_MESSAGE,
+  EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE,
+  ONLY_A_FAILED_RUN_CAN_BE_REFINED_MESSAGE,
+  RUN_ALREADY_BEING_REFINED_MESSAGE,
+  allowedOriginsFor,
+  claimActionRun,
+  claimRunRefinement,
+  describeFailedRun,
+  findActionCredential,
+  isActionScriptRequestProblem,
+  performActionScriptRun,
+  performRefinement,
+  releaseActionRun,
+  releaseRunRefinement,
+  resolveEffortForModel,
+} from "../services/actionScriptExecutionService.js";
 import { describeError } from "../utils/describeError.js";
 import { readSendErrorStatus } from "../utils/readSendErrorStatus.js";
-import {
-  type SelectedContextPage,
-  extractActionSearchTerms,
-  selectContextPagesByUrl,
-  selectRelevantCrawledPages,
-} from "../utils/selectRelevantCrawledPages.js";
+import { extractActionSearchTerms, selectRelevantCrawledPages } from "../utils/selectRelevantCrawledPages.js";
 import { statusForScriptGenerationFailure } from "../utils/statusForScriptGenerationFailure.js";
 import {
   validateActionPlanEditInput,
@@ -71,554 +36,11 @@ import {
   validateRunParameterValuesInput,
   validateScriptModelChoiceInput,
 } from "../utils/validateRequestBodies.js";
+import { findWebsiteAndAction, findWebsiteActionAndScript } from "./actionLookups.js";
 
-const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
-const ACTION_NOT_FOUND_MESSAGE = "Action not found";
-const SCRIPT_NOT_FOUND_MESSAGE = "Script not found";
 const SCRIPT_RUN_NOT_FOUND_MESSAGE = "Script run not found";
 const RUN_HAS_NO_FAILURE_SCREENSHOT_MESSAGE = "This run did not capture a failure screenshot";
 const FAILURE_SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Failure screenshot file not found";
-const ACTION_ALREADY_RUNNING_MESSAGE =
-  "This action is already running; wait for that run to finish before starting another";
-const ACTION_CREDENTIAL_MISSING_MESSAGE =
-  "This action's credential no longer exists; edit the action to pick another one";
-const PLAN_NEEDS_A_CREDENTIAL_MESSAGE =
-  "This plan types the credential's username or password, but the action runs logged out; edit the action to pick a credential";
-const ONLY_A_FAILED_RUN_CAN_BE_REFINED_MESSAGE = "Only a failed run can be refined; this run passed";
-const EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE =
-  "This version was saved from the step editor, so no model wrote it; only a version Claude wrote can be refined";
-const RUN_ALREADY_BEING_REFINED_MESSAGE =
-  "This run is already being refined; wait for that to finish";
-
-/**
- * The folder, inside the action script directory, that `uploadFile` steps
- * pick their files from. Run folders are named by website cuid, so this name
- * cannot collide with one.
- */
-export const UPLOADS_FOLDER_NAME = "uploads";
-
-/**
- * The actions with a run in progress. One action runs one plan at a time,
- * because a second visible browser logging in as the same credential would
- * fight the first.
- */
-const actionIdsBeingRun = new Set<string>();
-
-/**
- * The failed runs with a "Refine" in progress, by run id. Refining the same
- * run twice at once (a double click, or two tabs) would ask Claude twice and
- * save two versions, so the second request is refused instead.
- */
-const actionScriptRunIdsBeingRefined = new Set<string>();
-
-/** The outcome of looking up a chain of parent rows: all found, or the first one missing. */
-type ParentLookup<TFound> =
-  | { allWereFound: true; found: TFound }
-  | { allWereFound: false; notFoundMessage: string };
-
-/** The active website and action a script route works under. */
-interface WebsiteAndAction {
-  website: Website;
-  action: ActionWithCredential;
-}
-
-/** The active website, action, and script a script-run route works under. */
-interface WebsiteActionAndScript extends WebsiteAndAction {
-  script: ActionScriptWithPlan;
-}
-
-/**
- * A failed run of a version Claude wrote, with its website, action, and
- * version - everything the "refine a failed run" route starts from once its
- * checks have passed.
- */
-interface RefinableRun extends WebsiteActionAndScript {
-  /** The failed run to refine. */
-  run: ActionScriptRun;
-  /** How the run failed, as Claude is shown it. */
-  failedRun: FailedRunDetails;
-  /** The model that wrote the version (never null here: an edited version cannot be refined). */
-  sourceModelId: string;
-}
-
-/**
- * Looks up the active website, then the active action under it. Later lookups
- * use the FOUND rows' ids, never the raw path parameters.
- * @param websiteId - Path parameter: the website's cuid
- * @param actionId - Path parameter: the action's cuid
- * @returns Both rows, or the 404 message for the first one missing
- */
-async function findWebsiteAndAction(
-  websiteId: string,
-  actionId: string,
-): Promise<ParentLookup<WebsiteAndAction>> {
-  const website = await findWebsiteById(websiteId);
-  if (website === null) {
-    return { allWereFound: false, notFoundMessage: WEBSITE_NOT_FOUND_MESSAGE };
-  }
-  const action = await findActionForWebsite(website.id, actionId);
-  if (action === null) {
-    return { allWereFound: false, notFoundMessage: ACTION_NOT_FOUND_MESSAGE };
-  }
-  return { allWereFound: true, found: { website, action } };
-}
-
-/**
- * Looks up the active website, action, and script, in that order.
- * @param websiteId - Path parameter: the website's cuid
- * @param actionId - Path parameter: the action's cuid
- * @param actionScriptId - Path parameter: the script's cuid
- * @returns All three rows, or the 404 message for the first one missing
- */
-async function findWebsiteActionAndScript(
-  websiteId: string,
-  actionId: string,
-  actionScriptId: string,
-): Promise<ParentLookup<WebsiteActionAndScript>> {
-  const websiteAndActionLookup = await findWebsiteAndAction(websiteId, actionId);
-  if (!websiteAndActionLookup.allWereFound) {
-    return websiteAndActionLookup;
-  }
-  const { website, action } = websiteAndActionLookup.found;
-  const script = await findActionScriptForAction(website.id, action.id, actionScriptId);
-  if (script === null) {
-    return { allWereFound: false, notFoundMessage: SCRIPT_NOT_FOUND_MESSAGE };
-  }
-  return { allWereFound: true, found: { website, action, script } };
-}
-
-/** Whether a model offers the requested effort level, with the level narrowed when it does. */
-type EffortResolution =
-  | { isOffered: true; effort: EffortLevel | null }
-  | { isOffered: false; problem: string };
-
-/**
- * Checks a requested effort level against what the chosen model offers. A
- * model with no effort setting must be sent no level ("Standard"); any other
- * model must be sent one of its own levels.
- * @param model - The chosen model, from the live catalog
- * @param requestedEffort - The level the request asked for, or null
- * @returns The level to use, or a message saying what is wrong
- */
-function resolveEffortForModel(
-  model: ScriptModelOption,
-  requestedEffort: string | null,
-): EffortResolution {
-  const offeredLevelsText = model.effortLevels.join(", ");
-  const modelHasNoEffortSetting = model.effortLevels.length === 0;
-  if (modelHasNoEffortSetting) {
-    const noLevelWasRequested = requestedEffort === null;
-    if (noLevelWasRequested) {
-      return { isOffered: true, effort: null };
-    }
-    return {
-      isOffered: false,
-      problem: `${model.displayName} has no effort setting, so no effort level can be chosen for it`,
-    };
-  }
-
-  const offeredLevel = model.effortLevels.find((effortLevel) => effortLevel === requestedEffort);
-  if (offeredLevel !== undefined) {
-    return { isOffered: true, effort: offeredLevel };
-  }
-  const noLevelWasRequested = requestedEffort === null;
-  const problem = noLevelWasRequested
-    ? `${model.displayName} needs an effort level: ${offeredLevelsText}`
-    : `${model.displayName} does not offer the "${requestedEffort}" effort level; it offers ${offeredLevelsText}`;
-  return { isOffered: false, problem };
-}
-
-/**
- * Looks up the credential an action runs as, without its password - for its
- * name and login URL.
- * @param website - The action's website row
- * @param action - The action row
- * @returns The credential, or null when the action runs logged out (or its credential is gone)
- */
-async function findActionCredential(
-  website: Website,
-  action: ActionWithCredential,
-): Promise<CredentialSummary | null> {
-  const { credentialId } = action;
-  const actionRunsLoggedOut = credentialId === null;
-  if (actionRunsLoggedOut) return null;
-  return findCredentialForWebsite(website.id, credentialId);
-}
-
-/**
- * The origins a plan for this action may open: the website's own, and the
- * login pages' (the website's and the credential's).
- * @param website - The action's website row
- * @param credential - The action's credential, or null
- * @returns The allowed origins
- */
-function allowedOriginsFor(website: Website, credential: CredentialSummary | null): string[] {
-  return buildAllowedPlanOrigins([website.url, website.loginUrl, credential?.loginUrl ?? null]);
-}
-
-/**
- * Builds a new run's folder name, relative to the action script directory:
- * one folder per website, one uniquely named folder per run. The `/`
- * separator is what gets stored in the database, whatever the OS.
- * @param websiteId - The cuid of the website row (never a raw path parameter)
- * @returns `<websiteId>/<random uuid>`
- */
-function buildRunFolderName(websiteId: string): string {
-  return `${websiteId}/${randomUUID()}`;
-}
-
-/**
- * The body of the "run a version" route, after the lookups and the
- * one-run-per-action claim: checks the action's credential and the stored
- * plan, puts the run's parameter values in (see `prepareParameterRun`) and
- * checks the plan they make, runs it, records the run with the values it
- * used, follows the run up (see `followUpRecordedRun`: the parameters learn
- * from it, and a Create or deleting run updates the created objects), and
- * answers the request.
- * @param res - The route's response
- * @param actionScriptDirectory - Absolute path of the action script directory
- * @param found - The active website, action, and version to run
- * @param parameterValues - The run's values, by parameter key (validated as text)
- * @returns Resolves once the response is sent (errors reject, for the route's catch)
- */
-async function runPlanAndRecordRun(
-  res: Response,
-  actionScriptDirectory: string,
-  found: WebsiteActionAndScript,
-  parameterValues: Record<string, string>,
-): Promise<void> {
-  const { website, action, script } = found;
-  const { credentialId } = action;
-  const actionRunsLoggedIn = credentialId !== null;
-  if (actionRunsLoggedIn && !credentialEncryptionIsConfigured()) {
-    res.status(503).json({ error: CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE });
-    return;
-  }
-  const credential = actionRunsLoggedIn
-    ? await findCredentialWithPasswordForWebsite(website.id, credentialId)
-    : null;
-  if (actionRunsLoggedIn && credential === null) {
-    res.status(409).json({ error: ACTION_CREDENTIAL_MISSING_MESSAGE });
-    return;
-  }
-  const credentialHasNoLoginUrl =
-    credential !== null && credential.loginUrl === null && website.loginUrl === null;
-  if (credentialHasNoLoginUrl) {
-    res.status(400).json({
-      error: `The credential "${credential.name}" has no login page URL, and neither does its website; add one to log in`,
-    });
-    return;
-  }
-
-  const allowedOrigins = allowedOriginsFor(website, credential);
-  const planValidation = validateActionPlan(script.plan, allowedOrigins);
-  if (!planValidation.isValid) {
-    res.status(409).json({
-      error: `This version's plan can no longer run: ${planValidation.errorMessage}`,
-    });
-    return;
-  }
-  const plan = planValidation.input;
-  const planNeedsAMissingCredential = planUsesCredentialPlaceholders(plan) && credential === null;
-  if (planNeedsAMissingCredential) {
-    res.status(409).json({ error: PLAN_NEEDS_A_CREDENTIAL_MESSAGE });
-    return;
-  }
-  const login: PlanRunLogin | null =
-    credential === null
-      ? null
-      : { credentialName: credential.name, details: buildCrawlLoginDetails(credential, website) };
-
-  const parametersView = await loadVersionParameters(website.id, action, script);
-  const preparedRun = prepareParameterRun(parametersView, plan, parameterValues);
-  if (!preparedRun.isReady) {
-    res.status(400).json({ error: preparedRun.errorMessage });
-    return;
-  }
-  const valuedPlanValidation = validateActionPlan(expandAppliedPlan(preparedRun.applied), allowedOrigins);
-  if (!valuedPlanValidation.isValid) {
-    res.status(400).json({ error: `With these values the plan cannot run: ${valuedPlanValidation.errorMessage}` });
-    return;
-  }
-
-  const runFolderName = buildRunFolderName(website.id);
-  const run = await runActionPlan({
-    plan: preparedRun.applied.plan,
-    login,
-    timingSettings: {
-      networkIdleTimeoutMs: website.networkIdleTimeoutMs,
-      screenshotMinimumWaitMs: website.screenshotMinimumWaitMs,
-    },
-    allowedOrigins,
-    runDirectory: path.join(actionScriptDirectory, runFolderName),
-    uploadsDirectory: path.join(actionScriptDirectory, UPLOADS_FOLDER_NAME),
-    parameterRun: preparedRun.parameterRun,
-  });
-
-  const created = await createActionScriptRunForScript(website.id, action.id, script.id, {
-    succeeded: run.succeeded,
-    timedOut: run.timedOut,
-    errorMessage: run.errorMessage,
-    failedStepNumber: run.failedStepNumber,
-    credentialName: login?.credentialName ?? null,
-    output: run.output,
-    outputWasTruncated: run.outputWasTruncated,
-    failureScreenshotFileName: run.failureScreenshotWasCaptured
-      ? `${runFolderName}/${FAILURE_SCREENSHOT_FILE_NAME}`
-      : null,
-    failingPageUrl: run.failingPageUrl,
-    failingPageAriaSnapshot: run.failingPageAriaSnapshot,
-    durationMs: run.durationMs,
-    parameterValues: preparedRun.applied.usedValues,
-    finalPageUrl: run.finalPageUrl,
-    confirmStepNumber: preparedRun.parameterRun.confirmStepNumber,
-    confirmStepSucceeded: preparedRun.parameterRun.confirmStepNumber === null ? null : run.confirmStepSucceeded,
-  });
-  await followUpRecordedRun({
-    websiteId: website.id,
-    action,
-    actionScriptId: script.id,
-    plan: script.plan,
-    actionScriptRunId: created.id,
-    view: parametersView,
-    applied: preparedRun.applied,
-    runResult: run,
-  });
-  const createdWithObjects = await findActionScriptRunWithObjects(website.id, created.id);
-  res.status(201).json(createdWithObjects ?? created);
-}
-
-/**
- * Puts the values a failed run used back into its version's plan, so Claude
- * refines the plan that actually ran. When the values no longer fit (the
- * parameters changed since), the version's own plan is sent as it is.
- * @param websiteId - The owning website's cuid
- * @param action - The action
- * @param script - The version that ran
- * @param run - The failed run
- * @returns The plan with the run's values in
- */
-async function planWithRunValues(
-  websiteId: string,
-  action: ActionWithCredential,
-  script: ActionScriptWithPlan,
-  run: ActionScriptRun,
-): Promise<ActionPlan> {
-  const runValues = Object.fromEntries(
-    readUsedParameterValues(run.parameterValues).map((usedValue) => [usedValue.key, usedValue.value]),
-  );
-  const runUsedNoValues = Object.keys(runValues).length === 0;
-  if (runUsedNoValues) return script.plan;
-  const view = await loadVersionParameters(websiteId, action, script);
-  const knownKeys = new Set(view.parameters.map((parameter) => parameter.key));
-  const knownRunValues = Object.fromEntries(Object.entries(runValues).filter(([parameterKey]) => knownKeys.has(parameterKey)));
-  const applied = applyParameterValues(script.plan, view.parameters, knownRunValues, view.objectChoices);
-  return applied.problems.length === 0 ? applied.plan : script.plan;
-}
-
-/**
- * Describes a recorded run as the failure a refinement shows Claude, copying
- * the run row's fields.
- * @param run - A recorded script run
- * @returns The failure's details, or null when the run passed or recorded no error (so there is nothing to fix)
- */
-function describeFailedRun(run: ActionScriptRun): FailedRunDetails | null {
-  const { errorMessage } = run;
-  const runDidNotFail = run.succeeded || errorMessage === null;
-  if (runDidNotFail) return null;
-  return {
-    errorMessage,
-    failedStepNumber: run.failedStepNumber,
-    timedOut: run.timedOut,
-    output: run.output,
-    failingPageUrl: run.failingPageUrl,
-    failingPageAriaSnapshot: run.failingPageAriaSnapshot,
-  };
-}
-
-/**
- * Chooses the effort level a refinement asks for: the level the source
- * version was written at, when its model still offers it (null included, for
- * a model with no effort setting); otherwise the level `chooseEffortForModel`
- * falls back to for that model.
- * @param model - The model that wrote the source version, from the live catalog
- * @param sourceEffort - The effort level stored on the source version, or null for "Standard"
- * @returns The level to send, or null for a model with no effort setting
- */
-function chooseRefinementEffort(
-  model: ScriptModelOption,
-  sourceEffort: string | null,
-): EffortLevel | null {
-  const sourceEffortResolution = resolveEffortForModel(model, sourceEffort);
-  if (sourceEffortResolution.isOffered) {
-    return sourceEffortResolution.effort;
-  }
-  return chooseEffortForModel(model, null);
-}
-
-/**
- * Picks the crawled pages a refinement shows Claude: the pages the source
- * version was shown (`contextPageUrls`), read from the newest crawl done the
- * way that version ran. When that crawl has none of them, the pages are
- * picked afresh the way "Convert to script" picks them, from the version's
- * own action title and description.
- * @param website - The action's website row
- * @param script - The version being refined
- * @returns The pages to show Claude; empty when the website was never crawled
- */
-async function selectRefinementContextPages(
-  website: Website,
-  script: ActionScriptWithPlan,
-): Promise<SelectedContextPage[]> {
-  const crawledPages = await findLatestCrawledPagesForWebsite(website.id, script.credentialId);
-  const sourceVersionPages = selectContextPagesByUrl(crawledPages, script.contextPageUrls);
-  const sourceVersionPagesWereFound = sourceVersionPages.length > 0;
-  if (sourceVersionPagesWereFound) {
-    return sourceVersionPages;
-  }
-  const searchTerms = extractActionSearchTerms(script.actionTitle, script.actionDescription);
-  return selectRelevantCrawledPages(crawledPages, searchTerms);
-}
-
-/**
- * Checks whether a thrown value is Node's "no such file or directory" error.
- * @param error - Whatever a file system call rejected with
- * @returns True when `error` is an object whose `code` is `ENOENT`
- */
-function isFileMissingError(error: unknown): boolean {
-  const errorIsAnObject = typeof error === "object" && error !== null;
-  return errorIsAnObject && "code" in error && error.code === "ENOENT";
-}
-
-/**
- * Reads a failed run's screenshot, for Claude, as base64. A missing file is
- * not an error - the refinement is then sent without the image - and a
- * stored name that would resolve outside the action script directory is
- * never read.
- * @param actionScriptDirectory - Absolute path of the action script directory
- * @param failureScreenshotFileName - The run's stored screenshot name (relative to that directory), or null when it captured none
- * @returns The PNG as base64, or null when there is no name, the name leaves the directory, or the file is gone
- * @throws Any read error other than the file being missing (e.g. no permission to read it)
- */
-async function readFailureScreenshotAsBase64(
-  actionScriptDirectory: string,
-  failureScreenshotFileName: string | null,
-): Promise<string | null> {
-  const runCapturedNoScreenshot = failureScreenshotFileName === null;
-  if (runCapturedNoScreenshot) return null;
-
-  const resolvedDirectory = path.resolve(actionScriptDirectory);
-  const directoryPrefix = resolvedDirectory.endsWith(path.sep)
-    ? resolvedDirectory
-    : `${resolvedDirectory}${path.sep}`;
-  const screenshotPath = path.resolve(resolvedDirectory, failureScreenshotFileName);
-  const screenshotIsInsideTheDirectory = screenshotPath.startsWith(directoryPrefix);
-  if (!screenshotIsInsideTheDirectory) return null;
-
-  try {
-    const screenshotBytes = await readFile(screenshotPath);
-    return screenshotBytes.toString("base64");
-  } catch (error: unknown) {
-    if (isFileMissingError(error)) return null;
-    throw error;
-  }
-}
-
-/**
- * The body of the "refine a failed run" route, after the lookups, the checks
- * that the run failed and that Claude wrote its version, and the
- * one-refine-per-run claim: asks the model that wrote the version to fix it,
- * saves Claude's reply as a new version together with its refinement row,
- * and answers the request.
- *
- * Claude is shown the SOURCE version's snapshots (website, action, and
- * credential name, like the edit route copies them), the action's current
- * allowed origins, the source version's context pages, its summary,
- * assumptions, and plan - with the run's parameter values put back in (see
- * `planWithRunValues`) - how the run failed, the failure screenshot when its
- * file is still on disk, and the user's note. The new version's parameters
- * are synced once it is saved.
- * @param res - The route's response
- * @param actionScriptDirectory - Absolute path of the action script directory (where the run's failure screenshot lives)
- * @param source - The failed run, the version it ran, and their website and action
- * @param note - The user's hint for Claude, or null
- * @returns Resolves once the response is sent (errors reject, for the route's catch)
- */
-async function refineRunAndSaveVersion(
-  res: Response,
-  actionScriptDirectory: string,
-  source: RefinableRun,
-  note: string | null,
-): Promise<void> {
-  const { website, action, script, run, failedRun, sourceModelId } = source;
-  const model = await findScriptModel(sourceModelId);
-  if (model === null) {
-    res.status(409).json({
-      error: `The model that wrote this version (${sourceModelId}) is no longer offered, so it cannot refine it; convert the action again`,
-    });
-    return;
-  }
-  const effort = chooseRefinementEffort(model, script.effort);
-  const planThatRan = await planWithRunValues(website.id, action, script, run);
-
-  const actionCredential = await findActionCredential(website, action);
-  const allowedOrigins = allowedOriginsFor(website, actionCredential);
-  const contextPages = await selectRefinementContextPages(website, script);
-  const failureScreenshotPngBase64 = await readFailureScreenshotAsBase64(
-    actionScriptDirectory,
-    run.failureScreenshotFileName,
-  );
-
-  const sourceSnapshots = {
-    websiteName: script.websiteName,
-    startUrl: script.startUrl,
-    actionTitle: script.actionTitle,
-    actionDescription: script.actionDescription,
-    credentialName: script.credentialName,
-  };
-  const refinement = await refineActionPlan(
-    {
-      ...sourceSnapshots,
-      allowedOrigins,
-      contextPages,
-      previousSummary: script.summary,
-      previousAssumptions: script.assumptions,
-      previousPlan: planThatRan,
-      failedRun,
-      failureScreenshotPngBase64,
-      note,
-    },
-    { model, effort },
-  );
-
-  const created = await createRefinedActionScriptForAction(
-    website.id,
-    action.id,
-    {
-      ...sourceSnapshots,
-      credentialId: script.credentialId,
-      summary: refinement.summary,
-      assumptions: refinement.assumptions,
-      plan: refinement.plan,
-      contextPageUrls: contextPages.map((page) => page.url),
-      modelId: refinement.modelId,
-      effort: refinement.effort,
-      editedFromActionScriptId: null,
-    },
-    {
-      sourceActionScriptId: script.id,
-      actionScriptRunId: run.id,
-      note,
-      inputTokens: refinement.usage.inputTokens,
-      outputTokens: refinement.usage.outputTokens,
-      cacheReadInputTokens: refinement.usage.cacheReadInputTokens,
-      cacheCreationInputTokens: refinement.usage.cacheCreationInputTokens,
-      screenshotWasSent: refinement.screenshotWasSent,
-    },
-  );
-  await syncActionParametersQuietly(website.id, action);
-  res.status(201).json(created);
-}
 
 /**
  * Registers the action script routes: converting an action into a JSON step
@@ -905,25 +327,29 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
         }
         const { website, action, script } = lookup.found;
 
-        const actionIsAlreadyRunning = actionIdsBeingRun.has(action.id);
-        if (actionIsAlreadyRunning) {
+        // Claimed BEFORE the first await below, so two requests that arrive
+        // together cannot both start a run; released however this ends. An
+        // auto-refine job holds the same claim for its whole loop.
+        const actionWasClaimed = claimActionRun(action.id);
+        if (!actionWasClaimed) {
           res.status(409).json({ error: ACTION_ALREADY_RUNNING_MESSAGE });
           return;
         }
-        // Claimed BEFORE the first await below, so two requests that arrive
-        // together cannot both start a run; released however this ends.
-        actionIdsBeingRun.add(action.id);
         try {
-          await runPlanAndRecordRun(
-            res,
+          const recordedRun = await performActionScriptRun(
             actionScriptDirectory,
             { website, action, script },
             valuesValidation.input.parameterValues,
           );
+          res.status(201).json(recordedRun);
         } finally {
-          actionIdsBeingRun.delete(action.id);
+          releaseActionRun(action.id);
         }
       } catch (error: unknown) {
+        if (isActionScriptRequestProblem(error)) {
+          res.status(error.httpStatus).json({ error: error.message });
+          return;
+        }
         res.status(500).json({ error: describeError(error) });
       }
     },
@@ -1082,25 +508,29 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
           res.status(409).json({ error: EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE });
           return;
         }
-        const runIsAlreadyBeingRefined = actionScriptRunIdsBeingRefined.has(run.id);
-        if (runIsAlreadyBeingRefined) {
+        // Claimed with no await since the lookups above resolved, so two
+        // requests that arrive together cannot both refine the run; released
+        // however this ends.
+        const runWasClaimed = claimRunRefinement(run.id);
+        if (!runWasClaimed) {
           res.status(409).json({ error: RUN_ALREADY_BEING_REFINED_MESSAGE });
           return;
         }
-        // Claimed with no await since the check above, so two requests that
-        // arrive together cannot both refine the run; released however this ends.
-        actionScriptRunIdsBeingRefined.add(run.id);
         try {
-          await refineRunAndSaveVersion(
-            res,
+          const refinedVersion = await performRefinement(
             actionScriptDirectory,
             { website, action, script, run, failedRun, sourceModelId },
             note,
           );
+          res.status(201).json(refinedVersion);
         } finally {
-          actionScriptRunIdsBeingRefined.delete(run.id);
+          releaseRunRefinement(run.id);
         }
       } catch (error: unknown) {
+        if (isActionScriptRequestProblem(error)) {
+          res.status(error.httpStatus).json({ error: error.message });
+          return;
+        }
         res.status(statusForScriptGenerationFailure(error)).json({ error: describeError(error) });
       }
     },

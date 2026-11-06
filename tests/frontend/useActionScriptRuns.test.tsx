@@ -56,4 +56,32 @@ describe("useActionScriptRuns", () => {
     expect(result.current.runs.map((run) => run.id)).toEqual(["run-3"]);
     expect(countRequests(fetchStub, "GET", RUNS_API_URL)).toBe(1);
   });
+
+  it("reloadRuns fetches the list again and shows the runs the server recorded", async () => {
+    let requestCount = 0;
+    const fetchStub = stubFetchRoutes({
+      [`GET ${RUNS_API_URL}`]: () => {
+        requestCount += 1;
+        const thisIsTheFirstRequest = requestCount === 1;
+        const runs = thisIsTheFirstRequest
+          ? []
+          : [buildActionScriptRunRecord({ id: "run-1" })];
+        return Promise.resolve(new Response(JSON.stringify(runs), { status: 200 }));
+      },
+    });
+    const { result } = renderHook(() => useActionScriptRuns("website-1", "item-1", "script-1"));
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    act(() => {
+      result.current.reloadRuns();
+    });
+    expect(result.current.isLoading).toBe(false);
+
+    await waitFor(() => {
+      expect(result.current.runs.map((run) => run.id)).toEqual(["run-1"]);
+    });
+    expect(countRequests(fetchStub, "GET", RUNS_API_URL)).toBe(2);
+  });
 });

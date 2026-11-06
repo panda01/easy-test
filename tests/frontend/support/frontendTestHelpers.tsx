@@ -11,6 +11,7 @@ import {
 } from "react-router-dom";
 import { expect, vi, type Mock } from "vitest";
 import { type ActionScriptRunRecord } from "../../../src/hooks/useActionScriptRuns";
+import { type AutoRefineJobRecord } from "../../../src/hooks/useAutoRefineJob";
 import { type CreatedObjectRecord } from "../../../src/hooks/useCreatedObjects";
 import {
   type ActionObjectRoleRecord,
@@ -691,6 +692,40 @@ export function buildActionScriptRunRecord(
     deletedObjects: [],
     createdAt: "2026-04-03T03:04:05.000Z",
     updatedAt: "2026-04-03T03:04:05.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds an auto-refine job as the API returns it: by default a job of action
+ * item-1 that started from script-1, is running its first run (no refinements
+ * yet), has created no versions and recorded no runs, and was not asked to
+ * stop.
+ * @param overrides - Fields to replace in the default job
+ * @returns A complete auto-refine job record
+ */
+export function buildAutoRefineJobRecord(
+  overrides: Partial<AutoRefineJobRecord> = {},
+): AutoRefineJobRecord {
+  return {
+    id: "auto-refine-job-1",
+    websiteId: "website-1",
+    actionId: "item-1",
+    startActionScriptId: "script-1",
+    currentActionScriptId: "script-1",
+    status: "running",
+    phase: "running",
+    refinementsDone: 0,
+    maxRefinements: 5,
+    parameterValues: {},
+    createdActionScriptIds: [],
+    actionScriptRunIds: [],
+    stopRequestedAt: null,
+    errorMessage: null,
+    createdAt: "2026-04-05T03:04:05.000Z",
+    updatedAt: "2026-04-05T03:04:05.000Z",
+    finishedAt: null,
     deletedAt: null,
     ...overrides,
   };

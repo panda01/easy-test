@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { describeError, readResponseErrorMessage } from "../utils/describeError";
 
 /**
  * The three flat values a page needs to render a GET request: loading,
- * failed, or loaded. Exactly one of `isLoading`, `errorMessage !== null`, or
- * `data !== null` describes the current state - except while idle (a null
- * url), when all three are empty.
+ * failed, or loaded - plus `reload`. Exactly one of `isLoading`,
+ * `errorMessage !== null`, or `data !== null` describes the current state -
+ * except while idle (a null url), when all three are empty.
  */
 export interface JsonResourceState<TData> {
   /** The parsed response body; null while loading and after a failure. */
@@ -14,6 +14,13 @@ export interface JsonResourceState<TData> {
   isLoading: boolean;
   /** The failure reason (the server's `{ error }` text when present); null otherwise. */
   errorMessage: string | null;
+  /**
+   * Fetches the url again, keeping the current `data` (and `isLoading: false`)
+   * shown until the new response lands - so a page can refresh a list after
+   * something changed on the server without a spinner flash. Does nothing
+   * while idle.
+   */
+  reload: () => void;
 }
 
 /** What the last finished request produced, remembered with the url it was for. */
@@ -33,6 +40,11 @@ interface FinishedRequest {
  * page component - the hook reports loading instead of showing the previous
  * website's data for a moment.
  *
+ * `reload()` bumps a counter the fetch effect depends on, so the url is GET
+ * again; the finished result for the url stays in place meanwhile, so the
+ * page keeps showing the current data rather than a spinner (the pattern
+ * `useActionParameters` uses).
+ *
  * `data` is `unknown` on purpose: the typed wrappers in `useWebsites.ts` and
  * `useWebsiteItems.ts` name the response shape, so this hook stays generic
  * without a type parameter that would only appear in its return type.
@@ -44,10 +56,11 @@ interface FinishedRequest {
  * does not exist yet): the hook stays idle - no request, not loading, no data,
  * no error - so a page can call it unconditionally.
  * @param resourceUrl - Relative API url to GET, e.g. `/api/websites`; null to stay idle
- * @returns The loading / error / data state for that url
+ * @returns The loading / error / data state for that url, plus `reload`
  */
 export function useJsonResource(resourceUrl: string | null): JsonResourceState<unknown> {
   const [finishedRequest, setFinishedRequest] = useState<FinishedRequest | null>(null);
+  const [reloadCount, setReloadCount] = useState(0);
 
   useEffect(() => {
     const thereIsNothingToFetch = resourceUrl === null;
@@ -79,19 +92,24 @@ export function useJsonResource(resourceUrl: string | null): JsonResourceState<u
     return () => {
       cancelled = true;
     };
-  }, [resourceUrl]);
+  }, [resourceUrl, reloadCount]);
+
+  const reload = useCallback((): void => {
+    setReloadCount((previousReloadCount) => previousReloadCount + 1);
+  }, []);
 
   const hookIsIdle = resourceUrl === null;
   if (hookIsIdle) {
-    return { data: null, isLoading: false, errorMessage: null };
+    return { data: null, isLoading: false, errorMessage: null, reload };
   }
   const finishedRequestIsForCurrentUrl = finishedRequest?.resourceUrl === resourceUrl;
   if (finishedRequest === null || !finishedRequestIsForCurrentUrl) {
-    return { data: null, isLoading: true, errorMessage: null };
+    return { data: null, isLoading: true, errorMessage: null, reload };
   }
   return {
     data: finishedRequest.data,
     isLoading: false,
     errorMessage: finishedRequest.errorMessage,
+    reload,
   };
 }

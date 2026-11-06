@@ -23,7 +23,7 @@ describe("useCredentials", () => {
     await waitFor(() => {
       expect(result.current.isLoading).toBe(false);
     });
-    expect(result.current).toEqual({ data: [newer, older], isLoading: false, errorMessage: null });
+    expect(result.current).toEqual({ data: [newer, older], isLoading: false, errorMessage: null, reload: expect.any(Function) });
     expect(fetchStub).toHaveBeenCalledWith(CREDENTIALS_API_URL);
   });
 
@@ -37,7 +37,7 @@ describe("useCredentials", () => {
       { initialProps: { isNeeded: false } },
     );
 
-    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null, reload: expect.any(Function) });
     expect(fetchStub).not.toHaveBeenCalled();
 
     rerender({ isNeeded: true });

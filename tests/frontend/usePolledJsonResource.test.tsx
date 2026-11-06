@@ -98,6 +98,7 @@ describe("usePolledJsonResource", () => {
       isLoading: false,
       errorMessage: null,
       pollErrorMessage: null,
+      reload: expect.any(Function),
     });
     expect(fetchStub).not.toHaveBeenCalled();
   });
@@ -121,6 +122,7 @@ describe("usePolledJsonResource", () => {
       isLoading: false,
       errorMessage: null,
       pollErrorMessage: null,
+      reload: expect.any(Function),
     });
 
     await advanceClock(POLL_INTERVAL_MS - 1);
@@ -170,6 +172,7 @@ describe("usePolledJsonResource", () => {
       isLoading: false,
       errorMessage: null,
       pollErrorMessage: "Bad gateway",
+      reload: expect.any(Function),
     });
 
     await advanceClock(POLL_INTERVAL_MS);
@@ -182,6 +185,7 @@ describe("usePolledJsonResource", () => {
       isLoading: false,
       errorMessage: null,
       pollErrorMessage: null,
+      reload: expect.any(Function),
     });
   });
 
@@ -201,6 +205,7 @@ describe("usePolledJsonResource", () => {
       isLoading: false,
       errorMessage: "Crawl run not found",
       pollErrorMessage: null,
+      reload: expect.any(Function),
     });
     expect(countRequests(fetchStub, "GET", RUN_URL)).toBe(1);
   });
@@ -268,6 +273,36 @@ describe("usePolledJsonResource", () => {
       isLoading: true,
       errorMessage: null,
       pollErrorMessage: null,
+      reload: expect.any(Function),
     });
+  });
+
+  it("reload fetches again at once, keeping the last data shown, and polling carries on from that response", async () => {
+    const fetchStub = stubFetchRoutes({
+      [`GET ${RUN_URL}`]: replyInTurn([
+        okReply({ status: "running", visitedPageCount: 1 }),
+        okReply({ status: "running", visitedPageCount: 2 }),
+        okReply({ status: "finished", visitedPageCount: 3 }),
+      ]),
+    });
+
+    const { result } = renderHook(() =>
+      usePolledJsonResource(RUN_URL, keepPollingWhileRunning, POLL_INTERVAL_MS),
+    );
+    await settle();
+    expect(result.current.data).toEqual({ status: "running", visitedPageCount: 1 });
+
+    act(() => {
+      result.current.reload();
+    });
+    expect(countRequests(fetchStub, "GET", RUN_URL)).toBe(2);
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.data).toEqual({ status: "running", visitedPageCount: 1 });
+    await settle();
+    expect(result.current.data).toEqual({ status: "running", visitedPageCount: 2 });
+
+    await advanceClock(POLL_INTERVAL_MS);
+    expect(result.current.data).toEqual({ status: "finished", visitedPageCount: 3 });
+    expect(countRequests(fetchStub, "GET", RUN_URL)).toBe(3);
   });
 });

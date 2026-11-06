@@ -26,6 +26,8 @@ export interface ActionRunParameterFieldsProps {
   onValueChange: (parameterKey: string, value: string) => void;
   /** True while a run is in flight (the fields are locked). */
   isDisabled: boolean;
+  /** True once the user tried to run with a required value blank: those fields show a "Required" error until filled. */
+  blankRequiredValuesAreMarked: boolean;
 }
 
 /**
@@ -41,15 +43,31 @@ function describeObjectChoice(choice: ObjectChoiceRecord): string {
 }
 
 /**
- * Says what a field is for, under it: an added field's step, an object's
- * choices, or a value's problem.
+ * Says whether a required parameter has been left blank.
  * @param parameter - The parameter
  * @param value - Its current value
+ * @returns True when the parameter is required and the value is blank or only spaces
+ */
+function requiredValueIsBlank(parameter: VersionParameterRecord, value: string): boolean {
+  return parameter.isRequired && value.trim() === "";
+}
+
+/**
+ * Says what a field is for, under it: a value's problem, "Required" once a
+ * run was tried with it blank, an added field's step, or an object's choices.
+ * @param parameter - The parameter
+ * @param value - Its current value
+ * @param blankRequiredValuesAreMarked - True once the user tried to run with a required value blank
  * @returns The helper text
  */
-function describeFieldHelp(parameter: VersionParameterRecord, value: string): string {
+function describeFieldHelp(
+  parameter: VersionParameterRecord,
+  value: string,
+  blankRequiredValuesAreMarked: boolean,
+): string {
   const valueProblem = findParameterValueProblem(value);
   if (valueProblem !== null) return valueProblem;
+  if (blankRequiredValuesAreMarked && requiredValueIsBlank(parameter, value)) return "Required";
   if (parameter.addedField !== null) {
     return `A field the steps don't fill - typed after step ${String(parameter.addedField.afterStepNumber)} when you give it a value`;
   }
@@ -64,12 +82,15 @@ function describeFieldHelp(parameter: VersionParameterRecord, value: string): st
  * required with the usual asterisk. A secret one is a password field. The
  * object of an Object action is a combo box of the known objects - the ones
  * Create actions made first, marked "created by a run of …", then the ones
- * the latest crawl saw - that also takes any typed name.
- * @param props - The parameters, the object choices, the values, the change callback, and whether the fields are locked
+ * the latest crawl saw - that also takes any typed name. A value that breaks
+ * a rule shows its problem in red at once; a required value left blank shows
+ * "Required" in red only once the user tried to run
+ * (`blankRequiredValuesAreMarked`), and until it is filled in.
+ * @param props - The parameters, the object choices, the values, the change callback, whether the fields are locked, and whether blank required values are marked
  * @returns The fields, or nothing when the version has no parameters
  */
 export default function ActionRunParameterFields(props: ActionRunParameterFieldsProps): ReactElement | null {
-  const { parameters, objectChoices, values, onValueChange, isDisabled } = props;
+  const { parameters, objectChoices, values, onValueChange, isDisabled, blankRequiredValuesAreMarked } = props;
   const versionHasNoParameters = parameters.length === 0;
   if (versionHasNoParameters) return null;
 
@@ -81,8 +102,9 @@ export default function ActionRunParameterFields(props: ActionRunParameterFields
       <Stack spacing={1.5}>
         {parameters.map((parameter) => {
           const value = values[parameter.key] ?? parameter.defaultValue;
-          const helpText = describeFieldHelp(parameter, value);
-          const valueHasAProblem = findParameterValueProblem(value) !== null;
+          const helpText = describeFieldHelp(parameter, value, blankRequiredValuesAreMarked);
+          const blankRequiredValueIsMarked = blankRequiredValuesAreMarked && requiredValueIsBlank(parameter, value);
+          const fieldShowsAnError = findParameterValueProblem(value) !== null || blankRequiredValueIsMarked;
           if (parameter.kind === "object") {
             return (
               <Autocomplete
@@ -122,7 +144,7 @@ export default function ActionRunParameterFields(props: ActionRunParameterFields
                     label={parameter.label}
                     required
                     size="small"
-                    error={valueHasAProblem}
+                    error={fieldShowsAnError}
                     helperText={helpText}
                   />
                 )}
@@ -141,7 +163,7 @@ export default function ActionRunParameterFields(props: ActionRunParameterFields
               required={parameter.isRequired}
               disabled={isDisabled}
               size="small"
-              error={valueHasAProblem}
+              error={fieldShowsAnError}
               helperText={helpText === "" ? undefined : helpText}
               slotProps={{ htmlInput: { maxLength: MAX_PARAMETER_VALUE_LENGTH + 1, autoComplete: "off" } }}
               fullWidth

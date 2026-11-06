@@ -17,6 +17,7 @@ import { registerUseCaseRoutes } from "./controllers/useCases.js";
 import { registerActionRoutes } from "./controllers/actions.js";
 import { registerPlaywrightRoutes } from "./controllers/playwright.js";
 import { registerActionScriptRoutes } from "./controllers/actionScripts.js";
+import { registerAutoRefineJobRoutes } from "./controllers/autoRefineJobs.js";
 import { registerScriptModelRoutes } from "./controllers/scriptModels.js";
 import { registerCrawlRunRoutes } from "./controllers/crawlRuns.js";
 import { registerCredentialRoutes } from "./controllers/credentials.js";
@@ -24,6 +25,7 @@ import { registerWebObjectRoutes } from "./controllers/webObjects.js";
 import { registerActionParameterRoutes } from "./controllers/actionParameters.js";
 import { registerCreatedObjectRoutes } from "./controllers/createdObjects.js";
 import { markUnfinishedCrawlRunsInterrupted } from "./services/crawlRunService.js";
+import { markUnfinishedAutoRefineJobsInterrupted } from "./services/autoRefineService.js";
 
 const app = express();
 const PORT = resolveServerPort();
@@ -72,6 +74,7 @@ registerUseCaseRoutes(app);
 registerActionRoutes(app);
 registerPlaywrightRoutes(app, SCREENSHOT_DIRECTORY);
 registerActionScriptRoutes(app, ACTION_SCRIPT_DIRECTORY);
+registerAutoRefineJobRoutes(app, ACTION_SCRIPT_DIRECTORY);
 registerScriptModelRoutes(app);
 registerCrawlRunRoutes(app, SCREENSHOT_DIRECTORY);
 registerCredentialRoutes(app);
@@ -163,10 +166,12 @@ export function startListening(expressApp: Express, port: number): Server {
 
 const serverIsUnderTest = process.env.NODE_ENV === "test";
 if (!serverIsUnderTest) {
-  // A crawl only runs inside this process, so any crawl run still "running"
-  // was cut off by a restart. Awaited BEFORE listening, so it can never flip
-  // a crawl this process starts. It never rejects (failures are logged).
+  // A crawl or an auto-refine job only runs inside this process, so any crawl
+  // run or job still "running" was cut off by a restart. Awaited BEFORE
+  // listening, so they can never flip one this process starts. Neither ever
+  // rejects (failures are logged).
   await markUnfinishedCrawlRunsInterrupted();
+  await markUnfinishedAutoRefineJobsInterrupted();
   startListening(app, PORT);
   if (serverIsInProduction) {
     console.log(`[server] production: serving the built client from ${CLIENT_BUILD_DIRECTORY}`);

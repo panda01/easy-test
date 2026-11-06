@@ -35,6 +35,7 @@ function buildRunDetailsProps(
     versionCanBeRefined: true,
     isRefining: false,
     isRunning: false,
+    isAutoRefining: false,
     refineErrorMessage: null,
     onRefine: vi.fn(),
     refinedVersionNumber: 6,
@@ -246,6 +247,14 @@ describe("ActionScriptRunDetails", () => {
       expect(screen.getByRole("textbox", { name: NOTE_FIELD_NAME })).toBeEnabled();
       expect(screen.queryByRole("progressbar", { name: "Refining script" })).not.toBeInTheDocument();
       expect(screen.queryByText("This can take a few minutes.")).not.toBeInTheDocument();
+    });
+
+    it("disables Refine, but not the note, while an auto-refine job runs, with its label and no progress", () => {
+      renderRunDetails({ isAutoRefining: true });
+
+      expect(screen.getByRole("button", { name: "Refine into Version 6" })).toBeDisabled();
+      expect(screen.getByRole("textbox", { name: NOTE_FIELD_NAME })).toBeEnabled();
+      expect(screen.queryByRole("progressbar", { name: "Refining script" })).not.toBeInTheDocument();
     });
 
     it("shows a refine error only once these run details have tried to refine", async () => {

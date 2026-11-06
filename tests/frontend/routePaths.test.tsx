@@ -7,6 +7,10 @@ import {
   actionScriptRunRefinementsApiUrl,
   actionScriptRunsApiUrl,
   actionScriptsApiUrl,
+  actionAutoRefineJobsApiUrl,
+  autoRefineJobApiUrl,
+  autoRefineJobsApiUrl,
+  autoRefineJobStopApiUrl,
   crawledPageApiUrl,
   crawlRunApiUrl,
   crawlRunDetailPath,
@@ -179,6 +183,41 @@ describe("routePaths: action script API urls", () => {
       actionScriptRunFailureScreenshotApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID, UNSAFE_ID),
     ).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/scripts/${ENCODED_UNSAFE_ID}/runs/${ENCODED_UNSAFE_ID}/failure-screenshot`,
+    );
+  });
+});
+
+describe("routePaths: auto-refine job API urls", () => {
+  it("builds the url that starts an auto-refine job from a version", () => {
+    expect(autoRefineJobsApiUrl("website-1", "action-1", "script-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/auto-refine-jobs",
+    );
+  });
+
+  it("builds an action's auto-refine job collection url", () => {
+    expect(actionAutoRefineJobsApiUrl("website-1", "action-1")).toBe(
+      "/api/websites/website-1/actions/action-1/auto-refine-jobs",
+    );
+  });
+
+  it("builds one auto-refine job's url and its stop url", () => {
+    expect(autoRefineJobApiUrl("website-1", "action-1", "job-1")).toBe(
+      "/api/websites/website-1/actions/action-1/auto-refine-jobs/job-1",
+    );
+    expect(autoRefineJobStopApiUrl("website-1", "action-1", "job-1")).toBe(
+      "/api/websites/website-1/actions/action-1/auto-refine-jobs/job-1/stop",
+    );
+  });
+
+  it("encodes every id in auto-refine job urls", () => {
+    expect(autoRefineJobsApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/scripts/${ENCODED_UNSAFE_ID}/auto-refine-jobs`,
+    );
+    expect(actionAutoRefineJobsApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/auto-refine-jobs`,
+    );
+    expect(autoRefineJobStopApiUrl(UNSAFE_ID, UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/auto-refine-jobs/${ENCODED_UNSAFE_ID}/stop`,
     );
   });
 });

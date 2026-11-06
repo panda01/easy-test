@@ -5,7 +5,7 @@ import path from "node:path";
 
 /**
  * server.ts registers the website, use case, action, Playwright, action
- * script, crawl run, and credential controllers, and each of them imports dbService - whose module body
+ * script, auto-refine job, crawl run, and credential controllers, and each of them imports dbService - whose module body
  * constructs a real PrismaClient. Every exported dbService function is
  * replaced so loading the full app never builds a client, and the wiring
  * tests below can choose what a query returns.
@@ -57,6 +57,9 @@ const mockDbService = vi.hoisted(() => ({
   findLatestCrawledPagesForWebsite: vi.fn(),
   findActionScriptRunWithObjects: vi.fn(),
   listCreatedObjectsForWebsite: vi.fn(),
+  listAutoRefineJobsForAction: vi.fn(),
+  findAutoRefineJobForAction: vi.fn(),
+  requestAutoRefineJobStop: vi.fn(),
 }));
 
 /**
@@ -101,8 +104,15 @@ const mockCrawlRunService = vi.hoisted(() => ({
   markUnfinishedCrawlRunsInterrupted: vi.fn(),
 }));
 
+/** Auto-refining is replaced so loading the full app can never start a job or touch jobs at boot. */
+const mockAutoRefineService = vi.hoisted(() => ({
+  startAutoRefineJob: vi.fn(),
+  markUnfinishedAutoRefineJobsInterrupted: vi.fn(),
+}));
+
 vi.mock("../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../server/services/crawlRunService.js", () => mockCrawlRunService);
+vi.mock("../../server/services/autoRefineService.js", () => mockAutoRefineService);
 vi.mock("../../server/services/playwrightService.js", () => mockPlaywrightService);
 vi.mock("../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
 vi.mock("../../server/services/actionPlanRunnerService.js", () => mockActionPlanRunnerService);
@@ -125,6 +135,8 @@ import { resolveScreenshotDirectory } from "../../server/utils/resolveScreenshot
 // `beforeEach` resets the mocks' call history.
 const interruptedMarkCallsAtImport =
   mockCrawlRunService.markUnfinishedCrawlRunsInterrupted.mock.calls.length;
+const autoRefineInterruptedMarkCallsAtImport =
+  mockAutoRefineService.markUnfinishedAutoRefineJobsInterrupted.mock.calls.length;
 
 // Dates are ISO strings because that is how they cross the wire.
 const sampleWebsite = {
@@ -336,6 +348,35 @@ describe("server.ts", () => {
   it("does not mark crawl runs interrupted when imported under test (that boot step only runs with the real listener)", () => {
     // The module body ran once, at import, with NODE_ENV=test.
     expect(interruptedMarkCallsAtImport).toBe(0);
+  });
+
+  it("does not mark auto-refine jobs interrupted when imported under test (that boot step only runs with the real listener)", () => {
+    // The module body ran once, at import, with NODE_ENV=test.
+    expect(autoRefineInterruptedMarkCallsAtImport).toBe(0);
+  });
+
+  it("wires the auto-refine job routes into the full app", async () => {
+    const runningAutoRefineJob = {
+      id: "auto-refine-job-1",
+      websiteId: sampleWebsite.id,
+      actionId: sampleAction.id,
+      status: "running",
+      phase: "running",
+    };
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
+    mockDbService.listAutoRefineJobsForAction.mockResolvedValue([runningAutoRefineJob]);
+
+    const res = await request(app).get(
+      `/api/websites/${sampleWebsite.id}/actions/${sampleAction.id}/auto-refine-jobs`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([runningAutoRefineJob]);
+    expect(mockDbService.listAutoRefineJobsForAction).toHaveBeenCalledWith(
+      sampleWebsite.id,
+      sampleAction.id,
+    );
   });
 
   it("hands the action script routes the directory resolved from ACTION_SCRIPT_DIR at boot", async () => {

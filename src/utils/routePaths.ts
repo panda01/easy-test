@@ -277,6 +277,60 @@ export function actionScriptRunRefinementsApiUrl(
 }
 
 /**
+ * Builds the API url that starts an auto-refine job from one version: POST
+ * `{ parameterValues }` runs that version in the background with those
+ * run-form values and, on failure, refines it and runs the refined version,
+ * up to five refinements. The server answers 201 with the job at once.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The version the job starts from
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/auto-refine-jobs`
+ */
+export function autoRefineJobsApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+): string {
+  return `${actionScriptsApiUrl(websiteId, actionId)}/${encodeURIComponent(actionScriptId)}/auto-refine-jobs`;
+}
+
+/**
+ * Builds the API url of an action's auto-refine job collection: GET lists
+ * every job of the action, newest first (the page reads it on load to find a
+ * job still running).
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The action's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/auto-refine-jobs`
+ */
+export function actionAutoRefineJobsApiUrl(websiteId: string, actionId: string): string {
+  return `${websiteItemApiUrl(ACTION_KIND, websiteId, actionId)}/auto-refine-jobs`;
+}
+
+/**
+ * Builds the API url of one auto-refine job: GET reads it, polled while it
+ * runs.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/auto-refine-jobs/<autoRefineJobId>`
+ */
+export function autoRefineJobApiUrl(websiteId: string, actionId: string, autoRefineJobId: string): string {
+  return `${actionAutoRefineJobsApiUrl(websiteId, actionId)}/${encodeURIComponent(autoRefineJobId)}`;
+}
+
+/**
+ * Builds the API url that asks a running auto-refine job to stop after the
+ * step in flight: POST with no body, answered 200 with the job.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/auto-refine-jobs/<autoRefineJobId>/stop`
+ */
+export function autoRefineJobStopApiUrl(websiteId: string, actionId: string, autoRefineJobId: string): string {
+  return `${autoRefineJobApiUrl(websiteId, actionId, autoRefineJobId)}/stop`;
+}
+
+/**
  * Builds the API url of a website's crawl run collection: GET lists the runs,
  * POST starts a new crawl in the background.
  * @param websiteId - The owning website's cuid

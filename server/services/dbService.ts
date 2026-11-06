@@ -15,6 +15,7 @@ import {
   type PagePattern,
   type ActionParameter,
   type CreatedObject,
+  type AutoRefineJob,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import type { CrawlButtonMode } from "../utils/crawlButtonModes.js";
@@ -59,6 +60,7 @@ export type {
   PagePattern,
   ActionParameter,
   CreatedObject,
+  AutoRefineJob,
 };
 
 /**
@@ -375,6 +377,56 @@ export type CrawlRunStatus =
  * browser closed mid-crawl, and at boot for runs a restart left `running`.
  */
 export type FinishedCrawlRunStatus = Exclude<CrawlRunStatus, "running">;
+
+/**
+ * Every value `AutoRefineJob.status` can hold (see the model's doc comment in
+ * `../prisma/schema.prisma`).
+ */
+export type AutoRefineJobStatus =
+  | "running"
+  | "passed"
+  | "gaveUp"
+  | "unchanged"
+  | "stopped"
+  | "failed"
+  | "interrupted";
+
+/**
+ * The statuses an auto-refine job can end with. `interrupted` is set at boot
+ * for jobs a restart left `running`.
+ */
+export type FinishedAutoRefineJobStatus = Exclude<AutoRefineJobStatus, "running">;
+
+/** What an auto-refine job is doing while its status is `running`. */
+export type AutoRefineJobPhase = "running" | "refining";
+
+/** The fields a caller supplies when starting an auto-refine job. */
+export interface AutoRefineJobInput {
+  /** The version the job starts from - run first, refined on failure. */
+  startActionScriptId: string;
+  /** The most refinements the job may make before it gives up. */
+  maxRefinements: number;
+  /** The run-form values the user had changed, by parameter key; sent to every run. */
+  parameterValues: Record<string, string>;
+}
+
+/** The step an auto-refine job moved on to, as `markAutoRefineJobPhase` records it. */
+export interface AutoRefineJobPhaseChange {
+  /** Whether the version is being run or refined. */
+  phase: AutoRefineJobPhase;
+  /** The version being run or refined. */
+  currentActionScriptId: string;
+}
+
+/** How an auto-refine job ended, as `finishAutoRefineJob` records it. */
+export interface AutoRefineJobFinish {
+  /** The final status. */
+  status: FinishedAutoRefineJobStatus;
+  /** Why the job failed, or null for any other ending. */
+  errorMessage: string | null;
+  /** The last version the job ran or made. */
+  currentActionScriptId: string;
+}
 
 /** The fields a caller supplies when starting a crawl run. */
 export interface CrawlRunInput {
@@ -770,10 +822,12 @@ export async function updateWebsite(
  * Soft deletes an active website AND its active use cases, actions, screenshot
  * runs, action scripts, action script runs, action script refinements, crawl
  * runs, crawled pages, credentials, web objects, page patterns, action
- * parameters, and created objects.
+ * parameters, created objects, and auto-refine jobs.
  *
- * All fourteen updates run in one transaction and share one `deletedAt`
- * timestamp, so the batch can be identified (and restored) together later.
+ * All fifteen updates run in one transaction and share one `deletedAt`
+ * timestamp, so the batch can be identified (and restored) together later. A
+ * running auto-refine job's next conditional write then matches no row, which
+ * is what stops it.
  * @param websiteId - The website's cuid
  * @returns True when the website was active and is now deleted; false when no active website had that id
  */
@@ -848,6 +902,10 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.createdObject.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.autoRefineJob.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1094,12 +1152,14 @@ export async function updateActionForWebsite(
 
 /**
  * Soft deletes one active action AND its active scripts, script runs, script
- * refinements, and parameters. Its created objects are KEPT: they are still
- * on the website, and the record says what to clean up.
+ * refinements, parameters, and auto-refine jobs. Its created objects are
+ * KEPT: they are still on the website, and the record says what to clean up.
  *
- * All five updates run in one transaction and share one `deletedAt`
+ * All six updates run in one transaction and share one `deletedAt`
  * timestamp, like `softDeleteWebsite`. When no active action matched, the
- * scripts, runs, refinements, and parameters are left untouched.
+ * scripts, runs, refinements, parameters, and jobs are left untouched. A
+ * running auto-refine job's next conditional write then matches no row, which
+ * is what stops it.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
  * @returns True when an active action was deleted; false when none matched
@@ -1142,6 +1202,10 @@ export async function softDeleteActionForWebsite(
       data: { deletedAt },
     });
     await transaction.actionParameter.updateMany({
+      where: { actionId, websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.autoRefineJob.updateMany({
       where: { actionId, websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1656,6 +1720,209 @@ export async function markRunningCrawlRunsInterrupted(): Promise<number> {
     data: { status: "interrupted", finishedAt: new Date() },
   });
   return crawlRunUpdate.count;
+}
+
+// === Auto-refine jobs ===
+
+/**
+ * Records the start of an auto-refine job: a new row with `status: "running"`,
+ * `phase: "running"` (its first step is a run of the start version), the
+ * start version as the current one, and no refinements done.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param data - The version to start from, the refinement cap, and the run-form values to send every run
+ * @returns The created row
+ */
+export async function createAutoRefineJob(
+  websiteId: string,
+  actionId: string,
+  data: AutoRefineJobInput,
+): Promise<AutoRefineJob> {
+  const created = await prisma.autoRefineJob.create({
+    data: {
+      ...data,
+      websiteId,
+      actionId,
+      currentActionScriptId: data.startActionScriptId,
+      status: "running",
+      phase: "running",
+    },
+  });
+  return created;
+}
+
+/**
+ * Lists an action's active auto-refine jobs, newest first - the page reads
+ * it on load to find a job still running.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @returns The action's active jobs ordered by `createdAt` descending
+ */
+export async function listAutoRefineJobsForAction(
+  websiteId: string,
+  actionId: string,
+): Promise<AutoRefineJob[]> {
+  const autoRefineJobs = await prisma.autoRefineJob.findMany({
+    where: { websiteId, actionId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+  });
+  return autoRefineJobs;
+}
+
+/**
+ * Looks up one active auto-refine job, scoped to the website and action that
+ * own it. The job re-reads itself through this between steps to see whether
+ * a stop was requested.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @returns The job, or null when it does not exist, was soft deleted, or belongs to another action
+ */
+export async function findAutoRefineJobForAction(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+): Promise<AutoRefineJob | null> {
+  const autoRefineJob = await prisma.autoRefineJob.findFirst({
+    where: { id: autoRefineJobId, websiteId, actionId, deletedAt: null },
+  });
+  return autoRefineJob;
+}
+
+/**
+ * Records which step a running auto-refine job moved on to: running a
+ * version, or refining it. Only an active job that is still `running` is
+ * changed - like `markCrawlRunLoggedIn`, a false result tells the job it was
+ * deleted (with its action or website) and should stop.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @param change - The new phase and the version it applies to
+ * @returns True when the job was updated; false when no active running job matched
+ */
+export async function markAutoRefineJobPhase(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+  change: AutoRefineJobPhaseChange,
+): Promise<boolean> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { id: autoRefineJobId, websiteId, actionId, status: "running", deletedAt: null },
+    data: { phase: change.phase, currentActionScriptId: change.currentActionScriptId },
+  });
+  const jobWasUpdated = autoRefineJobUpdate.count > 0;
+  return jobWasUpdated;
+}
+
+/**
+ * Appends a run the job just recorded to its `actionScriptRunIds`, while the
+ * job is still active and running.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @param actionScriptRunId - The recorded run's cuid
+ * @returns True when the run was appended; false when no active running job matched
+ */
+export async function appendAutoRefineJobRun(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+  actionScriptRunId: string,
+): Promise<boolean> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { id: autoRefineJobId, websiteId, actionId, status: "running", deletedAt: null },
+    data: { actionScriptRunIds: { push: actionScriptRunId } },
+  });
+  const runWasAppended = autoRefineJobUpdate.count > 0;
+  return runWasAppended;
+}
+
+/**
+ * Appends a version the job just made to its `createdActionScriptIds` and
+ * records how many refinements it has made, while the job is still active and
+ * running.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @param actionScriptId - The refined version's cuid
+ * @param refinementsDone - How many refinements the job has made, this one included
+ * @returns True when the version was appended; false when no active running job matched
+ */
+export async function appendAutoRefineJobScript(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+  actionScriptId: string,
+  refinementsDone: number,
+): Promise<boolean> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { id: autoRefineJobId, websiteId, actionId, status: "running", deletedAt: null },
+    data: { createdActionScriptIds: { push: actionScriptId }, refinementsDone },
+  });
+  const scriptWasAppended = autoRefineJobUpdate.count > 0;
+  return scriptWasAppended;
+}
+
+/**
+ * Asks a running auto-refine job to stop: sets `stopRequestedAt`, which the
+ * job reads between steps. Only an active job that is still `running` is
+ * changed, so a job that has already ended answers false.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @returns True when the stop was recorded; false when no active running job matched
+ */
+export async function requestAutoRefineJobStop(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+): Promise<boolean> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { id: autoRefineJobId, websiteId, actionId, status: "running", deletedAt: null },
+    data: { stopRequestedAt: new Date() },
+  });
+  const stopWasRequested = autoRefineJobUpdate.count > 0;
+  return stopWasRequested;
+}
+
+/**
+ * Records how a running auto-refine job ended: its final status, error, and
+ * last version, with `finishedAt` set and `phase` cleared. Only an active job
+ * that is still `running` is changed, so finishing a job whose action was
+ * deleted meanwhile is a harmless no-op.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @param finish - The final status, error message, and last version
+ * @returns True when the job was finished; false when no active running job matched
+ */
+export async function finishAutoRefineJob(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+  finish: AutoRefineJobFinish,
+): Promise<boolean> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { id: autoRefineJobId, websiteId, actionId, status: "running", deletedAt: null },
+    data: { ...finish, phase: null, finishedAt: new Date() },
+  });
+  const jobWasFinished = autoRefineJobUpdate.count > 0;
+  return jobWasFinished;
+}
+
+/**
+ * Marks every active auto-refine job still `running` as `interrupted`. Called
+ * once at boot, before the server accepts requests: a job only runs inside
+ * the server process, so any job still `running` then was cut off by a
+ * restart.
+ * @returns How many jobs were marked interrupted
+ */
+export async function markRunningAutoRefineJobsInterrupted(): Promise<number> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { status: "running", deletedAt: null },
+    data: { status: "interrupted", phase: null, finishedAt: new Date() },
+  });
+  return autoRefineJobUpdate.count;
 }
 
 /**

@@ -31,7 +31,7 @@ const visitedPages = [homePage, aboutPage];
  * @returns The resource state
  */
 function loadedPage(overrides: Partial<CrawledPageRecord> = {}): JsonResourceState<CrawledPageRecord> {
-  return { data: buildCrawledPageRecord(overrides), isLoading: false, errorMessage: null };
+  return { data: buildCrawledPageRecord(overrides), isLoading: false, errorMessage: null, reload: vi.fn() };
 }
 
 /**
@@ -276,7 +276,7 @@ describe("CrawledPageDetails", () => {
 
   it("shows a spinner while the full page loads, and its failure when it cannot", () => {
     const { rerender } = renderDetails({
-      pageResource: { data: null, isLoading: true, errorMessage: null },
+      pageResource: { data: null, isLoading: true, errorMessage: null, reload: vi.fn() },
     });
     expect(screen.getByRole("progressbar", { name: "Loading page" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Aria snapshot")).not.toBeInTheDocument();
@@ -285,7 +285,7 @@ describe("CrawledPageDetails", () => {
     rerender(
       <CrawledPageDetails
         page={aboutPage}
-        pageResource={{ data: null, isLoading: false, errorMessage: "Crawled page not found" }}
+        pageResource={{ data: null, isLoading: false, errorMessage: "Crawled page not found", reload: vi.fn() }}
         visitedPagesByUrl={new Map()}
         visitedPagesById={new Map()}
         onSelectPage={vi.fn()}

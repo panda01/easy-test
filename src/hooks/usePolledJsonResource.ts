@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { type JsonResourceState } from "./useJsonResource";
 import { describeError, readResponseErrorMessage } from "../utils/describeError";
 
@@ -57,10 +57,14 @@ function buildFailedPoll(
  *
  * `keepPolling` is read on every render rather than being an effect
  * dependency, so callers may pass an inline function.
+ *
+ * `reload()` (from `JsonResourceState`) fetches the url again at once - it
+ * counts as the next poll, so the last good data stays shown and the regular
+ * polling carries on from its response.
  * @param resourceUrl - Relative API url to GET; null to stay idle
  * @param keepPolling - Given the latest data, whether to fetch again
  * @param pollIntervalMs - How long to wait after each response before the next GET
- * @returns The loading / error / data state for that url, plus `pollErrorMessage`
+ * @returns The loading / error / data state for that url, plus `pollErrorMessage` and `reload`
  */
 export function usePolledJsonResource(
   resourceUrl: string | null,
@@ -105,6 +109,10 @@ export function usePolledJsonResource(
     };
   }, [resourceUrl, pollNumber]);
 
+  const reload = useCallback((): void => {
+    setPollNumber((previousPollNumber) => previousPollNumber + 1);
+  }, []);
+
   const finishedPollIsForCurrentUrl =
     finishedPoll !== null && resourceUrl !== null && finishedPoll.resourceUrl === resourceUrl;
   const currentData = finishedPollIsForCurrentUrl ? finishedPoll.data : null;
@@ -123,15 +131,16 @@ export function usePolledJsonResource(
 
   const hookIsIdle = resourceUrl === null;
   if (hookIsIdle) {
-    return { data: null, isLoading: false, errorMessage: null, pollErrorMessage: null };
+    return { data: null, isLoading: false, errorMessage: null, pollErrorMessage: null, reload };
   }
   if (!finishedPollIsForCurrentUrl) {
-    return { data: null, isLoading: true, errorMessage: null, pollErrorMessage: null };
+    return { data: null, isLoading: true, errorMessage: null, pollErrorMessage: null, reload };
   }
   return {
     data: finishedPoll.data,
     isLoading: false,
     errorMessage: finishedPoll.errorMessage,
     pollErrorMessage: finishedPoll.pollErrorMessage,
+    reload,
   };
 }

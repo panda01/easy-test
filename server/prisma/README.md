@@ -43,6 +43,7 @@ boot with `ERR_MODULE_NOT_FOUND`.
 | `ActionScriptRun` | `action_script_runs` | One run of a plan: `succeeded`, `timedOut`, `errorMessage` and `failedStepNumber` (where and why it stopped; null when it passed), `credentialName` (who it logged in as), the capped `output` (step log, never typed text) and `outputWasTruncated`, the failure screenshot's file name, `failingPageUrl` and `failingPageAriaSnapshot` (where the browser was and what the page held when it failed - scrubbed, the snapshot capped; null when it passed or for older runs), and the duration. `parameterValues` (`[{ key, label, value }]`, secrets left out), `finalPageUrl`, and for a Create action `confirmStepNumber` / `confirmStepSucceeded`. Create-only. |
 | `ActionScriptRefinement` | `action_script_refinements` | One "Refine" of a failed run: the LINK between `sourceActionScriptId` (the version that failed), `actionScriptRunId` (its failed run), and `refinedActionScriptId` (the new version Claude wrote; unique). It stores only what exists nowhere else: the user's `note`, the refine call's token usage (`inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`), and `screenshotWasSent`. The error and failed step stay on the run, the model and effort on the refined version (one source of truth). Written only when the refine succeeded, in the same write as the new version. Create-only. |
 | `CrawlRun` | `crawl_runs` | One background crawl of a website: `startUrl` (snapshot), `status` (`running`, `finished`, `stoppedAtPageLimit`, `stoppedAtTimeLimit`, `failed`, `interrupted`), `pageLimit`, the live counters `visitedPageCount` / `waitingUrlCount`, `errorMessage`, and `durationMs` / `finishedAt` (null while running). `credentialId` is the credential it logs in as (null = logged out); `isLoggedIn` turns true once that login worked, **before** the first page is recorded - so it holds for every page of the run. A failed login ends the run `failed` with no pages, and `loginFailureScreenshotFileName` (relative to `SCREENSHOT_DIR`, like `ScreenshotRun.screenshotFileName`) names the PNG of what the browser showed. `buttonMode` (`linksOnly` default, `allButRisky`, `openOnly`) is which buttons the crawl clicked. |
+| `AutoRefineJob` | `auto_refine_jobs` | One background auto-refine of an action (see the model's doc comment): `startActionScriptId` (the version it started from) and `currentActionScriptId` (the one being run or refined, the last one once ended), `status` (`running`, `passed`, `gaveUp`, `unchanged`, `stopped`, `failed`, `interrupted`), `phase` (`running` / `refining` while running, null once ended), `refinementsDone` out of `maxRefinements` (always 5 for now, stored so the UI never hard-codes it), `parameterValues Json` (the run-form values sent to every run), `createdActionScriptIds String[]` and `actionScriptRunIds String[]` (what the job made and recorded, oldest first), `stopRequestedAt`, `errorMessage`, and `finishedAt` (null while running). |
 | `Credential` | `credentials` | A login for one website: `name`, optional `description`, `username`, `encryptedPassword` (AES-256-GCM with `CREDENTIAL_ENCRYPTION_KEY`, `iv.authTag.ciphertext` - **never** plain text, never sent by the API), `loginUrl` (optional override - null inherits the website's), and optional CSS selectors `usernameSelector` / `passwordSelector` / `submitSelector` that replace the crawler's own guess. |
 | `ActionParameter` | `action_parameters` | THE one place an action's parameters are stored: one row per `(actionId, key)` - every field of the action (`source`: `steps` a step types into it, `page` it sits beside such a field, `you` the user added it; `kind` `text` / `option` / `object`) with all that is known about it: `label` / `userLabel`, `fieldTarget` and the field's role, input type, and placeholder, `stepAction`, `pageUrl`, `containerName`, `besideKeys` / `fillAfterKey`, `isSecret`, `foundBy`, the required readings (`userRequiredChoice`, `runIsRequired` / `runReadAt`, `crawlIsRequired` / `crawlReadAt`), `objectTypeKey`, and a user value's `matchText` / `matchFields`. Kept up to date by a sync that never overwrites the user's columns or rows. Which steps of a version use it, and its value there, are read from the plan - never stored. |
 | `CreatedObject` | `created_objects` | The record of an object a Create run made (when its confirm step showed no error): `name`, `url`, `objectTypeKey` / `objectTypeName`, and the action, version, and run (`actionScriptRunId`, unique) that made it. A crawl marks it `lastSeenAt` / `notSeenSince` (never deletes it); a passed deleting Object run sets `deletedOnSiteAt` / `deletedByActionScriptRunId`; `deletedAt` means the user removed it. Kept when its action is deleted. |
@@ -56,6 +57,9 @@ three parent ids (`websiteId`, `actionId`, `actionScriptId`, each indexed).
 cascades) and points at two `ActionScript`s through the named relations
 `RefinementSourceScript` (indexed) and `RefinementResultScript` (unique), and
 at the failed `ActionScriptRun` (indexed).
+`AutoRefineJob` belongs to one `Action` and, denormalized for the cascades,
+its `Website` (both indexed); the versions and runs it lists are held as id
+arrays, not relations, since they are read through the action's own routes.
 `CrawlRun` belongs to one `Website` and optionally points at the `Credential`
 it logged in as (`credentialId`, indexed); an `Action` likewise optionally
 points at the `Credential` it runs as (`credentialId`, indexed); `CrawledPage` belongs to one
@@ -91,14 +95,17 @@ select createdAt from websites;     -- fails
 
 ## Soft delete
 
-All ten models have a nullable `deletedAt`. Deleting sets it instead of
+Every model has a nullable `deletedAt`. Deleting sets it instead of
 removing the row, and every `dbService` query filters `deletedAt: null`.
 Deleting a website also stamps its active use cases, actions, screenshot
 runs, action scripts, action script runs, action script refinements, crawl
-runs, crawled pages, and credentials, in
+runs, crawled pages, credentials, and auto-refine jobs, in
 one transaction, with the **same** timestamp — so that batch can be identified together later. Deleting
-an action likewise stamps its active scripts, their runs, and their
-refinements with the action's timestamp. A soft-deleted run's PNG (and run folder) stays on disk. Scripts
+an action likewise stamps its active scripts, their runs, their
+refinements, and its auto-refine jobs with the action's timestamp. A running
+auto-refine job writes to its row only with `status: "running", deletedAt:
+null` in the condition, so the stamp is what makes its next write match no
+row and the job stop. A soft-deleted run's PNG (and run folder) stays on disk. Scripts
 and runs are never deleted on their own.
 
 ## The partial unique index on `Website.url`

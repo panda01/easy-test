@@ -4,6 +4,90 @@ Newest entry at the top.
 
 ---
 
+## 2026-11-06 17:20 EST — Run stays enabled with blank required values; clicking it marks them "Required"
+
+**Intent:**
+- On an action's page, "Run" / "Run again" was disabled whenever a required parameter was blank (or a value broke a rule), with only a grey "Fill in … to run." line to explain it. The user asked for the button to stay enabled and, when clicked with required values missing, for those fields to get an error state saying they are required - so the reason is on the field itself.
+- Now the click starts no run when something needs fixing; instead the blank required fields turn red with "Required" under them, and clear as soon as they are filled. A value that breaks a rule (too long, contains `{{`) was already red at once and still is; Run is also enabled then, and clicking it starts nothing. Run is still disabled while a run is in flight, while an auto-refine job runs, and until the parameters have loaded. The "Fill in … to run." hint is unchanged.
+- Verified on the running dev server with a Playwright script (`claude_tmp/verify-run-required.mts`) against version 3 of "Create a new Website": Run enabled with "Network idle cap (ms)" and "Minimum wait (ms)" blank, both marked `aria-invalid` with "Required" after the click and no run POST sent, both cleared after typing values.
+
+### Files changed
+
+**Frontend**
+- `src/components/ActionRunParameterFields.tsx`
+  - `ActionRunParameterFieldsProps`: added `blankRequiredValuesAreMarked`.
+  - Added `requiredValueIsBlank(parameter, value)`.
+  - `describeFieldHelp` takes `blankRequiredValuesAreMarked` and returns "Required" for a blank required value once Run was tried.
+  - Both fields' `error` now comes from `fieldShowsAnError` (a value problem or a marked blank required value) instead of `valueHasAProblem`.
+- `src/components/ActionScriptRunsSection.tsx`
+  - `runIsBlocked` no longer includes `parametersToFix.length > 0`.
+  - Added `blankRequiredValuesAreMarked` state; `handleRunClick` sets it and returns without calling `onRunClick` when `listParametersToFix` names anything.
+  - Passes `blankRequiredValuesAreMarked` to `ActionRunParameterFields`.
+- `src/components/README.md`: the two components' rows describe the new behavior.
+
+**Tests**
+- `tests/frontend/ActionScriptRunsSection.test.tsx`: replaced "blocks the run while a required value is blank or a value holds {{" with "keeps Run enabled while a required value is blank, and marks the field Required when Run is clicked" and "starts no run while a value holds {{, showing the problem under the field".
+
+---
+
+## 2026-10-24 15:05 EDT — Auto-refine: a server-side job that runs a version, refines it on failure, and repeats
+
+**Intent:**
+- Until now a version was made to work by hand: Run, read the failure, Refine, Run again. The user asked for that loop to be automatic: a new button under "Convert to new version" that runs the shown version and, while it fails, refines it with the existing refine process and runs the refined version, stopping after at most 5 refinements or when a refinement comes back the same as the version it refined (both read as "something went wrong"). Every version the loop makes is saved and listed like a hand-made one.
+- This follows the approved plan (`~/.claude/plans/okay-i-would-like-zesty-hearth.md`, v2).
+
+### Decisions
+- **Made by the user (in the planning round):**
+  - The loop runs **on the server** as a background job the page polls, like crawls, so it survives a closed tab.
+  - It starts from the **shown version** (no conversion) and reuses the values the user typed in the run form when they clicked; keys the current version no longer has are dropped before each run.
+  - "5 times" means **up to 5 refinements** (at most 6 versions and 6 runs).
+  - "The same version" compares the **step plan only** (`plan` JSON, keys sorted); summary and assumptions are ignored, since a refine always adds a "Refined: …" assumption.
+  - A **Stop** button ends the job after the step in flight (a run or a Claude call cannot be cut short).
+- **Made by me:**
+  - The run and refine work moved out of the controller into `actionScriptExecutionService`, which returns the record or throws `ActionScriptRequestProblem` with the HTTP status the route used to write; the routes keep their exact status codes. The two in-memory locks moved with it so the job and the routes share them. The job holds the action's run claim for its whole life, so a manual Run during a job gets the usual 409.
+  - The job's row stores the ids of the versions and runs it made; the page refetches the versions list and the shown version's runs when those grow, and shows the newest version via `?version=`, rather than returning whole records in the polled reply.
+  - The page shows the stop reply at once: the hook prefers the record handed to `watchJob` when it is newer (by `updatedAt`) than the last poll of the same job.
+  - The run form's values now live in the page (per version) because both Run and Auto-refine send them.
+  - **Asked for by the user after the first round:** with no version yet the button reads "Convert and auto-refine": it converts with the picked model and effort first (the same request as "Convert to new version"), then starts the job for the version that made, with no run values (the version's defaults).
+  - Statuses: `running | passed | gaveUp | unchanged | stopped | failed | interrupted`; a boot sweep marks jobs left `running` by a restart `interrupted`, like crawls.
+
+### Files changed
+
+**Database**
+- `server/prisma/schema.prisma` — new model `AutoRefineJob` (`auto_refine_jobs`: `startActionScriptId`, `currentActionScriptId`, `status`, `phase`, `refinementsDone`, `maxRefinements`, `parameterValues`, `createdActionScriptIds`, `actionScriptRunIds`, `stopRequestedAt`, `errorMessage`, `finishedAt`, `deletedAt`); `autoRefineJobs` relation added to `Website` and `Action`. `npx prisma db push` and `npx prisma generate` were run.
+- `server/services/dbService.ts` — added types `AutoRefineJobStatus`, `FinishedAutoRefineJobStatus`, `AutoRefineJobPhase`, `AutoRefineJobInput`, `AutoRefineJobPhaseChange`, `AutoRefineJobFinish`; added `createAutoRefineJob`, `listAutoRefineJobsForAction`, `findAutoRefineJobForAction`, `markAutoRefineJobPhase`, `appendAutoRefineJobRun`, `appendAutoRefineJobScript`, `requestAutoRefineJobStop`, `finishAutoRefineJob`, `markRunningAutoRefineJobsInterrupted`; `softDeleteWebsite` and `softDeleteActionForWebsite` now also stamp the jobs' `deletedAt`.
+
+**Server**
+- `server/services/actionScriptExecutionService.ts` (new) — `performActionScriptRun` (was the controller's `runPlanAndRecordRun`), `performRefinement` (was `refineRunAndSaveVersion`), class `ActionScriptRequestProblem`, `isActionScriptRequestProblem`, locks `claimActionRun` / `releaseActionRun` / `claimRunRefinement` / `releaseRunRefinement`; moved and exported `describeFailedRun`, `planWithRunValues`, `chooseRefinementEffort`, `selectRefinementContextPages`, `readFailureScreenshotAsBase64`, `findActionCredential`, `allowedOriginsFor`, `buildRunFolderName`, `resolveEffortForModel`, `UPLOADS_FOLDER_NAME`, the route message constants, and the types `WebsiteAndAction`, `WebsiteActionAndScript`, `RefinableRun`.
+- `server/services/autoRefineService.ts` (new) — `MAX_AUTO_REFINEMENTS`, type `AutoRefineStart`, `startAutoRefineJob`, private `runAutoRefineInBackground` (the loop; never rejects) and `dropValuesUnknownToVersion`, `markUnfinishedAutoRefineJobsInterrupted`.
+- `server/utils/plansAreIdentical.ts` (new) — `plansAreIdentical` (key-sorted JSON comparison).
+- `server/controllers/actionLookups.ts` (new) — `ParentLookup`, `findWebsiteAndAction`, `findWebsiteActionAndScript` moved here from `actionScripts.ts` so two controllers share them.
+- `server/controllers/autoRefineJobs.ts` (new) — `registerAutoRefineJobRoutes`: `POST .../scripts/:actionScriptId/auto-refine-jobs` (201 at once), `GET .../auto-refine-jobs`, `GET .../auto-refine-jobs/:autoRefineJobId`, `POST .../auto-refine-jobs/:autoRefineJobId/stop`.
+- `server/controllers/actionScripts.ts` — removed the moved helpers, locks, constants and lookups (1108 → ~560 lines); the run and refine routes now call `performActionScriptRun` / `performRefinement` with the shared claims and map `ActionScriptRequestProblem` to its status.
+- `server/server.ts` — mounts `registerAutoRefineJobRoutes(app, ACTION_SCRIPT_DIRECTORY)` and awaits `markUnfinishedAutoRefineJobsInterrupted()` at boot beside the crawl sweep.
+
+**Client**
+- `src/utils/routePaths.ts` — added `autoRefineJobsApiUrl`, `actionAutoRefineJobsApiUrl`, `autoRefineJobApiUrl`, `autoRefineJobStopApiUrl`.
+- `src/hooks/useJsonResource.ts` — `JsonResourceState.reload` added (refetches, keeping the data shown); `src/hooks/usePolledJsonResource.ts` — `reload` added; `src/hooks/useRecordListWithAdditions.ts` — passes `reload` through; `src/hooks/useActionScripts.ts` — `reloadScripts`; `src/hooks/useActionScriptRuns.ts` — `reloadRuns`.
+- `src/hooks/useAutoRefineJob.ts` (new) — `AUTO_REFINE_POLL_INTERVAL_MS`, types `AutoRefineJobStatus`, `AutoRefineJobPhase`, `AutoRefineJobRecord`, `AutoRefineJobState`, `useAutoRefineJob` (finds a running job on load, polls the watched job every 2 s, `watchJob`), private `pickNewerJobRecord`, `autoRefineJobIsStillRunning`.
+- `src/utils/describeAutoRefineJob.ts` (new) — `describeAutoRefineProgress`, `describeAutoRefineOutcome` and their types.
+- `src/components/ActionScriptsSection.tsx` — new prop `autoRefine: AutoRefineControlsProps` (exported); the "Auto-refine Version N" button, its caption, progress bar, status line, Stop, poll warning, outcome alert and start error, under the Convert controls; Convert and the model picker disable while a job runs.
+- `src/components/ActionScriptRunsSection.tsx` — the run form is now controlled (`values`, `onValueChange` props replace the internal `editedValues` state); new `isAutoRefining` prop locks Run and the fields. `src/components/ActionScriptRunDetails.tsx` — new `isAutoRefining` prop locks Refine.
+- `src/pages/ActionDetailPage.tsx` — added `RunFormState`, `SeenJobProgress`, `readJobProgress`, `EDITED_VERSION_CANNOT_BE_AUTO_REFINED_REASON`; the page owns the run form's values (`handleRunFormValueChange`); `useAutoRefineJob` plus start/stop mutations (`startAutoRefineOfVersion`, `startAutoRefine` - which converts first when there is no version, tracked by `autoRefineIsConverting` -, `handleAutoRefineStart`, `stopAutoRefine`, `handleAutoRefineStop`, `describeAutoRefineBlock`); two effects follow the polled job (refetch versions/runs/parameters, show the newest version); new props passed to both sections.
+
+**Docs**
+- `server/controllers/README.md`, `server/services/README.md`, `server/prisma/README.md`, `server/utils/README.md`, `src/components/README.md`, `src/hooks/README.md`, `src/pages/README.md` — rows and sections for the new module, model, hook, controls and page behaviour.
+
+**Tests**
+- New: `tests/backend/api/autoRefineJobs.test.ts`, `tests/backend/services/actionScriptExecutionService.test.ts`, `tests/backend/services/autoRefineService.test.ts`, `tests/backend/utils/plansAreIdentical.test.ts`, `tests/frontend/useAutoRefineJob.test.tsx`, `tests/frontend/describeAutoRefineJob.test.tsx`.
+- Changed: `tests/backend/server.test.ts` (sweep and routes wired), `tests/backend/services/dbService.test.ts` (job functions, soft-delete stamps), `tests/frontend/ActionDetailPage.test.tsx` (new "auto-refining the shown version" block; the shared stub answers the jobs list), `ActionScriptsSection.test.tsx`, `ActionScriptRunsSection.test.tsx`, `ActionScriptRunDetails.test.tsx`, `routePaths.test.tsx`, `support/frontendTestHelpers.tsx` (`buildAutoRefineJobRecord`), the resource-hook tests for `reload`, and the `JsonResourceState` literals in `CrawledPageDetails.test.tsx` / `WebsiteItemListSection.test.tsx`.
+
+### Verification
+- `npm run lint` clean; `npx tsc --noEmit` clean for both configs; `npm run test:coverage`: 137 files / 2974 tests green, 99.2% statements / 97.7% branches / 99.4% functions / 99.7% lines (thresholds 80 / 70 / 80 / 80).
+- Manual check (headless Playwright against the running dev servers on 3010 / 5180): health check and home page OK; the four routes answer JSON 404s for bogus ids; the button sits under Convert, disables with "Fill in … to run" while a required value is blank and with the editor caption on an "Edited from vN" version; a real job on the "easy-test dev" website's "Create a new Website" action ran Version 1, refined twice, showed `?version=2` then 3 as they were saved, polled every ~2 s, and ended `passed`; a second job was picked up again after a page reload, Stop set "… · Stopping after this step…" at once and the job ended "Stopped at your request after Version 4"; Convert, Run and Refine were disabled throughout; the compare page and the 390 px layout render with no console errors. Side effects of the check: that action gained Versions 2–4 and one "Test Website" record was created by the passing run.
+
+---
+
 ## 2026-10-23 18:34 EDT — Parameters for actions, the object switch, and the record of created objects
 
 **Intent:**

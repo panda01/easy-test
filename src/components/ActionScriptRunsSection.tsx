@@ -43,6 +43,12 @@ export interface ActionScriptRunsSectionProps {
   runErrorMessage: string | null;
   /** Called with the values the user changed (by parameter key) when they click "Run" / "Run again". */
   onRunClick: (parameterValues: ParameterValues) => void;
+  /** The values typed or picked for the next run, by parameter key (the page owns them, so Auto-refine can send them too). */
+  values: ParameterValues;
+  /** Called with a parameter's key and its new value as the user types or picks. */
+  onValueChange: (parameterKey: string, value: string) => void;
+  /** True while an auto-refine job of this action is running: Run, Refine, and the values are locked meanwhile. */
+  isAutoRefining: boolean;
   /** The version's parameters view, or null while it loads (the run waits for it). */
   parametersView: VersionParametersRecord | null;
   /** Why the parameters could not be loaded, or null. */
@@ -78,11 +84,17 @@ export interface ActionScriptRunsSectionProps {
  *
  * Above the run's details sit the run's values (see
  * `ActionRunParameterFields`): prefilled with the version's own, and sent -
- * only the ones the user changed - with "Run". Run is disabled while a
- * required value is blank or a value breaks a rule, and until the
- * parameters have loaded. The page keys this panel by version, so values
- * typed for one version never carry over to another.
- * @param props - The runs, the shown run, the parameters, the request states, the callbacks, and the layout
+ * only the ones the user changed - with "Run". The values themselves are the
+ * page's (`values` / `onValueChange`), because the versions column's
+ * Auto-refine sends the same values; this panel only works out which
+ * parameters still need fixing. Run is disabled until the parameters have
+ * loaded and while an auto-refine job runs (`isAutoRefining`, which locks
+ * Refine and the values too). It stays enabled while a required value is
+ * blank or a value breaks a rule: clicking it then starts no run, but marks
+ * the blank required fields "Required" (see `ActionRunParameterFields`) so
+ * the user sees what to fill in. The page keys this panel by version, so
+ * values typed for one version never carry over to another.
+ * @param props - The runs, the shown run, the parameters and values, the request states, the callbacks, and the layout
  * @returns The rendered panel
  */
 export default function ActionScriptRunsSection(props: ActionScriptRunsSectionProps): ReactElement {
@@ -97,6 +109,9 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     isRunning,
     runErrorMessage,
     onRunClick,
+    values,
+    onValueChange,
+    isAutoRefining,
     versionCanBeRefined,
     isRefining,
     refineErrorMessage,
@@ -106,24 +121,25 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     parametersView,
     parametersErrorMessage,
   } = props;
-  const [editedValues, setEditedValues] = useState<ParameterValues>({});
   const parameters = parametersView?.parameters ?? [];
-  const parametersToFix = listParametersToFix(parameters, editedValues);
+  const parametersToFix = listParametersToFix(parameters, values);
   const parametersAreLoading = parametersView === null && parametersErrorMessage === null;
-  const runIsBlocked = isRunning || parametersAreLoading || parametersToFix.length > 0;
+  const runIsBlocked = isRunning || isAutoRefining || parametersAreLoading;
+  const valuesAreLocked = isRunning || isAutoRefining;
+  // Set once Run is clicked with a required value blank, so those fields show "Required".
+  const [blankRequiredValuesAreMarked, setBlankRequiredValuesAreMarked] = useState(false);
 
   /**
-   * Remembers a value the user typed or picked.
-   * @param parameterKey - The parameter's key
-   * @param value - Its new value
+   * Runs with the values the user changed - or, when a required value is
+   * blank or a value breaks a rule, starts no run and marks those fields.
    */
-  const handleValueChange = (parameterKey: string, value: string): void => {
-    setEditedValues((previousValues) => ({ ...previousValues, [parameterKey]: value }));
-  };
-
-  /** Runs with the values the user changed. */
   const handleRunClick = (): void => {
-    onRunClick(listChangedParameterValues(parameters, editedValues));
+    const valuesNeedFixing = parametersToFix.length > 0;
+    if (valuesNeedFixing) {
+      setBlankRequiredValuesAreMarked(true);
+      return;
+    }
+    onRunClick(listChangedParameterValues(parameters, values));
   };
 
   const runFailedToStart = runErrorMessage !== null;
@@ -193,9 +209,10 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
         <ActionRunParameterFields
           parameters={parameters}
           objectChoices={parametersView.objectChoices}
-          values={editedValues}
-          onValueChange={handleValueChange}
-          isDisabled={isRunning}
+          values={values}
+          onValueChange={onValueChange}
+          isDisabled={valuesAreLocked}
+          blankRequiredValuesAreMarked={blankRequiredValuesAreMarked}
         />
       )}
       {parametersErrorMessage !== null && (
@@ -220,6 +237,7 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
           versionCanBeRefined={versionCanBeRefined}
           isRefining={isRefining}
           isRunning={isRunning}
+          isAutoRefining={isAutoRefining}
           refineErrorMessage={refineErrorMessage}
           onRefine={onRefine}
           refinedVersionNumber={nextVersionNumber}

@@ -1,9 +1,11 @@
+import { type ReactElement, useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within, type RenderResult } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import ActionScriptRunsSection, {
   type ActionScriptRunsSectionProps,
 } from "../../src/components/ActionScriptRunsSection";
+import { type ParameterValues } from "../../src/utils/actionParameters";
 import {
   buildActionScriptRunRecord,
   buildObjectChoiceRecord,
@@ -50,6 +52,9 @@ function buildSectionProps(
     isRunning: false,
     runErrorMessage: null,
     onRunClick: vi.fn(),
+    values: {},
+    onValueChange: vi.fn(),
+    isAutoRefining: false,
     versionCanBeRefined: false,
     isRefining: false,
     refineErrorMessage: null,
@@ -69,6 +74,38 @@ function buildSectionProps(
  */
 function renderSection(overrides: Partial<ActionScriptRunsSectionProps> = {}): RenderResult {
   return render(<ActionScriptRunsSection {...buildSectionProps(overrides)} />);
+}
+
+/**
+ * The panel with its values held in state, the way the action page holds
+ * them: typing into a field shows up in the field, so a test can type and
+ * then click Run.
+ * @param props - The panel's props; `values` is the starting values and `onValueChange` is also told of each change
+ * @returns The rendered panel
+ */
+function StatefulSection(props: ActionScriptRunsSectionProps): ReactElement {
+  const [values, setValues] = useState<ParameterValues>(props.values);
+
+  /**
+   * Remembers a value and passes the change on to the test's spy.
+   * @param parameterKey - The parameter's key
+   * @param value - Its new value
+   */
+  const handleValueChange = (parameterKey: string, value: string): void => {
+    setValues((previousValues) => ({ ...previousValues, [parameterKey]: value }));
+    props.onValueChange(parameterKey, value);
+  };
+
+  return <ActionScriptRunsSection {...props} values={values} onValueChange={handleValueChange} />;
+}
+
+/**
+ * Renders the panel with its values held in state, for tests that type.
+ * @param overrides - Props to replace in the defaults
+ * @returns The Testing Library render result
+ */
+function renderStatefulSection(overrides: Partial<ActionScriptRunsSectionProps> = {}): RenderResult {
+  return render(<StatefulSection {...buildSectionProps(overrides)} />);
 }
 
 /**
@@ -289,7 +326,7 @@ describe("ActionScriptRunsSection", () => {
     it("prefills each value, and runs with only the values the user changed", async () => {
       const user = userEvent.setup();
       const onRunClick = vi.fn();
-      renderSection({ parametersView: createParametersView, onRunClick });
+      renderStatefulSection({ parametersView: createParametersView, onRunClick });
 
       expect(screen.getByRole("group", { name: "Values for this run" })).toBeInTheDocument();
       expect(screen.getByRole("textbox", { name: "Project name" })).toHaveValue("Apollo 7");
@@ -309,19 +346,77 @@ describe("ActionScriptRunsSection", () => {
       expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" });
     });
 
-    it("blocks the run while a required value is blank or a value holds {{", async () => {
+    it("reports each typed value to the page by its parameter key", async () => {
       const user = userEvent.setup();
-      renderSection({ parametersView: createParametersView });
+      const onValueChange = vi.fn();
+      renderSection({ parametersView: createParametersView, onValueChange });
+
+      await user.type(screen.getByRole("textbox", { name: "Description" }), "V");
+
+      expect(onValueChange).toHaveBeenCalledWith("description", "V");
+    });
+
+    it("shows the values the page holds, and runs with the ones that differ from the version's", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      renderSection({
+        parametersView: createParametersView,
+        values: { projectName: "Voyager", password: "hunter2" },
+        onRunClick,
+      });
+
+      expect(screen.getByRole("textbox", { name: "Project name" })).toHaveValue("Voyager");
+      await user.click(screen.getByRole("button", { name: "Run again" }));
+
+      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" });
+    });
+
+    it("keeps Run enabled while a required value is blank, and marks the field Required when Run is clicked", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      renderStatefulSection({ parametersView: createParametersView, onRunClick });
       const nameField = screen.getByRole("textbox", { name: "Project name" });
 
       await user.clear(nameField);
-      expect(screen.getByRole("button", { name: "Run again" })).toBeDisabled();
+      const runButton = screen.getByRole("button", { name: "Run again" });
+      expect(runButton).toBeEnabled();
       expect(screen.getByText("Fill in Project name to run.")).toBeInTheDocument();
+      expect(nameField).not.toHaveAttribute("aria-invalid", "true");
+      expect(screen.queryByText("Required")).not.toBeInTheDocument();
 
+      await user.click(runButton);
+
+      expect(onRunClick).not.toHaveBeenCalled();
+      expect(nameField).toHaveAttribute("aria-invalid", "true");
+      expect(screen.getByText("Required")).toBeInTheDocument();
+      // The optional field is left alone.
+      expect(screen.getByRole("textbox", { name: "Description" })).not.toHaveAttribute("aria-invalid", "true");
+
+      await user.type(nameField, "Voyager");
+      expect(nameField).not.toHaveAttribute("aria-invalid", "true");
+      expect(screen.queryByText("Required")).not.toBeInTheDocument();
+
+      await user.click(runButton);
+      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" });
+    });
+
+    it("starts no run while a value holds {{, showing the problem under the field", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      renderStatefulSection({ parametersView: createParametersView, onRunClick });
+      const nameField = screen.getByRole("textbox", { name: "Project name" });
+
+      await user.clear(nameField);
       await user.click(nameField);
       await user.paste("{{credential.password}}");
       expect(screen.getByText("May not contain {{")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Run again" })).toBeDisabled();
+      expect(nameField).toHaveAttribute("aria-invalid", "true");
+
+      const runButton = screen.getByRole("button", { name: "Run again" });
+      expect(runButton).toBeEnabled();
+      await user.click(runButton);
+
+      expect(onRunClick).not.toHaveBeenCalled();
     });
 
     it("waits for the parameters before it lets a run start, and says when they could not load", () => {
@@ -371,7 +466,7 @@ describe("ActionScriptRunsSection", () => {
           buildObjectChoiceRecord(),
         ],
       });
-      renderSection({ parametersView: objectParametersView, onRunClick });
+      renderStatefulSection({ parametersView: objectParametersView, onRunClick });
 
       const objectField = screen.getByRole("combobox", { name: "Project" });
       expect(objectField).toHaveValue("Mercury");
@@ -404,6 +499,30 @@ describe("ActionScriptRunsSection", () => {
     it("shows no values form for a version without parameters", () => {
       renderSection();
       expect(screen.queryByRole("group", { name: "Values for this run" })).not.toBeInTheDocument();
+    });
+  });
+
+  describe("while an auto-refine job runs", () => {
+    it("disables Run, Refine, and the values, keeping their labels and showing no run or refine progress", () => {
+      renderSection({
+        runs: [newerFailedRun],
+        selectedRun: newerFailedRun,
+        versionCanBeRefined: true,
+        parametersView: buildVersionParametersRecord({ parameters: [buildVersionParameterRecord()] }),
+        isAutoRefining: true,
+      });
+
+      expect(screen.getByRole("button", { name: "Run again" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Refine into Version 3" })).toBeDisabled();
+      expect(screen.getByRole("textbox", { name: "Project name" })).toBeDisabled();
+      expect(screen.queryByRole("progressbar", { name: "Running script" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("progressbar", { name: "Refining script" })).not.toBeInTheDocument();
+    });
+
+    it("disables Run on a phone too", () => {
+      renderSection({ isPhoneLayout: true, runs: [], selectedRun: null, isAutoRefining: true });
+
+      expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
     });
   });
 });

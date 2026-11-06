@@ -138,6 +138,8 @@ export interface ActionScriptsState {
   addCreatedScript: (createdScript: ActionScriptRecord) => void;
   /** Makes a run a "Run script" POST just recorded its version's `latestRun`, so its status shows without refetching. */
   recordFinishedRun: (finishedRun: FinishedActionScriptRun) => void;
+  /** Fetches the versions again (an auto-refine job created one), keeping the current list shown meanwhile. */
+  reloadScripts: () => void;
 }
 
 /**
@@ -150,9 +152,12 @@ export interface ActionScriptsState {
  * run replaces its version's `latestRun` for the rest of the visit (a run
  * recorded now is always newer than the one the list was fetched with), so
  * the versions list shows the new pass / fail status at once.
+ *
+ * `reloadScripts` fetches the list again without blanking it, for versions
+ * an auto-refine job saved on the server (there is no POST response to add).
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
- * @returns The scripts, the list request's state, `addCreatedScript`, and `recordFinishedRun`
+ * @returns The scripts, the list request's state, `addCreatedScript`, `recordFinishedRun`, and `reloadScripts`
  */
 export function useActionScripts(websiteId: string, actionId: string): ActionScriptsState {
   const [latestRunRecordedThisVisitByScriptId, setLatestRunRecordedThisVisitByScriptId] =
@@ -201,5 +206,6 @@ export function useActionScripts(websiteId: string, actionId: string): ActionScr
     errorMessage: scriptList.errorMessage,
     addCreatedScript: scriptList.addRecord,
     recordFinishedRun,
+    reloadScripts: scriptList.reload,
   };
 }

@@ -11,6 +11,8 @@ export interface RecordListWithAdditions<TRecord> {
   errorMessage: string | null;
   /** Adds a record the page just created (a POST's response) to the front of `records`. */
   addRecord: (addedRecord: TRecord) => void;
+  /** Fetches the list again (records were created elsewhere, e.g. by a background job), keeping the current records shown meanwhile. */
+  reload: () => void;
 }
 
 /**
@@ -27,9 +29,15 @@ export interface RecordListWithAdditions<TRecord> {
  *
  * `records` is never null: it is empty while loading, while idle, or after a
  * failed fetch, apart from any records added in the meantime.
+ *
+ * `reload` is `useJsonResource`'s: it fetches the list again without blanking
+ * it, for records that were created on the server without a POST from this
+ * page (an auto-refine job's versions and runs). Added records stay in front
+ * until the refetched list carries them too, at which point the fetched copy
+ * is the one dropped.
  * @param resourceUrl - Relative API url of the list; null to stay idle (nothing to fetch yet)
  * @param recordBelongsToThisList - True when an added record belongs to the list currently shown
- * @returns The merged records, the list request's state, and `addRecord`
+ * @returns The merged records, the list request's state, `addRecord`, and `reload`
  */
 export function useRecordListWithAdditions<TRecord extends { id: string }>(
   resourceUrl: string | null,
@@ -56,5 +64,6 @@ export function useRecordListWithAdditions<TRecord extends { id: string }>(
     isLoading: listResource.isLoading,
     errorMessage: listResource.errorMessage,
     addRecord,
+    reload: listResource.reload,
   };
 }

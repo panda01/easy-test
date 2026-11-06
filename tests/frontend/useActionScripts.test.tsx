@@ -132,4 +132,32 @@ describe("useActionScripts", () => {
     });
     expect(result.current.scripts).toEqual([]);
   });
+
+  it("reloadScripts fetches the list again and shows the versions the server added", async () => {
+    let requestCount = 0;
+    const fetchStub = stubFetchRoutes({
+      [`GET ${SCRIPTS_API_URL}`]: () => {
+        requestCount += 1;
+        const thisIsTheFirstRequest = requestCount === 1;
+        const scripts = thisIsTheFirstRequest
+          ? [buildActionScriptRecord({ id: "script-1" })]
+          : [buildActionScriptRecord({ id: "script-2" }), buildActionScriptRecord({ id: "script-1" })];
+        return Promise.resolve(new Response(JSON.stringify(scripts), { status: 200 }));
+      },
+    });
+    const { result } = renderHook(() => useActionScripts("website-1", "item-1"));
+    await waitFor(() => {
+      expect(result.current.scripts.map((script) => script.id)).toEqual(["script-1"]);
+    });
+
+    act(() => {
+      result.current.reloadScripts();
+    });
+    expect(result.current.isLoading).toBe(false);
+
+    await waitFor(() => {
+      expect(result.current.scripts.map((script) => script.id)).toEqual(["script-2", "script-1"]);
+    });
+    expect(countRequests(fetchStub, "GET", SCRIPTS_API_URL)).toBe(2);
+  });
 });

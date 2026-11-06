@@ -81,6 +81,7 @@ model Website {
   pagePatterns            PagePattern[]
   actionParameters        ActionParameter[]
   createdObjects          CreatedObject[]
+  autoRefineJobs          AutoRefineJob[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -107,7 +108,8 @@ model UseCase {
 /// A reusable step on a website, e.g. "Log in". Belongs to exactly one
 /// website. Soft deleted like `Website`; deleting an action also stamps the
 /// same `deletedAt` on its active scripts, script runs, script refinements,
-/// and parameters. Its created objects are kept (they are still on the site).
+/// parameters, and auto-refine jobs. Its created objects are kept (they are
+/// still on the site).
 ///
 /// `credentialId` is the credential the action runs AS, or null for a
 /// logged-out visitor. With one, every run first logs in with the crawler's
@@ -148,6 +150,7 @@ model Action {
   scriptRefinements    ActionScriptRefinement[]
   parameters           ActionParameter[]
   createdObjects       CreatedObject[]
+  autoRefineJobs       AutoRefineJob[]
 
   @@index([websiteId])
   @@index([credentialId])
@@ -468,6 +471,72 @@ model CrawlRun {
   @@index([websiteId])
   @@index([credentialId])
   @@map("crawl_runs")
+}
+
+/// One background "auto-refine" of an action: the job runs the version it
+/// was started from with the stored parameter values and, while the run
+/// fails, refines the version (the same refine as the "Refine" button, with
+/// no note) and runs the refined version, until a run passes or the job
+/// gives up. Belongs to exactly one action (and, denormalized for the
+/// cascades, its website). Soft deleted together with either.
+///
+/// The job runs in the BACKGROUND, like a `CrawlRun`: the row is created
+/// with `status: "running"`, updated after every step, and finished when the
+/// loop ends. `status` is one of:
+/// - `running`: still going; `phase` says what it is doing right now -
+///   `running` (a run of `currentActionScriptId` is in progress) or
+///   `refining` (Claude is refining that version).
+/// - `passed`: a run passed; `currentActionScriptId` is the version that
+///   passed.
+/// - `gaveUp`: `maxRefinements` refinements were made and the last version's
+///   run still failed.
+/// - `unchanged`: a refined version came back with a step plan identical to
+///   the one it refined (compared on `plan` only, keys sorted), so refining
+///   again would go nowhere; `currentActionScriptId` is that copy.
+/// - `stopped`: the user asked the job to stop (`stopRequestedAt`) and it
+///   ended after the step then in flight.
+/// - `failed`: a step broke (a run that could not start, a refine Claude
+///   could not do, a query that failed); `errorMessage` says why.
+/// - `interrupted`: the server restarted while it was running, so the next
+///   boot found it still `running`.
+/// `phase` is null once the job has ended.
+///
+/// `startActionScriptId` is the version the job was started from (never
+/// changed); `currentActionScriptId` is the version being run or refined
+/// right now, and the last one once the job has ended. `refinementsDone`
+/// counts the refinements made so far, out of `maxRefinements` (stored so
+/// the UI never hard-codes it). `parameterValues` is the run-form values the
+/// user had changed when they started the job, by parameter key; every run
+/// is sent them, minus the keys the version being run no longer has.
+/// `createdActionScriptIds` lists the versions this job created, oldest
+/// first, and `actionScriptRunIds` the runs it recorded, oldest first - the
+/// page follows them to show each new version and run as it appears.
+/// `finishedAt` is null while the job runs.
+model AutoRefineJob {
+  id                     String    @id @default(cuid())
+  websiteId              String
+  actionId               String
+  startActionScriptId    String
+  currentActionScriptId  String
+  status                 String
+  phase                  String?
+  refinementsDone        Int       @default(0)
+  maxRefinements         Int
+  parameterValues        Json      @default("{}")
+  createdActionScriptIds String[]  @default([])
+  actionScriptRunIds     String[]  @default([])
+  stopRequestedAt        DateTime?
+  errorMessage           String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  finishedAt             DateTime?
+  deletedAt              DateTime?
+  website                Website   @relation(fields: [websiteId], references: [id])
+  action                 Action    @relation(fields: [actionId], references: [id])
+
+  @@index([websiteId])
+  @@index([actionId])
+  @@map("auto_refine_jobs")
 }
 
 /// One page a crawl visited. Belongs to exactly one crawl run (and,

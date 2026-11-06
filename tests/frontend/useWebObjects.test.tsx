@@ -20,7 +20,7 @@ describe("useWebObjects", () => {
     await waitFor(() => {
       expect(result.current.isLoading).toBe(false);
     });
-    expect(result.current).toEqual({ data: [webObject], isLoading: false, errorMessage: null });
+    expect(result.current).toEqual({ data: [webObject], isLoading: false, errorMessage: null, reload: expect.any(Function) });
     expect(fetchStub).toHaveBeenCalledWith(WEB_OBJECTS_API_URL);
   });
 });

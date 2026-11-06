@@ -22,6 +22,7 @@ const {
   mockPagePatternDelegate,
   mockActionParameterDelegate,
   mockCreatedObjectDelegate,
+  mockAutoRefineJobDelegate,
   mockTransaction,
 } = vi.hoisted(
   () => {
@@ -33,7 +34,8 @@ const {
      * `prisma.actionScript`, `prisma.actionScriptRun`,
      * `prisma.actionScriptRefinement`, `prisma.crawlRun`,
      * `prisma.crawledPage`, `prisma.credential`, `prisma.webObject`,
-     * `prisma.pagePattern`) carrying every method dbService calls.
+     * `prisma.pagePattern`, `prisma.autoRefineJob`) carrying every method
+     * dbService calls.
      * @returns An object whose query methods are bare vitest mocks
      */
     function createMockModelDelegate() {
@@ -61,6 +63,7 @@ const {
     const pagePatternDelegate = createMockModelDelegate();
     const actionParameterDelegate = createMockModelDelegate();
     const createdObjectDelegate = createMockModelDelegate();
+    const autoRefineJobDelegate = createMockModelDelegate();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
@@ -78,6 +81,7 @@ const {
       pagePattern: pagePatternDelegate,
       actionParameter: actionParameterDelegate,
       createdObject: createdObjectDelegate,
+      autoRefineJob: autoRefineJobDelegate,
     };
 
     return {
@@ -95,6 +99,7 @@ const {
       mockPagePatternDelegate: pagePatternDelegate,
       mockActionParameterDelegate: actionParameterDelegate,
       mockCreatedObjectDelegate: createdObjectDelegate,
+      mockAutoRefineJobDelegate: autoRefineJobDelegate,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
@@ -130,6 +135,7 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     pagePattern = mockPagePatternDelegate;
     actionParameter = mockActionParameterDelegate;
     createdObject = mockCreatedObjectDelegate;
+    autoRefineJob = mockAutoRefineJobDelegate;
     $transaction = mockTransaction;
   },
   // dbService writes Prisma.DbNull to clear a JSON column; a stand-in proves it was used.
@@ -172,6 +178,15 @@ import {
   saveCrawledPageStructureSkeletons,
   finishCrawlRun,
   markRunningCrawlRunsInterrupted,
+  createAutoRefineJob,
+  listAutoRefineJobsForAction,
+  findAutoRefineJobForAction,
+  markAutoRefineJobPhase,
+  appendAutoRefineJobRun,
+  appendAutoRefineJobScript,
+  requestAutoRefineJobStop,
+  finishAutoRefineJob,
+  markRunningAutoRefineJobsInterrupted,
   listCrawledPageSummariesForRun,
   findCrawledPageForRun,
   markCrawlRunLoggedIn,
@@ -557,6 +572,28 @@ const sampleCrawlRun = {
   deletedAt: null,
 };
 
+/** An auto-refine job as the database returns it, still running its first step. */
+const sampleAutoRefineJob = {
+  id: "auto-refine-job-1",
+  websiteId: "cuid-1",
+  actionId: "action-1",
+  startActionScriptId: "action-script-1",
+  currentActionScriptId: "action-script-1",
+  status: "running",
+  phase: "running",
+  refinementsDone: 0,
+  maxRefinements: 5,
+  parameterValues: { projectName: "Nightly build" },
+  createdActionScriptIds: [],
+  actionScriptRunIds: [],
+  stopRequestedAt: null,
+  errorMessage: null,
+  createdAt: new Date("2026-01-08T00:00:00.000Z"),
+  updatedAt: new Date("2026-01-08T00:00:00.000Z"),
+  finishedAt: null,
+  deletedAt: null,
+};
+
 /** The fields the crawler supplies for one page (see `CrawledPageInput`). */
 const sampleCrawledPageInput = {
   parentPageId: "crawled-page-0",
@@ -911,7 +948,7 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script refinements, crawl runs, crawled pages, credentials, page patterns, and web objects inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script refinements, crawl runs, crawled pages, credentials, page patterns, web objects, and auto-refine jobs inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
@@ -924,6 +961,7 @@ describe("dbService", () => {
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 9 });
       mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 4 });
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
 
       const websiteWasDeleted = await softDeleteWebsite("cuid-1");
 
@@ -978,9 +1016,13 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
     });
 
-    it("softDeleteWebsite writes one shared deletedAt timestamp to all twelve tables", async () => {
+    it("softDeleteWebsite writes one shared deletedAt timestamp to every table it stamps", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
@@ -993,6 +1035,7 @@ describe("dbService", () => {
       mockCredentialDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
       const millisecondsBeforeCall = Date.now();
 
       await softDeleteWebsite("cuid-1");
@@ -1014,6 +1057,7 @@ describe("dbService", () => {
       const credentialDeletedAt = readDeletedAtWrittenBy(mockCredentialDelegate.updateMany);
       const pagePatternDeletedAt = readDeletedAtWrittenBy(mockPagePatternDelegate.updateMany);
       const webObjectDeletedAt = readDeletedAtWrittenBy(mockWebObjectDelegate.updateMany);
+      const autoRefineJobDeletedAt = readDeletedAtWrittenBy(mockAutoRefineJobDelegate.updateMany);
 
       expect(websiteDeletedAt).toBeInstanceOf(Date);
       expect(useCaseDeletedAt).toBe(websiteDeletedAt);
@@ -1027,6 +1071,7 @@ describe("dbService", () => {
       expect(credentialDeletedAt).toBe(websiteDeletedAt);
       expect(pagePatternDeletedAt).toBe(websiteDeletedAt);
       expect(webObjectDeletedAt).toBe(websiteDeletedAt);
+      expect(autoRefineJobDeletedAt).toBe(websiteDeletedAt);
       const deletedAtMilliseconds = (websiteDeletedAt as Date).getTime();
       expect(deletedAtMilliseconds).toBeGreaterThanOrEqual(millisecondsBeforeCall);
       expect(deletedAtMilliseconds).toBeLessThanOrEqual(millisecondsAfterCall);
@@ -1050,6 +1095,7 @@ describe("dbService", () => {
       expect(mockCredentialDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockPagePatternDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockWebObjectDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockAutoRefineJobDelegate.updateMany).not.toHaveBeenCalled();
     });
 
     it("adoptWebsiteLoginUrl saves a learned login URL only on an active website that has none", async () => {
@@ -2123,6 +2169,207 @@ describe("dbService", () => {
     });
   });
 
+  describe("auto-refine jobs", () => {
+    /** The condition every write of a running job uses: the job, its owners, still running, not deleted. */
+    const RUNNING_JOB_WHERE = {
+      id: "auto-refine-job-1",
+      websiteId: "cuid-1",
+      actionId: "action-1",
+      status: "running",
+      deletedAt: null,
+    };
+
+    it("createAutoRefineJob inserts a running job in its running phase, with the start version as the current one", async () => {
+      mockAutoRefineJobDelegate.create.mockResolvedValue(sampleAutoRefineJob);
+
+      const created = await createAutoRefineJob("cuid-1", "action-1", {
+        startActionScriptId: "action-script-1",
+        maxRefinements: 5,
+        parameterValues: { projectName: "Nightly build" },
+      });
+
+      expect(mockAutoRefineJobDelegate.create).toHaveBeenCalledWith({
+        data: {
+          startActionScriptId: "action-script-1",
+          maxRefinements: 5,
+          parameterValues: { projectName: "Nightly build" },
+          websiteId: "cuid-1",
+          actionId: "action-1",
+          currentActionScriptId: "action-script-1",
+          status: "running",
+          phase: "running",
+        },
+      });
+      expect(created).toBe(sampleAutoRefineJob);
+    });
+
+    it("listAutoRefineJobsForAction returns the action's active jobs, newest first", async () => {
+      mockAutoRefineJobDelegate.findMany.mockResolvedValue([sampleAutoRefineJob]);
+
+      const jobs = await listAutoRefineJobsForAction("cuid-1", "action-1");
+
+      expect(mockAutoRefineJobDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", actionId: "action-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(jobs).toEqual([sampleAutoRefineJob]);
+    });
+
+    it("findAutoRefineJobForAction scopes the lookup to the website, the action, and active rows", async () => {
+      mockAutoRefineJobDelegate.findFirst.mockResolvedValue(sampleAutoRefineJob);
+
+      const found = await findAutoRefineJobForAction("cuid-1", "action-1", "auto-refine-job-1");
+
+      expect(mockAutoRefineJobDelegate.findFirst).toHaveBeenCalledWith({
+        where: { id: "auto-refine-job-1", websiteId: "cuid-1", actionId: "action-1", deletedAt: null },
+      });
+      expect(found).toBe(sampleAutoRefineJob);
+    });
+
+    it("findAutoRefineJobForAction returns null when no active job of that action matches", async () => {
+      mockAutoRefineJobDelegate.findFirst.mockResolvedValue(null);
+
+      expect(await findAutoRefineJobForAction("cuid-1", "action-1", "other-job")).toBeNull();
+    });
+
+    it("markAutoRefineJobPhase writes the phase and current version on the active running job only", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const jobWasUpdated = await markAutoRefineJobPhase("cuid-1", "action-1", "auto-refine-job-1", {
+        phase: "refining",
+        currentActionScriptId: "action-script-2",
+      });
+
+      expect(jobWasUpdated).toBe(true);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: RUNNING_JOB_WHERE,
+        data: { phase: "refining", currentActionScriptId: "action-script-2" },
+      });
+    });
+
+    it("markAutoRefineJobPhase returns false when no active running job matched", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(
+        await markAutoRefineJobPhase("cuid-1", "action-1", "deleted-job", {
+          phase: "running",
+          currentActionScriptId: "action-script-1",
+        }),
+      ).toBe(false);
+    });
+
+    it("appendAutoRefineJobRun pushes the run's id onto the active running job", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const runWasAppended = await appendAutoRefineJobRun("cuid-1", "action-1", "auto-refine-job-1", "run-1");
+
+      expect(runWasAppended).toBe(true);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: RUNNING_JOB_WHERE,
+        data: { actionScriptRunIds: { push: "run-1" } },
+      });
+    });
+
+    it("appendAutoRefineJobRun returns false when no active running job matched", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await appendAutoRefineJobRun("cuid-1", "action-1", "deleted-job", "run-1")).toBe(false);
+    });
+
+    it("appendAutoRefineJobScript pushes the version's id and records the refinement count on the active running job", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const scriptWasAppended = await appendAutoRefineJobScript(
+        "cuid-1",
+        "action-1",
+        "auto-refine-job-1",
+        "action-script-2",
+        1,
+      );
+
+      expect(scriptWasAppended).toBe(true);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: RUNNING_JOB_WHERE,
+        data: { createdActionScriptIds: { push: "action-script-2" }, refinementsDone: 1 },
+      });
+    });
+
+    it("appendAutoRefineJobScript returns false when no active running job matched", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await appendAutoRefineJobScript("cuid-1", "action-1", "deleted-job", "action-script-2", 1)).toBe(false);
+    });
+
+    it("requestAutoRefineJobStop stamps stopRequestedAt on the active running job only", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
+      const millisecondsBeforeCall = Date.now();
+
+      const stopWasRequested = await requestAutoRefineJobStop("cuid-1", "action-1", "auto-refine-job-1");
+
+      expect(stopWasRequested).toBe(true);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: RUNNING_JOB_WHERE,
+        data: { stopRequestedAt: expect.any(Date) },
+      });
+      const [updateManyArguments] = mockAutoRefineJobDelegate.updateMany.mock.calls[0] as [
+        { data: { stopRequestedAt: Date } },
+      ];
+      expect(updateManyArguments.data.stopRequestedAt.getTime()).toBeGreaterThanOrEqual(millisecondsBeforeCall);
+    });
+
+    it("requestAutoRefineJobStop returns false when the job has already ended", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await requestAutoRefineJobStop("cuid-1", "action-1", "auto-refine-job-1")).toBe(false);
+    });
+
+    it("finishAutoRefineJob writes the ending, clears the phase, and stamps finishedAt on the active running job only", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const jobWasFinished = await finishAutoRefineJob("cuid-1", "action-1", "auto-refine-job-1", {
+        status: "passed",
+        errorMessage: null,
+        currentActionScriptId: "action-script-3",
+      });
+
+      expect(jobWasFinished).toBe(true);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: RUNNING_JOB_WHERE,
+        data: {
+          status: "passed",
+          errorMessage: null,
+          currentActionScriptId: "action-script-3",
+          phase: null,
+          finishedAt: expect.any(Date),
+        },
+      });
+    });
+
+    it("finishAutoRefineJob returns false when no active running job matched", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(
+        await finishAutoRefineJob("cuid-1", "action-1", "deleted-job", {
+          status: "failed",
+          errorMessage: "browser could not start",
+          currentActionScriptId: "action-script-1",
+        }),
+      ).toBe(false);
+    });
+
+    it("markRunningAutoRefineJobsInterrupted flips every active running job to interrupted, clears the phase, and counts them", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 2 });
+
+      const interruptedJobCount = await markRunningAutoRefineJobsInterrupted();
+
+      expect(interruptedJobCount).toBe(2);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: { status: "running", deletedAt: null },
+        data: { status: "interrupted", phase: null, finishedAt: expect.any(Date) },
+      });
+    });
+  });
+
   describe("web objects", () => {
     /** What every web object read includes: its active patterns in order, and its crawl's id and start. */
     const WEB_OBJECT_INCLUDE = {
@@ -2676,18 +2923,30 @@ describe("dbService", () => {
       });
     });
 
-    it("softDeleteActionForWebsite also stamps the action's parameters, but keeps its created objects", async () => {
-      for (const delegate of [mockActionDelegate, mockActionScriptDelegate, mockActionScriptRunDelegate, mockActionScriptRefinementDelegate, mockActionParameterDelegate]) {
+    it("softDeleteActionForWebsite also stamps the action's parameters and auto-refine jobs, but keeps its created objects", async () => {
+      for (const delegate of [mockActionDelegate, mockActionScriptDelegate, mockActionScriptRunDelegate, mockActionScriptRefinementDelegate, mockActionParameterDelegate, mockAutoRefineJobDelegate]) {
         delegate.updateMany.mockResolvedValue({ count: 1 });
       }
 
       await softDeleteActionForWebsite("cuid-1", "action-1");
 
+      const actionDeletedAt = readDeletedAtWrittenBy(mockActionDelegate.updateMany);
       expect(mockActionParameterDelegate.updateMany).toHaveBeenCalledWith({
         where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
-        data: { deletedAt: readDeletedAtWrittenBy(mockActionDelegate.updateMany) },
+        data: { deletedAt: actionDeletedAt },
+      });
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenCalledWith({
+        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: actionDeletedAt },
       });
       expect(mockCreatedObjectDelegate.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("softDeleteActionForWebsite leaves the action's auto-refine jobs untouched when no active action matched", async () => {
+      mockActionDelegate.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await softDeleteActionForWebsite("cuid-1", "action-1")).toBe(false);
+      expect(mockAutoRefineJobDelegate.updateMany).not.toHaveBeenCalled();
     });
 
     it("findActionScriptRunWithObjects reads one active run with the objects it created and deleted", async () => {

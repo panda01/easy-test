@@ -32,7 +32,7 @@ describe("useCrawledPage", () => {
 
     const { result } = renderHook(() => useCrawledPage("website-1", "crawl-run-1", null));
 
-    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null, reload: expect.any(Function) });
     expect(fetchStub).not.toHaveBeenCalled();
   });
 });

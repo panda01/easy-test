@@ -20,7 +20,7 @@ describe("useJsonResource", () => {
     });
 
     const { result } = renderHook(() => useJsonResource("/api/websites"));
-    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null, reload: expect.any(Function) });
 
     await waitFor(() => {
       expect(result.current.isLoading).toBe(false);
@@ -29,6 +29,7 @@ describe("useJsonResource", () => {
       data: [{ id: "website-1" }],
       isLoading: false,
       errorMessage: null,
+      reload: expect.any(Function),
     });
     expect(fetchStub).toHaveBeenCalledWith("/api/websites");
   });
@@ -47,6 +48,7 @@ describe("useJsonResource", () => {
       data: null,
       isLoading: false,
       errorMessage: "Website not found",
+      reload: expect.any(Function),
     });
   });
 
@@ -105,7 +107,7 @@ describe("useJsonResource", () => {
     });
 
     rerender({ resourceUrl: "/api/websites/website-2" });
-    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null, reload: expect.any(Function) });
 
     await act(async () => {
       secondResponse.resolve(buildJsonResponse(200, { id: "website-2" }));
@@ -115,6 +117,7 @@ describe("useJsonResource", () => {
       data: { id: "website-2" },
       isLoading: false,
       errorMessage: null,
+      reload: expect.any(Function),
     });
   });
 
@@ -145,6 +148,7 @@ describe("useJsonResource", () => {
       data: { id: "website-2" },
       isLoading: false,
       errorMessage: null,
+      reload: expect.any(Function),
     });
   });
 
@@ -160,7 +164,7 @@ describe("useJsonResource", () => {
       await lateResponse.promise;
     });
 
-    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null, reload: expect.any(Function) });
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
@@ -176,7 +180,7 @@ describe("useJsonResource", () => {
       await lateResponse.promise.catch(() => undefined);
     });
 
-    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: true, errorMessage: null, reload: expect.any(Function) });
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
@@ -185,7 +189,7 @@ describe("useJsonResource", () => {
 
     const { result } = renderHook(() => useJsonResource(null));
 
-    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null, reload: expect.any(Function) });
     expect(fetchStub).not.toHaveBeenCalled();
   });
 
@@ -205,7 +209,56 @@ describe("useJsonResource", () => {
     });
 
     rerender({ resourceUrl: null });
-    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null });
+    expect(result.current).toEqual({ data: null, isLoading: false, errorMessage: null, reload: expect.any(Function) });
     expect(fetchStub).toHaveBeenCalledTimes(1);
+  });
+
+  it("reload fetches the url again, keeping the current data shown until the new response lands", async () => {
+    const reloadResponse = createDeferred<Response>();
+    let requestCount = 0;
+    const fetchStub = stubFetchRoutes({
+      "GET /api/websites": () => {
+        requestCount += 1;
+        const thisIsTheFirstRequest = requestCount === 1;
+        return thisIsTheFirstRequest
+          ? Promise.resolve(buildJsonResponse(200, [{ id: "website-1" }]))
+          : reloadResponse.promise;
+      },
+    });
+
+    const { result } = renderHook(() => useJsonResource("/api/websites"));
+    await waitFor(() => {
+      expect(result.current.data).toEqual([{ id: "website-1" }]);
+    });
+
+    act(() => {
+      result.current.reload();
+    });
+    expect(fetchStub).toHaveBeenCalledTimes(2);
+    // Nothing flashes: the first list is still shown, and it is not "loading".
+    expect(result.current).toEqual({
+      data: [{ id: "website-1" }],
+      isLoading: false,
+      errorMessage: null,
+      reload: expect.any(Function),
+    });
+
+    await act(async () => {
+      reloadResponse.resolve(buildJsonResponse(200, [{ id: "website-1" }, { id: "website-2" }]));
+      await reloadResponse.promise;
+    });
+    expect(result.current.data).toEqual([{ id: "website-1" }, { id: "website-2" }]);
+  });
+
+  it("reload does nothing while the url is null", () => {
+    const fetchStub = stubFetchRoutes({});
+    const { result } = renderHook(() => useJsonResource(null));
+
+    act(() => {
+      result.current.reload();
+    });
+
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(result.current.isLoading).toBe(false);
   });
 });

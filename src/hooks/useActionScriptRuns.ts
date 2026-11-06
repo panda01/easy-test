@@ -72,6 +72,8 @@ export interface ActionScriptRunsState {
   errorMessage: string | null;
   /** Adds a run a "Run script" POST just recorded to the front of `runs`. */
   addFinishedRun: (finishedRun: ActionScriptRunRecord) => void;
+  /** Fetches the runs again (an auto-refine job recorded one), keeping the current list shown meanwhile. */
+  reloadRuns: () => void;
 }
 
 /**
@@ -83,10 +85,13 @@ export interface ActionScriptRunsState {
  * `actionScriptId` may be null - the action has no script yet - in which case
  * nothing is fetched and `runs` is empty, so the page can call this hook
  * unconditionally.
+ *
+ * `reloadRuns` fetches the list again without blanking it, for runs an
+ * auto-refine job recorded on the server (there is no POST response to add).
  * @param websiteId - The owning website's cuid
  * @param actionId - The owning action's cuid
  * @param actionScriptId - The script whose runs to show, or null when there is none
- * @returns The runs, the list request's state, and `addFinishedRun`
+ * @returns The runs, the list request's state, `addFinishedRun`, and `reloadRuns`
  */
 export function useActionScriptRuns(
   websiteId: string,
@@ -116,5 +121,6 @@ export function useActionScriptRuns(
     isLoading: runList.isLoading,
     errorMessage: runList.errorMessage,
     addFinishedRun: runList.addRecord,
+    reloadRuns: runList.reload,
   };
 }

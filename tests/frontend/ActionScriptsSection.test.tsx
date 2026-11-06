@@ -4,10 +4,12 @@ import { userEvent } from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import ActionScriptsSection, {
   type ActionScriptsSectionProps,
+  type AutoRefineControlsProps,
 } from "../../src/components/ActionScriptsSection";
 import {
   buildActionScriptRecord,
   buildActionScriptRefinementRecord,
+  buildAutoRefineJobRecord,
   buildScriptModelCatalog,
 } from "./support/frontendTestHelpers";
 
@@ -35,6 +37,40 @@ const passedLatestRun = {
 };
 
 /**
+ * Numbers script-N as Version N, the way the page's list would; anything else
+ * is not listed.
+ * @param scriptId - A version's id
+ * @returns Its number, or null
+ */
+function versionNumberOfScriptId(scriptId: string): number | null {
+  const versionNumberMatch = /^script-(\d+)$/.exec(scriptId);
+  return versionNumberMatch === null ? null : Number(versionNumberMatch[1]);
+}
+
+/**
+ * Builds the auto-refine controls' props: Version 2 shown and startable,
+ * nothing in flight, no job watched.
+ * @param overrides - Props to replace in the defaults
+ * @returns The complete controls props
+ */
+function buildAutoRefineProps(overrides: Partial<AutoRefineControlsProps> = {}): AutoRefineControlsProps {
+  return {
+    shownVersionNumber: 2,
+    canStart: true,
+    blockedReason: null,
+    isStarting: false,
+    startErrorMessage: null,
+    job: null,
+    versionNumberOfScriptId,
+    pollErrorMessage: null,
+    onStart: vi.fn(),
+    onStop: vi.fn(),
+    isStopping: false,
+    ...overrides,
+  };
+}
+
+/**
  * Builds the section's props: a loaded two-version list of an up-to-date,
  * logged-out action, showing the newest version on desktop, with nothing in
  * flight.
@@ -43,6 +79,7 @@ const passedLatestRun = {
  */
 function buildSectionProps(overrides: Partial<ActionScriptsSectionProps> = {}): ActionScriptsSectionProps {
   return {
+    autoRefine: buildAutoRefineProps(),
     scripts: [newestScript, olderScript],
     isLoading: false,
     errorMessage: null,
@@ -279,6 +316,226 @@ describe("ActionScriptsSection", () => {
 
       expect(screen.getByRole("combobox", { name: /^Model/ })).toHaveTextContent("Claude Opus 5.5");
       expect(screen.getByRole("combobox", { name: /^Effort/ })).toHaveTextContent("high");
+    });
+  });
+
+  describe("auto-refine", () => {
+    /** A job on its second refinement, running Version 4 (script-4) after creating script-3 and script-4. */
+    const runningJob = buildAutoRefineJobRecord({
+      startActionScriptId: "script-2",
+      currentActionScriptId: "script-4",
+      phase: "running",
+      refinementsDone: 2,
+      createdActionScriptIds: ["script-3", "script-4"],
+      actionScriptRunIds: ["run-1", "run-2"],
+    });
+
+    /**
+     * Renders the section with the given auto-refine controls.
+     * @param autoRefineOverrides - Controls props to replace in the defaults
+     * @param sectionOverrides - Other section props to replace
+     * @returns The Testing Library render result
+     */
+    function renderWithAutoRefine(
+      autoRefineOverrides: Partial<AutoRefineControlsProps>,
+      sectionOverrides: Partial<ActionScriptsSectionProps> = {},
+    ): RenderResult {
+      return renderSection({ autoRefine: buildAutoRefineProps(autoRefineOverrides), ...sectionOverrides });
+    }
+
+    it("offers Auto-refine for the shown version under Convert, and reports clicks", async () => {
+      const user = userEvent.setup();
+      const onStart = vi.fn();
+      renderWithAutoRefine({ onStart });
+
+      const autoRefineButton = screen.getByRole("button", { name: "Auto-refine Version 2" });
+      const convertButton = screen.getByRole("button", { name: "Convert to new version" });
+      expect(convertButton.compareDocumentPosition(autoRefineButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(autoRefineButton).toBeEnabled();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+      await user.click(autoRefineButton);
+      expect(onStart).toHaveBeenCalledTimes(1);
+    });
+
+    it("is disabled with the reason as a caption when a job cannot start", () => {
+      renderWithAutoRefine({
+        canStart: false,
+        blockedReason: "Saved from the step editor, so Claude cannot refine it",
+      });
+
+      expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeDisabled();
+      expect(screen.getByText("Saved from the step editor, so Claude cannot refine it")).toBeInTheDocument();
+    });
+
+    it("is disabled without a reason when the page gives none, and reads Convert and auto-refine with no version yet", async () => {
+      const user = userEvent.setup();
+      const { unmount } = renderWithAutoRefine({ canStart: false });
+      expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeDisabled();
+
+      unmount();
+      const { unmount: unmountEmptyList } = renderWithAutoRefine(
+        { shownVersionNumber: null, canStart: false },
+        { scripts: [], selectedScriptId: null },
+      );
+      expect(screen.getByRole("button", { name: "Convert and auto-refine" })).toBeDisabled();
+
+      unmountEmptyList();
+      const onStart = vi.fn();
+      renderWithAutoRefine({ shownVersionNumber: null, canStart: true, onStart }, { scripts: [], selectedScriptId: null });
+      await user.click(screen.getByRole("button", { name: "Convert and auto-refine" }));
+      expect(onStart).toHaveBeenCalledTimes(1);
+    });
+
+    it("says Starting… and is disabled while the start request is in flight", () => {
+      renderWithAutoRefine({ isStarting: true });
+
+      expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
+      expect(screen.queryByRole("progressbar", { name: "Auto-refining" })).not.toBeInTheDocument();
+    });
+
+    it("is disabled while a conversion is in flight", () => {
+      renderWithAutoRefine({}, { isConverting: true });
+
+      expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeDisabled();
+    });
+
+    it("shows progress and which version is running while the job runs, and disables Auto-refine, Convert, and the model picker", () => {
+      renderWithAutoRefine({ job: runningJob, blockedReason: "Fill in Name to run" });
+
+      expect(screen.getByRole("progressbar", { name: "Auto-refining" })).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("Refinement 2 of 5 · Running Version 4…");
+      expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Convert to new version" })).toBeDisabled();
+      expect(screen.getByRole("combobox", { name: /^Model/ })).toHaveAttribute("aria-disabled", "true");
+      // The blocked reason is beside the point while a job runs.
+      expect(screen.queryByText("Fill in Name to run")).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("says which version is being refined into which", () => {
+      renderWithAutoRefine({ job: { ...runningJob, phase: "refining" } });
+
+      expect(screen.getByRole("status")).toHaveTextContent("Refining Version 4 into Version 5…");
+    });
+
+    it("offers Stop while the job runs, reports clicks, and says a stop is pending once requested", async () => {
+      const user = userEvent.setup();
+      const onStop = vi.fn();
+      const { rerender } = renderWithAutoRefine({ job: runningJob, onStop });
+
+      await user.click(screen.getByRole("button", { name: "Stop" }));
+      expect(onStop).toHaveBeenCalledTimes(1);
+
+      rerender(
+        <MemoryRouter>
+          <ActionScriptsSection
+            {...buildSectionProps({ autoRefine: buildAutoRefineProps({ job: runningJob, onStop, isStopping: true }) })}
+          />
+        </MemoryRouter>,
+      );
+      expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+
+      rerender(
+        <MemoryRouter>
+          <ActionScriptsSection
+            {...buildSectionProps({
+              autoRefine: buildAutoRefineProps({
+                job: { ...runningJob, stopRequestedAt: "2026-04-05T03:06:05.000Z" },
+                onStop,
+              }),
+            })}
+          />
+        </MemoryRouter>,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Refinement 2 of 5 · Running Version 4… · Stopping after this step…",
+      );
+      expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+    });
+
+    it("warns when the job could not be refreshed, while still showing its progress", () => {
+      renderWithAutoRefine({ job: runningJob, pollErrorMessage: "Server responded with 502" });
+
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Could not refresh the auto-refine (Server responded with 502); still trying.",
+      );
+      expect(screen.getByRole("status")).toHaveTextContent("Refinement 2 of 5 · Running Version 4…");
+    });
+
+    it.each([
+      {
+        status: "passed" as const,
+        jobFields: { refinementsDone: 2, currentActionScriptId: "script-4" },
+        severityClass: "MuiAlert-standardSuccess",
+        text: "Version 4 passed after 2 refinements.",
+      },
+      {
+        status: "gaveUp" as const,
+        jobFields: { refinementsDone: 5, currentActionScriptId: "script-7", createdActionScriptIds: ["script-3", "script-4", "script-5", "script-6", "script-7"] },
+        severityClass: "MuiAlert-standardWarning",
+        text: "Stopped after 5 refinements; Version 7 still fails.",
+      },
+      {
+        status: "unchanged" as const,
+        jobFields: { refinementsDone: 2, currentActionScriptId: "script-4" },
+        severityClass: "MuiAlert-standardWarning",
+        text: "Stopped: Version 4 came back identical to Version 3.",
+      },
+      {
+        status: "stopped" as const,
+        jobFields: { currentActionScriptId: "script-3", stopRequestedAt: "2026-04-05T03:06:05.000Z" },
+        severityClass: "MuiAlert-standardInfo",
+        text: "Stopped at your request after Version 3.",
+      },
+      {
+        status: "failed" as const,
+        jobFields: { errorMessage: "Claude is overloaded" },
+        severityClass: "MuiAlert-standardError",
+        text: "Auto-refine failed: Claude is overloaded",
+      },
+      {
+        status: "interrupted" as const,
+        jobFields: {},
+        severityClass: "MuiAlert-standardError",
+        text: "Auto-refine was interrupted by a server restart.",
+      },
+    ])("shows one alert once the job ended: $status", ({ status, jobFields, severityClass, text }) => {
+      renderWithAutoRefine({
+        job: { ...runningJob, ...jobFields, status, phase: null, finishedAt: "2026-04-05T03:09:05.000Z" },
+      });
+
+      const alerts = screen.getAllByRole("alert");
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toHaveTextContent(text);
+      expect(alerts[0]).toHaveClass(severityClass);
+      expect(screen.queryByRole("progressbar", { name: "Auto-refining" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+      // Auto-refine and Convert are available again.
+      expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Convert to new version" })).toBeEnabled();
+    });
+
+    it("says why a job could not start", () => {
+      renderWithAutoRefine({ startErrorMessage: "This action is already running" });
+
+      expect(screen.getByRole("alert")).toHaveTextContent("Could not start auto-refine: This action is already running");
+    });
+
+    it("keeps the same controls in the phone layout", async () => {
+      const user = userEvent.setup();
+      const onStart = vi.fn();
+      const { unmount } = renderWithAutoRefine({ onStart }, { isPhoneLayout: true });
+
+      await user.click(screen.getByRole("button", { name: "Auto-refine Version 2" }));
+      expect(onStart).toHaveBeenCalledTimes(1);
+
+      unmount();
+      renderWithAutoRefine({ job: runningJob }, { isPhoneLayout: true });
+      expect(screen.getByRole("status")).toHaveTextContent("Refinement 2 of 5 · Running Version 4…");
+      expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
     });
   });
 

@@ -33,6 +33,7 @@ describe("useCrawlRuns", () => {
       isLoading: false,
       errorMessage: null,
       pollErrorMessage: null,
+      reload: expect.any(Function),
     });
     expect(fetchStub).toHaveBeenCalledWith(CRAWL_RUNS_API_URL);
   });

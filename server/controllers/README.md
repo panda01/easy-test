@@ -10,6 +10,7 @@ Route registrars. One file per API section.
 | `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId, userActionKind, userObjectTypeKey, userNameParameterKey, userDeletesObject }`; the credential must be one of the website's; each role choice null / left out means "detect"). The list answers each action with `newestScript: { id, versionNumber, actionTitle, actionDescription, credentialId, latestRun }` (or null when it has no versions) for its status, version, and "Out of date" tag. A single action (GET, POST, PUT) also carries `objectRole`: its kind (`parameters` / `object` / `create`), object type, and "deletes", with the detections and how sure they are (see `../utils/scoreActionObjectRole.ts`). A PUT syncs the action's parameters |
 | `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
 | `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run, or null). A run takes an optional body `{ parameterValues }` (values by parameter key - see below) and answers with the run plus `createdObject` and `deletedObjects`; convert, edit, and refine sync the action's parameters afterwards, and refine puts the failed run's values back into the plan it sends |
+| `autoRefineJobs.ts` | `POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/auto-refine-jobs` (body `{ parameterValues }`, optional; answers `201` at once with the running job), `GET /api/websites/:websiteId/actions/:actionId/auto-refine-jobs` (newest first), `GET .../auto-refine-jobs/:autoRefineJobId` (polled while the job runs), `POST .../auto-refine-jobs/:autoRefineJobId/stop`. The shared website / action / script lookups these routes and the action script routes both use live in `actionLookups.ts` |
 | `actionParameters.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/parameters` (a version's parameters view `{ role, parameters, objectChoices, confirmStepNumber, nameParameterKey, bindableTexts, warnings }`; POST adds one of the user's own - `{ addKind: "value", ... }` or `{ addKind: "field", ... }`), `PUT`/`DELETE /api/websites/:websiteId/actions/:actionId/parameters/:parameterKey` (change a parameter's `userLabel` / `userRequiredChoice`; remove one the user added) |
 | `createdObjects.ts` | `GET /api/websites/:websiteId/created-objects` (the record of objects Create runs made), `DELETE .../created-objects/:createdObjectId` (remove one from the record) |
 | `webObjects.ts` | `GET /api/websites/:websiteId/web-objects`, `PUT .../web-objects/:webObjectId` (rename) |
@@ -270,6 +271,74 @@ resolved at boot): a failed login's screenshot is written there.
   sends SIGTERM; Playwright closes the crawl's browser, and the crawl finishes
   the run as `interrupted` before the process exits. A run left `running` by a
   killed process is marked `interrupted` at the next boot.
+
+## The auto-refine jobs controller (`autoRefineJobs.ts`)
+
+`registerAutoRefineJobRoutes(app, actionScriptDirectory)` starts, reads back,
+and stops auto-refine jobs: a background loop that runs a version and, when
+the run fails, refines it with Claude and runs the refined version, until a
+run passes or the job gives up. The loop itself lives in
+`../services/autoRefineService.ts`; the run and refine work it calls is the
+very code behind the action script routes' "Run" and "Refine"
+(`../services/actionScriptExecutionService.ts`). Like the action script
+routes it takes the action script directory (`ACTION_SCRIPT_DIR`, resolved at
+boot): every run the job records writes its folder there.
+
+Every path is nested under `/api/websites/:websiteId/actions/:actionId`, and
+every route checks the website, then the action (then the version or the
+job) and answers `404` for the first one missing - with the same messages as
+the action script routes, because both controllers share
+`findWebsiteAndAction` / `findWebsiteActionAndScript` from
+`actionLookups.ts`. Later lookups use the FOUND rows' ids.
+
+- **`POST .../scripts/:actionScriptId/auto-refine-jobs` answers `201` at
+  once** with the new job (`status: "running"`, `phase: "running"`,
+  `startActionScriptId` = `currentActionScriptId` = the version in the
+  path); the loop carries on in the background. The body is optional:
+  `{ parameterValues }` are the run-form values the user had changed, by
+  key, validated like a run's (`400` for a body that is not an object, a
+  value that is not text, one over 1000 characters, or one containing
+  `{{`). They are stored on the job and sent to every run; a key a later
+  version no longer has is dropped before that run. Two `409`s: the version
+  was saved from the step editor (`modelId` null - no model wrote it, so
+  Claude cannot refine it; `EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE`), and
+  the action is already running - a manual run, or another job
+  (`ACTION_ALREADY_RUNNING_MESSAGE`, the same message the run route gives).
+  The job holds the action's run claim for its whole life, so a manual
+  "Run" of the action during the job gets that same `409`. `500` when the
+  job row cannot be created.
+- **The loop ends** with one of `passed` (a run succeeded), `gaveUp` (five
+  refinements were made and the last run still failed), `unchanged` (a
+  refinement came back with the very plan it refined), `stopped` (see Stop),
+  `failed` (a step broke; `errorMessage` says why), or `interrupted` (the
+  server restarted mid-job). Every version it creates and every run it
+  records is an ordinary version / run on the action, listed like a hand-made
+  one; the job keeps their ids in `createdActionScriptIds` and
+  `actionScriptRunIds` (oldest first) so the page can refetch when they grow.
+- **`GET .../auto-refine-jobs`** answers the action's jobs newest first; the
+  action page reads it on load to find a job still `running` and pick up
+  following it.
+- **`GET .../auto-refine-jobs/:autoRefineJobId`** answers the job on its own
+  - no joined versions or runs - because the page polls it every 2 seconds
+  while the job runs. `404 "Auto-refine job not found"` for a job that is not
+  the action's (or was deleted).
+- **`POST .../auto-refine-jobs/:autoRefineJobId/stop`** asks a running job to
+  stop. The job reads `stopRequestedAt` between steps, so it ends `stopped`
+  after the run or refinement in flight - a run or a Claude call is never cut
+  short. The route answers `200` with the job re-read after the write
+  (`stopRequestedAt` set, `status` still `running`); poll it to see it end.
+  `409 "This auto-refine job is not running, so it cannot be stopped"` when
+  the job has already ended - either on the read, or when the conditional
+  write (`where status: "running"`) matched no row because it ended in
+  between.
+- **Jobs are create-only from the API's point of view**: there is no `PUT` or
+  `DELETE`. They are soft deleted with their action or website, and a running
+  job whose action is deleted notices on its next conditional write (0 rows)
+  and ends quietly.
+- **A dev server restart interrupts a running job.** The loop runs inside the
+  server process; a job left `running` by a killed process is marked
+  `interrupted` at the next boot (`markUnfinishedAutoRefineJobsInterrupted`,
+  awaited in `server.ts` before listening, next to the crawl sweep).
 
 ## The credentials controller (`credentials.ts`)
 
