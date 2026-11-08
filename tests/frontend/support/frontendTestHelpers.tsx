@@ -690,6 +690,11 @@ export function buildActionScriptRunRecord(
     confirmStepSucceeded: null,
     createdObject: null,
     deletedObjects: [],
+    cleanupOutcome: null,
+    cleanupActionScriptRunId: null,
+    cleanupErrorMessage: null,
+    cleanupRun: null,
+    cleanedUpRun: null,
     createdAt: "2026-04-03T03:04:05.000Z",
     updatedAt: "2026-04-03T03:04:05.000Z",
     deletedAt: null,
@@ -721,6 +726,8 @@ export function buildAutoRefineJobRecord(
     parameterValues: {},
     createdActionScriptIds: [],
     actionScriptRunIds: [],
+    cleanupActionScriptIds: [],
+    cleanupActionScriptRunIds: [],
     stopRequestedAt: null,
     errorMessage: null,
     createdAt: "2026-04-05T03:04:05.000Z",
@@ -733,7 +740,7 @@ export function buildAutoRefineJobRecord(
 
 /**
  * Builds an action's object role as the action read returns it: by default a
- * Parameters action whose title matched no object or create word.
+ * Parameters action whose title matched no kind word.
  * @param overrides - Fields to replace in the default role
  * @returns A complete object role record
  */
@@ -748,21 +755,20 @@ export function buildActionObjectRoleRecord(
       reason: "noMatch",
       confidence: "low",
       confidenceShare: 0,
-      objectScore: 0,
-      createScore: 0,
+      scores: NO_KIND_SCORES,
       evidence: [],
     },
     objectTypeKey: null,
     objectTypeName: null,
     objectTypeSource: null,
     detectedObjectType: null,
-    deletesObject: false,
-    deletesObjectSource: "detected",
-    detectedDeletesObject: { deletesObject: false, evidence: [] },
     warnings: [],
     ...overrides,
   };
 }
+
+/** Every object kind scored 0: nothing matched. */
+export const NO_KIND_SCORES = { create: 0, read: 0, update: 0, delete: 0 } as const;
 
 /**
  * Builds one parameter of a version: by default the required "Project name"

@@ -73,6 +73,9 @@ function capitalise(text: string): string {
  * line under the Auto-refine button:
  * - phase "running": "Refinement 2 of 5 · Running Version 4…";
  * - phase "refining": "Refining Version 4 into Version 5…";
+ * - phase "refiningCleanup": "Refinement 2 of 5 · Refining its delete action…"
+ *   (the Create version passed; its cleanup, the delete action's run, failed);
+ * - phase "runningCleanup": "Running its delete action on its own…";
  * - once a stop was requested, " · Stopping after this step…" is appended,
  *   since a step in flight cannot be cut short.
  * @param job - The running job
@@ -84,10 +87,21 @@ export function describeAutoRefineProgress(
   versionNumberOf: VersionNumberOfScriptId,
 ): string {
   const currentVersionName = nameVersion(job.currentActionScriptId, versionNumberOf);
-  const jobIsRefining = job.phase === "refining";
-  const stepText = jobIsRefining
-    ? `Refining ${currentVersionName} into ${nameNextVersion(job.currentActionScriptId, versionNumberOf)}…`
-    : `Refinement ${String(job.refinementsDone)} of ${String(job.maxRefinements)} · Running ${currentVersionName}…`;
+  const refinementCountText = `Refinement ${String(job.refinementsDone)} of ${String(job.maxRefinements)}`;
+  let stepText: string;
+  switch (job.phase) {
+    case "refining":
+      stepText = `Refining ${currentVersionName} into ${nameNextVersion(job.currentActionScriptId, versionNumberOf)}…`;
+      break;
+    case "refiningCleanup":
+      stepText = `${refinementCountText} · ${currentVersionName} passed; refining its delete action…`;
+      break;
+    case "runningCleanup":
+      stepText = `${refinementCountText} · Running its delete action on its own…`;
+      break;
+    default:
+      stepText = `${refinementCountText} · Running ${currentVersionName}…`;
+  }
   const stopWasRequested = job.stopRequestedAt !== null;
   return stopWasRequested ? `${stepText} · Stopping after this step…` : stepText;
 }
@@ -96,7 +110,9 @@ export function describeAutoRefineProgress(
  * Words how an auto-refine job ended, with the tone to show it in:
  * - passed (success): "Version 4 passed after 2 refinements." / "with no refinements.";
  * - gaveUp (warning): "Stopped after 5 refinements; Version 6 still fails.";
- * - unchanged (warning): "Stopped: Version 5 came back identical to Version 4.";
+ * - unchanged (warning): "Stopped: Version 5 came back identical to Version 4.", or on the
+ *   Delete side "Stopped: Version 1 passed, but its delete action's refinement came back
+ *   identical to the version it refined, so refining again would go nowhere.";
  * - stopped (info): "Stopped at your request after Version 3.";
  * - failed (error): "Auto-refine failed: <errorMessage>";
  * - interrupted (error): "Auto-refine was interrupted by a server restart."
@@ -126,6 +142,11 @@ export function describeAutoRefineOutcome(
         text: `Stopped after ${formatCount(job.maxRefinements, "refinement", "refinements")}; ${currentVersionName} still fails.`,
       };
     case "unchanged": {
+      // On the Delete side the job's own version passed; the server says which plan came back identical.
+      const deleteSideMessage = job.errorMessage;
+      if (deleteSideMessage !== null) {
+        return { severity: "warning", text: `Stopped: ${currentVersionName} passed, but ${deleteSideMessage}.` };
+      }
       const previousVersionName = nameVersion(findVersionRefinedIntoCurrent(job), versionNumberOf);
       const bothNamesAreUnknown = previousVersionName === currentVersionName;
       const previousText = bothNamesAreUnknown ? "the version before it" : previousVersionName;

@@ -70,7 +70,7 @@ async function pickFromSelect(user: UserEvent, selectName: RegExp, optionName: s
 }
 
 /** What an action form sends for its object role when every choice is left on "Detect". */
-const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null, userDeletesObject: null };
+const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null };
 
 /**
  * Builds what `useJsonMutation` sends to save an action's title, description, and credential.

@@ -250,8 +250,7 @@ describe("TitleDescriptionForm", () => {
         reason: "won",
         confidence: "high",
         confidenceShare: 1,
-        objectScore: 0,
-        createScore: 3,
+        scores: { create: 3, read: 0, update: 0, delete: 0 },
         evidence: ["create", "adds"],
       },
       objectTypeKey: "/projects/{project}",
@@ -286,9 +285,11 @@ describe("TitleDescriptionForm", () => {
       });
 
       expect(screen.getByRole("combobox", { name: /^Kind/ })).toHaveTextContent("Detect — Create (High: create, adds)");
-      expect(screen.getByText("The action makes a new object, which each run records.")).toBeInTheDocument();
+      expect(
+        screen.getByText("The action makes a new object, which each run records and its delete action cleans up."),
+      ).toBeInTheDocument();
       expect(screen.getByRole("combobox", { name: /^Object type/ })).toHaveTextContent("Detect — Project (High)");
-      // A Create action never deletes, so that choice is not offered.
+      // Delete is a kind now; there is no separate "deletes" choice.
       expect(screen.queryByRole("combobox", { name: /^Deletes the object/ })).not.toBeInTheDocument();
 
       await user.click(getSubmitButton());
@@ -298,11 +299,10 @@ describe("TitleDescriptionForm", () => {
         userActionKind: null,
         userObjectTypeKey: null,
         userNameParameterKey: "projectName",
-        userDeletesObject: null,
       });
     });
 
-    it("submits the kind, type, and delete choice the user picks", async () => {
+    it("lists the five kinds and submits the kind and type the user picks", async () => {
       const user = userEvent.setup();
       const { onSubmit } = renderTitleDescriptionForm({
         initialValues: { ...FILLED_VALUES, credentialId: null },
@@ -310,23 +310,32 @@ describe("TitleDescriptionForm", () => {
         objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: DETECTED_CREATE_ROLE },
       });
 
-      await pickOption(user, /^Kind/, "Object");
+      await user.click(screen.getByRole("combobox", { name: /^Kind/ }));
+      const kindOptions = await screen.findAllByRole("option");
+      expect(kindOptions.map((option) => option.textContent)).toEqual([
+        "Detect — Create (High: create, adds)",
+        "Parameters",
+        "Create",
+        "Read",
+        "Update",
+        "Delete",
+      ]);
+      await user.click(screen.getByRole("option", { name: "Delete" }));
+      expect(
+        screen.getByText("The action deletes an existing object, which every run must name; a passed run marks it deleted."),
+      ).toBeInTheDocument();
       await pickOption(user, /^Object type/, "Project");
-      await pickOption(user, /^Deletes the object/, "Yes");
       await user.click(getSubmitButton());
       expect(onSubmit).toHaveBeenLastCalledWith({
         ...FILLED_VALUES,
         credentialId: null,
-        userActionKind: "object",
+        userActionKind: "delete",
         userObjectTypeKey: "/projects/{project}",
         userNameParameterKey: null,
-        userDeletesObject: true,
       });
 
-      await pickOption(user, /^Deletes the object/, "No");
-      await user.click(getSubmitButton());
-      expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ userDeletesObject: false }));
-
+      await pickOption(user, /^Kind/, "Read");
+      expect(screen.getByRole("combobox", { name: /^Object type/ })).toBeInTheDocument();
       await pickOption(user, /^Kind/, "Parameters");
       expect(screen.queryByRole("combobox", { name: /^Object type/ })).not.toBeInTheDocument();
     });
@@ -336,24 +345,22 @@ describe("TitleDescriptionForm", () => {
         initialValues: {
           ...FILLED_VALUES,
           credentialId: null,
-          userActionKind: "object",
+          userActionKind: "update",
           userObjectTypeKey: "/gone/{gone}",
-          userDeletesObject: false,
         },
         credentialOptions: CREDENTIAL_OPTIONS,
         objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: null },
       });
 
-      expect(screen.getByRole("combobox", { name: /^Kind/ })).toHaveTextContent("Object");
+      expect(screen.getByRole("combobox", { name: /^Kind/ })).toHaveTextContent("Update");
       expect(screen.getByRole("combobox", { name: /^Object type/ })).toHaveTextContent(
         "/gone/{gone} (no longer found by the latest crawl)",
       );
-      expect(screen.getByRole("combobox", { name: /^Deletes the object/ })).toHaveTextContent("No");
     });
 
     it("on a new action, offers every choice before anything is detected", () => {
       renderTitleDescriptionForm({
-        initialValues: { ...FILLED_VALUES, credentialId: null, userDeletesObject: true },
+        initialValues: { ...FILLED_VALUES, credentialId: null },
         credentialOptions: CREDENTIAL_OPTIONS,
         objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: null },
       });
@@ -362,7 +369,15 @@ describe("TitleDescriptionForm", () => {
       expect(screen.getByRole("combobox", { name: /^Object type/ })).toHaveTextContent(
         "Detect from the title, description, and addresses",
       );
-      expect(screen.getByRole("combobox", { name: /^Deletes the object/ })).toHaveTextContent("Yes");
+    });
+
+    it("names the cancel button as asked, for step 2 of a Create action", async () => {
+      const user = userEvent.setup();
+      const { onCancel } = renderTitleDescriptionForm({ cancelLabel: "Skip for now" });
+
+      await user.click(screen.getByRole("button", { name: "Skip for now" }));
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     });
 
     it("shows the role's warnings", () => {

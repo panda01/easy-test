@@ -2,6 +2,8 @@ import { type ReactElement, useState } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Checkbox from "@mui/material/Checkbox";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import LinearProgress from "@mui/material/LinearProgress";
 import Typography from "@mui/material/Typography";
 import ActionRunParameterFields from "./ActionRunParameterFields";
@@ -20,6 +22,16 @@ import {
 
 const HEADING_ID = "action-script-runs-section-heading";
 const HISTORY_HEADING_ID = "action-script-run-history-heading";
+
+/** The "Clean up afterwards" checkbox of a Create action's run panel. */
+export interface CleanupControlProps {
+  /** True when the action has a delete action, so the box can be ticked; false shows a warning instead (runs fail until one is added). */
+  hasDeleteAction: boolean;
+  /** Whether the next run cleans up (the page keeps it per version; on by default). */
+  checked: boolean;
+  /** Called with the new state when the user ticks or unticks the box. */
+  onChange: (checked: boolean) => void;
+}
 
 /** Props for `ActionScriptRunsSection`. */
 export interface ActionScriptRunsSectionProps {
@@ -41,8 +53,10 @@ export interface ActionScriptRunsSectionProps {
   isRunning: boolean;
   /** Why the last "Run" request failed, or null. */
   runErrorMessage: string | null;
-  /** Called with the values the user changed (by parameter key) when they click "Run" / "Run again". */
-  onRunClick: (parameterValues: ParameterValues) => void;
+  /** Called with the values the user changed (by parameter key) and whether to clean up afterwards when they click "Run" / "Run again". */
+  onRunClick: (parameterValues: ParameterValues, cleanUpAfterwards: boolean) => void;
+  /** The "Clean up afterwards" control of a Create action (see `CleanupControlProps`), or null for every other kind. */
+  cleanupControl: CleanupControlProps | null;
   /** The values typed or picked for the next run, by parameter key (the page owns them, so Auto-refine can send them too). */
   values: ParameterValues;
   /** Called with a parameter's key and its new value as the user types or picks. */
@@ -109,6 +123,7 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     isRunning,
     runErrorMessage,
     onRunClick,
+    cleanupControl,
     values,
     onValueChange,
     isAutoRefining,
@@ -139,7 +154,7 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
       setBlankRequiredValuesAreMarked(true);
       return;
     }
-    onRunClick(listChangedParameterValues(parameters, values));
+    onRunClick(listChangedParameterValues(parameters, values), cleanupControl?.checked ?? true);
   };
 
   const runFailedToStart = runErrorMessage !== null;
@@ -222,6 +237,33 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
         <Typography sx={{ fontSize: 12.5, color: nocturneTokens.neutral[400] }}>
           Fill in {parametersToFix.join(", ")} to run.
         </Typography>
+      )}
+
+      {cleanupControl !== null && !cleanupControl.hasDeleteAction && (
+        <Alert severity="warning">
+          This action has no delete action, so its runs fail until one is added (see the top of the page).
+        </Alert>
+      )}
+      {cleanupControl !== null && cleanupControl.hasDeleteAction && (
+        <Box>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={cleanupControl.checked}
+                onChange={(event) => {
+                  cleanupControl.onChange(event.target.checked);
+                }}
+                disabled={valuesAreLocked}
+                size="small"
+              />
+            }
+            label="Clean up afterwards"
+            sx={{ mr: 0, "& .MuiFormControlLabel-label": { fontSize: 13.5 } }}
+          />
+          <Typography sx={{ fontSize: 12.5, color: nocturneTokens.neutral[400] }}>
+            Runs its delete action on the object this run makes; the run passes only when both pass.
+          </Typography>
+        </Box>
       )}
 
       {runStatusNotices}

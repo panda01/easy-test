@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { render, screen, within, type RenderResult } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import ActionScriptRunDetails, {
@@ -382,5 +383,103 @@ describe("ActionScriptRunDetails", () => {
       expect(screen.queryByRole("button", { name: /Values used/ })).not.toBeInTheDocument();
       expect(screen.queryByLabelText("Created objects")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("ActionScriptRunDetails: cleanup", () => {
+  /** The delete action's run that cleaned up after the Create run. */
+  const cleanupRun = {
+    id: "run-delete-1",
+    actionId: "item-2",
+    actionScriptId: "script-delete-1",
+    succeeded: true,
+    errorMessage: null,
+    failedStepNumber: null,
+    timedOut: false,
+    createdAt: "2026-04-03T03:05:05.000Z",
+    action: { title: "Delete the project" },
+  };
+  /** A Create run that made Apollo 7. */
+  const createRun = buildActionScriptRunRecord({
+    createdObject: { id: "created-1", name: "Apollo 7", url: null, objectTypeName: "Project" },
+  });
+
+  it("says how the cleanup went after the created object, in every outcome", () => {
+    expect(describeRunObjectChanges({ ...createRun, cleanupOutcome: "passed", cleanupRun })).toEqual([
+      "Created Apollo 7 · cleaned up by a run of Delete the project",
+    ]);
+    expect(
+      describeRunObjectChanges({
+        ...createRun,
+        cleanupOutcome: "failed",
+        cleanupErrorMessage: "Step 2 (click): button not found",
+        cleanupRun: { ...cleanupRun, succeeded: false },
+      }),
+    ).toEqual(["Created Apollo 7 · cleanup failed: Step 2 (click): button not found"]);
+    expect(describeRunObjectChanges({ ...createRun, cleanupOutcome: "failed" })).toEqual([
+      "Created Apollo 7 · cleanup failed: a run of its delete action failed",
+    ]);
+    expect(describeRunObjectChanges({ ...createRun, cleanupOutcome: "off" })).toEqual([
+      "Created Apollo 7 · cleanup turned off for this run",
+    ]);
+    expect(
+      describeRunObjectChanges({ ...createRun, cleanupOutcome: "missing", cleanupErrorMessage: "This action has no delete action yet" }),
+    ).toEqual(["Created Apollo 7 · not cleaned up: This action has no delete action yet"]);
+    expect(describeRunObjectChanges({ ...createRun, cleanupOutcome: "notReached" })).toEqual(["Created Apollo 7"]);
+    expect(describeRunObjectChanges(createRun)).toEqual(["Created Apollo 7"]);
+  });
+
+  it("names the Create run a cleanup run cleaned up after", () => {
+    const deleteRun = buildActionScriptRunRecord({
+      deletedObjects: [{ id: "created-1", name: "Apollo 7", url: null, objectTypeName: "Project" }],
+      cleanedUpRun: { id: "run-1", actionId: "item-1", actionScriptId: "script-1", action: { title: "Create a project" } },
+    });
+
+    expect(describeRunObjectChanges(deleteRun)).toEqual(["Deleted Apollo 7", "Cleanup after a run of Create a project"]);
+  });
+
+  it("hides Refine for a run that failed only in its cleanup, and links to the delete action's run instead", () => {
+    const run = buildActionScriptRunRecord({
+      succeeded: false,
+      failedStepNumber: null,
+      errorMessage: "Cleanup failed: Step 2 (click): button not found",
+      cleanupOutcome: "failed",
+      cleanupActionScriptRunId: cleanupRun.id,
+      cleanupErrorMessage: "Step 2 (click): button not found",
+      cleanupRun: { ...cleanupRun, succeeded: false, errorMessage: "Step 2 (click): button not found", failedStepNumber: 2 },
+      createdObject: { id: "created-1", name: "Apollo 7", url: null, objectTypeName: "Project" },
+    });
+    render(
+      <MemoryRouter>
+        <ActionScriptRunDetails {...buildRunDetailsProps({ run })} />
+      </MemoryRouter>,
+    );
+
+    expect(within(screen.getByRole("status")).getByText("Failed · cleanup failed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Refine into Version/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/only its cleanup failed, so there is nothing to refine here/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Refine the delete action's run" })).toHaveAttribute(
+      "href",
+      "/websites/website-1/actions/item-2?script=script-delete-1&run=run-delete-1",
+    );
+  });
+
+  it("tells the user to add or convert the delete action when the cleanup could not start", () => {
+    const run = buildActionScriptRunRecord({
+      succeeded: false,
+      failedStepNumber: null,
+      errorMessage: "Cleanup missing: This action has no delete action yet",
+      cleanupOutcome: "missing",
+      cleanupErrorMessage: "This action has no delete action yet",
+    });
+    render(
+      <MemoryRouter>
+        <ActionScriptRunDetails {...buildRunDetailsProps({ run })} />
+      </MemoryRouter>,
+    );
+
+    expect(within(screen.getByRole("status")).getByText("Failed · no cleanup")).toBeInTheDocument();
+    expect(screen.getByText(/Add or convert its delete action from the header above\./)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Refine the delete action's run" })).not.toBeInTheDocument();
   });
 });

@@ -119,14 +119,12 @@ export type UseCaseInput = TitleDescriptionInput;
 export interface ActionInput extends TitleDescriptionInput {
   /** The credential the action logs in as before each run, or null to run logged out. */
   credentialId: string | null;
-  /** The user's kind (`parameters`, `object`, `create`), or null to detect it. */
+  /** The user's kind (`parameters`, `create`, `read`, `update`, `delete`), or null to detect it. */
   userActionKind: string | null;
   /** The user's object type (a web object's `instancePatternKey`), or null to detect it. */
   userObjectTypeKey: string | null;
   /** The parameter the user says names a created object, or null to detect it. */
   userNameParameterKey: string | null;
-  /** The user's "deletes the object" choice, or null to detect it. */
-  userDeletesObject: boolean | null;
 }
 
 /** An action as the API returns it: the row plus the id and name of the credential it runs as. */
@@ -397,8 +395,13 @@ export type AutoRefineJobStatus =
  */
 export type FinishedAutoRefineJobStatus = Exclude<AutoRefineJobStatus, "running">;
 
-/** What an auto-refine job is doing while its status is `running`. */
-export type AutoRefineJobPhase = "running" | "refining";
+/**
+ * What an auto-refine job is doing while its status is `running`: running or
+ * refining the action's version, or - after a cleanup failed - refining the
+ * Delete action's version (`refiningCleanup`) or running it on its own
+ * (`runningCleanup`).
+ */
+export type AutoRefineJobPhase = "running" | "refining" | "refiningCleanup" | "runningCleanup";
 
 /** The fields a caller supplies when starting an auto-refine job. */
 export interface AutoRefineJobInput {
@@ -422,7 +425,7 @@ export interface AutoRefineJobPhaseChange {
 export interface AutoRefineJobFinish {
   /** The final status. */
   status: FinishedAutoRefineJobStatus;
-  /** Why the job failed, or null for any other ending. */
+  /** Why the job failed - or, for an `unchanged` ending on the Delete side, which refinement changed nothing; null for any other ending. */
   errorMessage: string | null;
   /** The last version the job ran or made. */
   currentActionScriptId: string;
@@ -909,6 +912,10 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
+    await transaction.actionCleanup.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
     return true;
   };
 
@@ -1209,11 +1216,101 @@ export async function softDeleteActionForWebsite(
       where: { actionId, websiteId, deletedAt: null },
       data: { deletedAt },
     });
+    await transaction.actionCleanup.updateMany({
+      where: { websiteId, deletedAt: null, OR: [{ createActionId: actionId }, { deleteActionId: actionId }] },
+      data: { deletedAt },
+    });
     return true;
   };
 
   const anActiveActionWasDeleted = await prisma.$transaction(softDeleteActionAndItsScripts);
   return anActiveActionWasDeleted;
+}
+
+// === Action cleanups ===
+
+/** The other action a cleanup link names: just enough to show and open it. */
+export interface LinkedActionSummary {
+  /** The action's cuid. */
+  id: string;
+  /** Its title. */
+  title: string;
+}
+
+/** One active cleanup link, with both actions named. */
+export interface ActionCleanupLink {
+  /** The link row's cuid. */
+  id: string;
+  /** The Create action's cuid. */
+  createActionId: string;
+  /** The Delete action's cuid. */
+  deleteActionId: string;
+  /** The Create action. */
+  createAction: LinkedActionSummary;
+  /** The Delete action. */
+  deleteAction: LinkedActionSummary;
+}
+
+/** The relations every cleanup link read brings along: both actions' ids and titles. */
+const ACTION_CLEANUP_INCLUDE = {
+  createAction: { select: { id: true, title: true } },
+  deleteAction: { select: { id: true, title: true } },
+} as const;
+
+/**
+ * Lists a website's active cleanup links - which Delete action cleans up
+ * after which Create action - with both actions' titles, so the action list
+ * can name them without a query per action.
+ * @param websiteId - The owning website's cuid
+ * @returns The active links, oldest first
+ */
+export async function listActionCleanupsForWebsite(websiteId: string): Promise<ActionCleanupLink[]> {
+  const links = await prisma.actionCleanup.findMany({
+    where: { websiteId, deletedAt: null },
+    orderBy: { createdAt: "asc" },
+    include: ACTION_CLEANUP_INCLUDE,
+  });
+  return links;
+}
+
+/**
+ * Finds the active cleanup link of a Create action: the Delete action that
+ * cleans up after it.
+ * @param websiteId - The owning website's cuid
+ * @param createActionId - The Create action's cuid
+ * @returns The link, or null when the action has no Delete action
+ */
+export async function findActionCleanupForCreateAction(
+  websiteId: string,
+  createActionId: string,
+): Promise<ActionCleanupLink | null> {
+  const link = await prisma.actionCleanup.findFirst({
+    where: { websiteId, createActionId, deletedAt: null },
+    include: ACTION_CLEANUP_INCLUDE,
+  });
+  return link;
+}
+
+/**
+ * Links a Create action to the Delete action that cleans up after it. The
+ * caller has already checked that both are active actions of the website,
+ * that they differ, and that the Create action has no active link yet (the
+ * partial unique index refuses a second one).
+ * @param websiteId - The owning website's cuid
+ * @param createActionId - The Create action's cuid
+ * @param deleteActionId - The Delete action's cuid
+ * @returns The created link with both actions named
+ */
+export async function linkActionCleanup(
+  websiteId: string,
+  createActionId: string,
+  deleteActionId: string,
+): Promise<ActionCleanupLink> {
+  const link = await prisma.actionCleanup.create({
+    data: { websiteId, createActionId, deleteActionId },
+    include: ACTION_CLEANUP_INCLUDE,
+  });
+  return link;
 }
 
 // === Screenshot runs ===
@@ -1311,6 +1408,25 @@ export async function listActionScriptsForAction(
 }
 
 /**
+ * Finds an action's newest active version - the one a cleanup runs when the
+ * action is another action's Delete action.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The action's cuid
+ * @returns The newest active version, or null when the action has none
+ */
+export async function findNewestActionScriptForAction(
+  websiteId: string,
+  actionId: string,
+): Promise<ActionScriptWithPlan | null> {
+  const newestScript = await prisma.actionScript.findFirst({
+    where: { websiteId, actionId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    include: ACTION_SCRIPT_INCLUDE,
+  });
+  return newestScript === null ? null : toActionScriptWithPlan(newestScript);
+}
+
+/**
  * Looks up one active script, scoped to the website and action that own it,
  * with the refinement that produced it (null when it was not refined) and its
  * newest run (null when it has not been run).
@@ -1400,7 +1516,64 @@ const ACTION_SCRIPT_RUN_OBJECTS_INCLUDE = {
     where: { deletedAt: null },
     select: { id: true, name: true, url: true, objectTypeName: true },
   },
+  // A Create run's cleanup: the Delete action's run that followed it.
+  cleanupRun: {
+    select: {
+      id: true,
+      actionId: true,
+      actionScriptId: true,
+      succeeded: true,
+      errorMessage: true,
+      failedStepNumber: true,
+      timedOut: true,
+      createdAt: true,
+      action: { select: { title: true } },
+    },
+  },
+  // A Delete run that was a cleanup: the Create run it cleaned up after.
+  cleanedUpRun: {
+    select: { id: true, actionId: true, actionScriptId: true, action: { select: { title: true } } },
+  },
 } as const;
+
+/** What happened to a Create run's cleanup (see the `ActionScriptRun` model's doc comment). */
+export type CleanupOutcome = "missing" | "off" | "notReached" | "passed" | "failed";
+
+/** How a Create run's cleanup ended, as written on the run once (see `recordActionScriptRunCleanup`). */
+export interface ActionScriptRunCleanupRecord {
+  /** What happened to the cleanup. */
+  cleanupOutcome: CleanupOutcome;
+  /** The Delete action's run, when one ran. */
+  cleanupActionScriptRunId: string | null;
+  /** The Delete run's error, or why the cleanup could not start; null when it passed or was turned off. */
+  cleanupErrorMessage: string | null;
+  /** Whether the whole run now counts as passed: its own steps AND the cleanup. */
+  succeeded: boolean;
+  /** The run's error once the cleanup is counted in: unchanged when its own steps failed, "Cleanup …" when only the cleanup did, null when all passed. */
+  errorMessage: string | null;
+}
+
+/**
+ * Writes how a Create run's cleanup ended - the ONE write a run row gets after
+ * it is created, because the cleanup needs the object the run recorded. Sets
+ * the three cleanup columns and the run's final `succeeded` and
+ * `errorMessage`.
+ * @param websiteId - The owning website's cuid
+ * @param actionScriptRunId - The Create run's cuid
+ * @param cleanup - The outcome to write
+ * @returns True when an active run was updated; false when none matched
+ */
+export async function recordActionScriptRunCleanup(
+  websiteId: string,
+  actionScriptRunId: string,
+  cleanup: ActionScriptRunCleanupRecord,
+): Promise<boolean> {
+  const runUpdate = await prisma.actionScriptRun.updateMany({
+    where: { id: actionScriptRunId, websiteId, deletedAt: null },
+    data: cleanup,
+  });
+  return runUpdate.count > 0;
+}
 
 /**
  * A script run as the run list returns it: the row plus `createdObject` (the
@@ -1861,6 +2034,55 @@ export async function appendAutoRefineJobScript(
   });
   const scriptWasAppended = autoRefineJobUpdate.count > 0;
   return scriptWasAppended;
+}
+
+/**
+ * Appends a run of the DELETE action the job just made (running the refined
+ * Delete version on its own after a cleanup failed) to the job's
+ * `cleanupActionScriptRunIds`, while the job is still active and running.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning (Create) action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @param cleanupActionScriptRunId - The Delete action's run
+ * @returns True when the run was appended; false when no active running job matched
+ */
+export async function appendAutoRefineJobCleanupRun(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+  cleanupActionScriptRunId: string,
+): Promise<boolean> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { id: autoRefineJobId, websiteId, actionId, status: "running", deletedAt: null },
+    data: { cleanupActionScriptRunIds: { push: cleanupActionScriptRunId } },
+  });
+  return autoRefineJobUpdate.count > 0;
+}
+
+/**
+ * Appends a version of the DELETE action the job just refined to its
+ * `cleanupActionScriptIds` and records how many refinements it has made (the
+ * Delete side counts toward the same cap), while the job is still active and
+ * running.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning (Create) action's cuid
+ * @param autoRefineJobId - The job's cuid
+ * @param cleanupActionScriptId - The refined Delete version's cuid
+ * @param refinementsDone - How many refinements the job has made, this one included
+ * @returns True when the version was appended; false when no active running job matched
+ */
+export async function appendAutoRefineJobCleanupScript(
+  websiteId: string,
+  actionId: string,
+  autoRefineJobId: string,
+  cleanupActionScriptId: string,
+  refinementsDone: number,
+): Promise<boolean> {
+  const autoRefineJobUpdate = await prisma.autoRefineJob.updateMany({
+    where: { id: autoRefineJobId, websiteId, actionId, status: "running", deletedAt: null },
+    data: { cleanupActionScriptIds: { push: cleanupActionScriptId }, refinementsDone },
+  });
+  return autoRefineJobUpdate.count > 0;
 }
 
 /**

@@ -1,12 +1,25 @@
 import { urlMatchesPatternKey } from "./detectPagePatterns.js";
 
 /**
- * What an action does with an object - the action's "switch":
- * - `parameters`: it only takes typed values;
- * - `object`: it acts on an existing object, which is always required;
- * - `create`: it makes a new object, which each run records.
+ * The four kinds that act on an object, in the order the form lists them:
+ * - `create`: it makes a new object, which each run records;
+ * - `read`: it opens or checks an existing object (or nothing in particular);
+ * - `update`: it changes an existing object;
+ * - `delete`: it deletes an existing object, which a passed run marks as
+ *   deleted on the site.
  */
-export const ACTION_KINDS = ["parameters", "object", "create"] as const;
+export const CRUD_ACTION_KINDS = ["create", "read", "update", "delete"] as const;
+
+/** One of the four object kinds (see `CRUD_ACTION_KINDS`). */
+export type CrudActionKind = (typeof CRUD_ACTION_KINDS)[number];
+
+/**
+ * What an action does with an object - the action's "switch":
+ * - `parameters`: the special kind for login-style actions that only take
+ *   typed values and touch no object;
+ * - the four object kinds of `CRUD_ACTION_KINDS`.
+ */
+export const ACTION_KINDS = ["parameters", ...CRUD_ACTION_KINDS] as const;
 
 /** One action kind (see `ACTION_KINDS`). */
 export type ActionKind = (typeof ACTION_KINDS)[number];
@@ -19,30 +32,6 @@ export const HIGH_CONFIDENCE_SHARE = 0.75;
 
 /** A winner's share of the score from which a detection counts as Medium. */
 export const MEDIUM_CONFIDENCE_SHARE = 0.5;
-
-/** Words that mean the action works on an EXISTING object. */
-export const OBJECT_WORDS = [
-  "edit",
-  "update",
-  "change",
-  "rename",
-  "modify",
-  "delete",
-  "remove",
-  "destroy",
-  "archive",
-  "open",
-  "view",
-  "show",
-  "visit",
-  "go to",
-  "select",
-  "find",
-  "review",
-  "assign",
-  "move",
-  "duplicate",
-] as const;
 
 /** Words that mean the action makes a NEW object. */
 export const CREATE_WORDS = [
@@ -58,8 +47,50 @@ export const CREATE_WORDS = [
   "submit",
 ] as const;
 
-/** Words that mean an Object action deletes the object it acts on. */
+/** Words that mean the action opens or checks an EXISTING object without changing it. */
+export const READ_WORDS = [
+  "open",
+  "view",
+  "show",
+  "visit",
+  "go to",
+  "select",
+  "find",
+  "search",
+  "list",
+  "check",
+  "review",
+  "browse",
+  "filter",
+  "export",
+  "download",
+] as const;
+
+/** Words that mean the action CHANGES an existing object. */
+export const UPDATE_WORDS = [
+  "edit",
+  "update",
+  "change",
+  "rename",
+  "modify",
+  "assign",
+  "move",
+  "set",
+  "toggle",
+  "enable",
+  "disable",
+] as const;
+
+/** Words that mean the action DELETES an existing object. */
 export const DELETE_WORDS = ["delete", "remove", "destroy", "archive"] as const;
+
+/** Each object kind's word list, in `CRUD_ACTION_KINDS` order. */
+const KIND_WORD_LISTS: Record<CrudActionKind, readonly string[]> = {
+  create: CREATE_WORDS,
+  read: READ_WORDS,
+  update: UPDATE_WORDS,
+  delete: DELETE_WORDS,
+};
 
 /** How much an exact word counts. */
 const EXACT_MATCH_WEIGHT = 1;
@@ -138,19 +169,17 @@ export interface WordMatch {
 
 /** How the action kind was detected from the title and description. */
 export interface ActionKindDetection {
-  /** The detected kind: `object` or `create` when that category wins, otherwise `parameters`. */
+  /** The detected kind: the object kind whose words won, otherwise `parameters`. */
   kind: ActionKind;
-  /** How the result came about: one category won, the two tied, or nothing matched. */
+  /** How the result came about: one kind won, the top kinds tied, or nothing matched. */
   reason: "won" | "tie" | "noMatch";
   /** How sure it is (`low` for a tie or no match). */
   confidence: DetectionConfidence;
-  /** The winner's share of the score, from 0 to 1 (0 when nothing matched). */
+  /** The winner's share of the total score, from 0 to 1 (0 when nothing matched). */
   confidenceShare: number;
-  /** The object words' score. */
-  objectScore: number;
-  /** The create words' score. */
-  createScore: number;
-  /** The words that decided it (the winner's; both categories' for a tie). */
+  /** Each object kind's score. */
+  scores: Record<CrudActionKind, number>;
+  /** The words that decided it (the winner's; the tied kinds' for a tie). */
   evidence: string[];
 }
 
@@ -178,14 +207,6 @@ export interface ObjectTypeDetection {
   evidence: string[];
 }
 
-/** Whether an Object action deletes its object, as detected. */
-export interface DeletesObjectDetection {
-  /** True when a delete word matched. */
-  deletesObject: boolean;
-  /** The words that matched. */
-  evidence: string[];
-}
-
 /** An action's choices as `resolveActionObjectRole` reads them: its text, and the user's settings (null for "detect"). */
 export interface ActionRoleInput {
   /** The action's title. */
@@ -196,8 +217,6 @@ export interface ActionRoleInput {
   userActionKind: string | null;
   /** The user's object type key, or null to detect it. */
   userObjectTypeKey: string | null;
-  /** The user's "deletes the object" choice, or null to detect it. */
-  userDeletesObject: boolean | null;
 }
 
 /** What an action does with an object, after the user's choices and detection are combined. */
@@ -216,12 +235,6 @@ export interface ResolvedActionRole {
   objectTypeSource: "you" | "detected" | null;
   /** The type detection, or null when no type's name or address matched. */
   detectedObjectType: ObjectTypeDetection | null;
-  /** True when an `object` action deletes its object. */
-  deletesObject: boolean;
-  /** `you` when the user chose it, `detected` otherwise. */
-  deletesObjectSource: "you" | "detected";
-  /** The delete detection. */
-  detectedDeletesObject: DeletesObjectDetection;
   /** Things the user should check, in plain words. */
   warnings: string[];
 }
@@ -390,68 +403,63 @@ function listEvidenceWords(matches: WordMatch[]): string[] {
   return [...new Set(matches.map((match) => match.word))];
 }
 
+/** One object kind's matches and score, for the kind detection. */
+interface KindScore {
+  /** The kind. */
+  kind: CrudActionKind;
+  /** Its word list's matches. */
+  matches: WordMatch[];
+  /** Their total (see `sumWordMatches`). */
+  score: number;
+}
+
 /**
- * Detects an action's kind from its title and description, with no LLM: the
- * object words and the create words are both scored (see `findWordMatches`
- * and `sumWordMatches`), and the higher score wins with a confidence of its
- * share of the total. A tie, or no match at all, is `parameters`.
+ * Detects an action's kind from its title and description, with no LLM: each
+ * object kind's words are scored (see `KIND_WORD_LISTS`, `findWordMatches`
+ * and `sumWordMatches`), and the highest score wins with a confidence of its
+ * share of the total. A tie for first place, or no match at all, is
+ * `parameters` - the kind that touches no object.
  * @param title - The action's title
  * @param description - The action's description
  * @returns The detected kind, why, how sure, and the deciding words
  */
 export function detectActionKind(title: string, description: string): ActionKindDetection {
-  const objectMatches = findTitleAndDescriptionMatches(title, description, OBJECT_WORDS);
-  const createMatches = findTitleAndDescriptionMatches(title, description, CREATE_WORDS);
-  const objectScore = sumWordMatches(objectMatches);
-  const createScore = sumWordMatches(createMatches);
-  const totalScore = objectScore + createScore;
+  const kindScores: KindScore[] = CRUD_ACTION_KINDS.map((kind) => {
+    const matches = findTitleAndDescriptionMatches(title, description, KIND_WORD_LISTS[kind]);
+    return { kind, matches, score: sumWordMatches(matches) };
+  });
+  const scores = Object.fromEntries(kindScores.map((kindScore) => [kindScore.kind, kindScore.score])) as Record<
+    CrudActionKind,
+    number
+  >;
+  const totalScore = kindScores.reduce((total, kindScore) => total + kindScore.score, 0);
   const nothingMatched = totalScore === 0;
   if (nothingMatched) {
-    return {
-      kind: "parameters",
-      reason: "noMatch",
-      confidence: "low",
-      confidenceShare: 0,
-      objectScore,
-      createScore,
-      evidence: [],
-    };
+    return { kind: "parameters", reason: "noMatch", confidence: "low", confidenceShare: 0, scores, evidence: [] };
   }
-  const scoresTie = Math.abs(objectScore - createScore) < 1e-9;
-  if (scoresTie) {
+  const rankedScores = [...kindScores].sort((first, second) => second.score - first.score);
+  const winner = rankedScores[0];
+  const tiedForFirst = rankedScores.filter((kindScore) => Math.abs(kindScore.score - winner.score) < 1e-9);
+  const firstPlaceIsTied = tiedForFirst.length > 1;
+  if (firstPlaceIsTied) {
     return {
       kind: "parameters",
       reason: "tie",
       confidence: "low",
       confidenceShare: MEDIUM_CONFIDENCE_SHARE,
-      objectScore,
-      createScore,
-      evidence: listEvidenceWords([...objectMatches, ...createMatches]),
+      scores,
+      evidence: listEvidenceWords(tiedForFirst.flatMap((kindScore) => kindScore.matches)),
     };
   }
-  const objectWins = objectScore > createScore;
-  const confidenceShare = Math.max(objectScore, createScore) / totalScore;
+  const confidenceShare = winner.score / totalScore;
   return {
-    kind: objectWins ? "object" : "create",
+    kind: winner.kind,
     reason: "won",
     confidence: describeConfidence(confidenceShare),
     confidenceShare,
-    objectScore,
-    createScore,
-    evidence: listEvidenceWords(objectWins ? objectMatches : createMatches),
+    scores,
+    evidence: listEvidenceWords(winner.matches),
   };
-}
-
-/**
- * Detects whether an Object action deletes its object: any delete word (see
- * `DELETE_WORDS`) in its title or description, matched like the kind words.
- * @param title - The action's title
- * @param description - The action's description
- * @returns Whether it deletes, and the words that said so
- */
-export function detectDeletesObject(title: string, description: string): DeletesObjectDetection {
-  const deleteMatches = findTitleAndDescriptionMatches(title, description, DELETE_WORDS);
-  return { deletesObject: deleteMatches.length > 0, evidence: listEvidenceWords(deleteMatches) };
 }
 
 /**
@@ -549,29 +557,60 @@ function listRoleWarnings(role: Omit<ResolvedActionRole, "warnings">): string[] 
   const kindWasDetectedFromATie = role.kindSource === "detected" && role.detectedKind.reason === "tie";
   if (kindWasDetectedFromATie) {
     warnings.push(
-      `Check this: the object words and the create words tied (${role.detectedKind.evidence.join(", ")}), so it was set to Parameters`,
+      `Check this: the kind words tied (${role.detectedKind.evidence.join(", ")}), so it was set to Parameters`,
     );
   }
-  const kindNeedsAType = role.kind !== "parameters";
+  const kindNeedsAType = kindNeedsAnObjectType(role.kind);
   if (kindNeedsAType && role.objectTypeKey === null) {
     warnings.push("Pick the kind of object this action works on - none was detected");
   }
-  if (kindNeedsAType && role.objectTypeKey !== null && role.objectTypeName === null) {
+  const kindMayHaveAType = kindTakesAnObjectType(role.kind);
+  if (kindMayHaveAType && role.objectTypeKey !== null && role.objectTypeName === null) {
     warnings.push("The chosen kind of object is no longer found by the latest crawl; pick it again");
   }
   const typeIsUnsure = role.objectTypeSource === "detected" && role.detectedObjectType?.confidence === "low";
-  if (kindNeedsAType && typeIsUnsure) {
+  if (kindMayHaveAType && typeIsUnsure) {
     warnings.push("Check the kind of object - the detection is not sure");
   }
   return warnings;
 }
 
 /**
- * Works out what an action does with an object: its kind, the object type it
- * works on, and - for an Object action - whether it deletes it. The user's
- * choices always win; anything left on "detect" is detected from the title
- * and description (no LLM), and the object type also from the newest
- * version's addresses. A `parameters` action has no object type.
+ * Says whether a kind can have an object type: every kind but `parameters`.
+ * @param kind - The kind
+ * @returns True for the four object kinds
+ */
+export function kindTakesAnObjectType(kind: ActionKind): boolean {
+  return kind !== "parameters";
+}
+
+/**
+ * Says whether a kind must have an object type to do its job: Create (to
+ * record what it made), Update and Delete (to know what they act on). A Read
+ * action may have none.
+ * @param kind - The kind
+ * @returns True for `create`, `update`, and `delete`
+ */
+export function kindNeedsAnObjectType(kind: ActionKind): boolean {
+  return kind === "create" || kind === "update" || kind === "delete";
+}
+
+/**
+ * Says whether a kind acts on an EXISTING object, which every run must then
+ * name: Read, Update, and Delete (when they have an object type).
+ * @param kind - The kind
+ * @returns True for `read`, `update`, and `delete`
+ */
+export function kindActsOnAnExistingObject(kind: ActionKind): boolean {
+  return kind === "read" || kind === "update" || kind === "delete";
+}
+
+/**
+ * Works out what an action does with an object: its kind and the object type
+ * it works on. The user's choices always win; anything left on "detect" is
+ * detected from the title and description (no LLM), and the object type also
+ * from the newest version's addresses. A `parameters` action has no object
+ * type.
  * @param action - The action's text and the user's choices
  * @param candidates - The website's web objects
  * @param planUrls - The newest version's start URL and `goto` addresses (empty when it has none)
@@ -586,9 +625,8 @@ export function resolveActionObjectRole(
   const userKind = readActionKind(action.userActionKind);
   const kind = userKind ?? detectedKind.kind;
   const detectedObjectType = detectObjectType(action.title, action.description, candidates, planUrls);
-  const detectedDeletesObject = detectDeletesObject(action.title, action.description);
 
-  const kindTakesAType = kind !== "parameters";
+  const kindTakesAType = kindTakesAnObjectType(kind);
   const userObjectTypeKey = action.userObjectTypeKey;
   let objectTypeKey: string | null = null;
   let objectTypeName: string | null = null;
@@ -603,8 +641,6 @@ export function resolveActionObjectRole(
     objectTypeSource = "detected";
   }
 
-  const deletesObjectSource: "you" | "detected" = action.userDeletesObject === null ? "detected" : "you";
-  const deletesObject = kind === "object" && (action.userDeletesObject ?? detectedDeletesObject.deletesObject);
   const roleWithoutWarnings: Omit<ResolvedActionRole, "warnings"> = {
     kind,
     kindSource: userKind === null ? "detected" : "you",
@@ -613,9 +649,6 @@ export function resolveActionObjectRole(
     objectTypeName,
     objectTypeSource,
     detectedObjectType,
-    deletesObject,
-    deletesObjectSource,
-    detectedDeletesObject,
   };
   return { ...roleWithoutWarnings, warnings: listRoleWarnings(roleWithoutWarnings) };
 }

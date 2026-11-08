@@ -206,7 +206,13 @@ Things to know about the catalog:
   dialog, put `respondToNextDialog` with `accept` (or `dismiss`, if the use
   case cancels) right before the `click`. When it opens an in-page dialog
   instead (a `dialog` or `alertdialog` in the snapshot), `click` that
-  dialog's own button.
+  dialog's own confirming button, by the name the snapshot shows ("Delete",
+  "Yes, delete", "Remove"); when the dialog asks for the object's name to be
+  typed again, `fill` that field with the exact name first. Expect a
+  confirmation on almost every delete, even when the use case does not
+  mention one. Finish a delete with `expectHidden` on the object's name or
+  link, or `expectVisible` on the "deleted" message or empty state, so the
+  plan proves the object is gone.
 - **Navigation:** prefer clicking the link a user would click over `goto`.
   After a click that loads another page, `expectVisible` that page's heading
   or `waitForUrl` its address before acting on it.
@@ -284,6 +290,12 @@ was really on screen. Common causes:
 - **The browser was on the wrong page.** The failing page's address or
   heading shows an earlier step went somewhere else. Fix the step that led
   there, not just the step that failed.
+- **It stopped right after a Delete or Remove click, with the object still
+  there.** The site asked for a confirmation the plan did not give: an
+  in-page dialog whose button is in the failing page snapshot, a browser
+  confirm (add `respondToNextDialog` `accept` before the click), or a field
+  asking for the object's name. Add the confirming step, then keep the check
+  that the object is gone.
 - **It stopped before the first step.** Logging in or opening `startUrl`
   failed, before any step ran. Change `startUrl` only when the evidence shows
   it is wrong (for example, a "not found" page at that address). A failed

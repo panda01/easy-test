@@ -16,8 +16,14 @@ export const MAX_PARAMETER_LABEL_LENGTH = 100;
 /** The marker a value may never contain - it starts a credential placeholder. */
 const PLACEHOLDER_OPENING = "{{";
 
-/** What an action does with an object: only typed values, act on an existing one, or make a new one. */
-export type ActionKindRecord = "parameters" | "object" | "create";
+/** The four kinds that act on an object (the server's `CRUD_ACTION_KINDS`). */
+export type CrudActionKindRecord = "create" | "read" | "update" | "delete";
+
+/**
+ * What an action does with an object: the special `parameters` kind (login-style
+ * actions that only type values), or one of the four object kinds.
+ */
+export type ActionKindRecord = "parameters" | CrudActionKindRecord;
 
 /** How sure a detection is. */
 export type DetectionConfidenceRecord = "high" | "medium" | "low";
@@ -26,16 +32,14 @@ export type DetectionConfidenceRecord = "high" | "medium" | "low";
 export interface ActionKindDetectionRecord {
   /** The detected kind. */
   kind: ActionKindRecord;
-  /** One category won, the two tied, or nothing matched. */
+  /** One kind won, the top kinds tied, or nothing matched. */
   reason: "won" | "tie" | "noMatch";
   /** How sure it is. */
   confidence: DetectionConfidenceRecord;
   /** The winner's share of the score, 0 to 1. */
   confidenceShare: number;
-  /** The object words' score. */
-  objectScore: number;
-  /** The create words' score. */
-  createScore: number;
+  /** Each object kind's score. */
+  scores: Record<CrudActionKindRecord, number>;
   /** The words that decided it. */
   evidence: string[];
 }
@@ -70,12 +74,6 @@ export interface ActionObjectRoleRecord {
   objectTypeSource: "you" | "detected" | null;
   /** The type detection, or null when nothing matched. */
   detectedObjectType: ObjectTypeDetectionRecord | null;
-  /** True when an Object action deletes its object. */
-  deletesObject: boolean;
-  /** Whether the user chose it or it was detected. */
-  deletesObjectSource: "you" | "detected";
-  /** The delete detection. */
-  detectedDeletesObject: { deletesObject: boolean; evidence: string[] };
   /** Things to check, in plain words. */
   warnings: string[];
 }

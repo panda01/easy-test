@@ -309,10 +309,7 @@ export const MAX_OBJECT_TYPE_KEY_LENGTH = 500;
 export const MAX_PARAMETER_TEXT_LENGTH = 100;
 
 /** What an action body says about the action's object role (see `ActionInput`). */
-type ActionRoleChoices = Pick<
-  ActionInput,
-  "userActionKind" | "userObjectTypeKey" | "userNameParameterKey" | "userDeletesObject"
->;
+type ActionRoleChoices = Pick<ActionInput, "userActionKind" | "userObjectTypeKey" | "userNameParameterKey">;
 
 /**
  * Reads an optional text field of at most a given length; missing, null, or
@@ -344,13 +341,12 @@ function readOptionalLimitedText(
  * Reads the action's object role choices. Each is optional, and a missing or
  * null value means "detect" - so a PUT that leaves one out goes back to
  * detecting it:
- * - `userActionKind`: `parameters`, `object`, or `create` (`detect` is also
- *   accepted, as null);
+ * - `userActionKind`: `parameters`, `create`, `read`, `update`, or `delete`
+ *   (`detect` is also accepted, as null);
  * - `userObjectTypeKey`: a web object's key, text of at most
  *   `MAX_OBJECT_TYPE_KEY_LENGTH` characters;
  * - `userNameParameterKey`: a parameter key, text of at most
- *   `MAX_PARAMETER_TEXT_LENGTH` characters;
- * - `userDeletesObject`: true or false.
+ *   `MAX_PARAMETER_TEXT_LENGTH` characters.
  * @param body - The request body object
  * @returns The choices, or the first problem found
  */
@@ -373,19 +369,12 @@ function readActionRoleChoices(body: Record<string, unknown>): ValidationResult<
     "name parameter",
   );
   if (!nameParameterKey.isValid) return nameParameterKey;
-  const rawDeletesObject = body.userDeletesObject;
-  const deletesObjectIsDetect = rawDeletesObject === undefined || rawDeletesObject === null;
-  const deletesObjectIsABoolean = typeof rawDeletesObject === "boolean";
-  if (!deletesObjectIsDetect && !deletesObjectIsABoolean) {
-    return { isValid: false, errorMessage: "\"Deletes the object\" must be true, false, or null to detect it" };
-  }
   return {
     isValid: true,
     input: {
       userActionKind: userActionKind ?? null,
       userObjectTypeKey: objectTypeKey.input,
       userNameParameterKey: nameParameterKey.input,
-      userDeletesObject: deletesObjectIsABoolean ? rawDeletesObject : null,
     },
   };
 }
@@ -439,6 +428,8 @@ export const MAX_RUN_PARAMETER_VALUES = 100;
 export interface RunParameterValuesInput {
   /** The values to run with, by parameter key; a key left out keeps the version's own value. */
   parameterValues: Record<string, string>;
+  /** False when the user unticked "Clean up afterwards" for this run of a Create action; true otherwise (the default). */
+  cleanUpAfterwards: boolean;
 }
 
 /**
@@ -460,22 +451,30 @@ function findParameterValueProblem(value: string): string | null {
  * `MAX_RUN_PARAMETER_VALUES` text values, each at most
  * `MAX_PLAN_TEXT_LENGTH` characters and without `{{`. Whether each key is a
  * parameter of the version, and whether required ones are filled in, is
- * checked by the controller.
+ * checked by the controller. `cleanUpAfterwards` is optional too: missing or
+ * null means true (a Create action cleans up after the run), and anything
+ * but a boolean is refused.
  * @param body - The parsed request body, or undefined when none was sent
- * @returns The values, or the first problem found as a message
+ * @returns The values and the cleanup flag, or the first problem found as a message
  */
 export function validateRunParameterValuesInput(body: unknown): ValidationResult<RunParameterValuesInput> {
   const bodyWasLeftOut = body === undefined;
   if (bodyWasLeftOut) {
-    return { isValid: true, input: { parameterValues: {} } };
+    return { isValid: true, input: { parameterValues: {}, cleanUpAfterwards: true } };
   }
   if (!isJsonObject(body)) {
     return { isValid: false, errorMessage: "The request body must be a JSON object" };
   }
+  const rawCleanUpAfterwards = body.cleanUpAfterwards;
+  const cleanupFlagWasLeftOut = rawCleanUpAfterwards === undefined || rawCleanUpAfterwards === null;
+  if (!cleanupFlagWasLeftOut && typeof rawCleanUpAfterwards !== "boolean") {
+    return { isValid: false, errorMessage: "\"cleanUpAfterwards\" must be true or false" };
+  }
+  const cleanUpAfterwards = cleanupFlagWasLeftOut ? true : rawCleanUpAfterwards;
   const rawValues = body.parameterValues;
   const valuesWereLeftOut = rawValues === undefined || rawValues === null;
   if (valuesWereLeftOut) {
-    return { isValid: true, input: { parameterValues: {} } };
+    return { isValid: true, input: { parameterValues: {}, cleanUpAfterwards } };
   }
   if (!isJsonObject(rawValues)) {
     return { isValid: false, errorMessage: "The parameter values must be an object of text values, by key" };
@@ -495,7 +494,7 @@ export function validateRunParameterValuesInput(body: unknown): ValidationResult
     }
     parameterValues[parameterKey] = rawValue;
   }
-  return { isValid: true, input: { parameterValues } };
+  return { isValid: true, input: { parameterValues, cleanUpAfterwards } };
 }
 
 /** A parameter's user changes, as validated. */

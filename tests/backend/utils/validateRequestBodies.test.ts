@@ -416,7 +416,7 @@ describe("validateTitleDescriptionInput", () => {
 });
 
 /** What an action body leaves as "detect" when it names no object role choice. */
-const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null, userDeletesObject: null };
+const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null };
 
 describe("validateActionInput", () => {
   const CREDENTIAL_ID_INVALID_MESSAGE =
@@ -1066,7 +1066,6 @@ describe("validateActionInput: object role choices", () => {
         userActionKind: "create",
         userObjectTypeKey: " /projects/{project} ",
         userNameParameterKey: " projectName ",
-        userDeletesObject: false,
       }),
     ).toEqual({
       isValid: true,
@@ -1077,9 +1076,14 @@ describe("validateActionInput: object role choices", () => {
         userActionKind: "create",
         userObjectTypeKey: "/projects/{project}",
         userNameParameterKey: "projectName",
-        userDeletesObject: false,
       },
     });
+    for (const kind of ["parameters", "create", "read", "update", "delete"]) {
+      expect(validateActionInput({ ...BASE_ACTION, userActionKind: kind })).toMatchObject({
+        isValid: true,
+        input: { userActionKind: kind },
+      });
+    }
     expect(validateActionInput({ ...BASE_ACTION, userActionKind: "detect", userObjectTypeKey: "  " })).toMatchObject({
       isValid: true,
       input: DETECT_EVERY_ROLE_CHOICE,
@@ -1087,27 +1091,41 @@ describe("validateActionInput: object role choices", () => {
   });
 
   it.each([
-    [{ userActionKind: "destroy" }, "The action kind must be one of: detect, parameters, object, create"],
+    [{ userActionKind: "object" }, "The action kind must be one of: detect, parameters, create, read, update, delete"],
     [{ userObjectTypeKey: 5 }, "The object type must be text, or null"],
     [{ userObjectTypeKey: "k".repeat(MAX_OBJECT_TYPE_KEY_LENGTH + 1) }, "The object type must be at most 500 characters"],
     [{ userNameParameterKey: ["a"] }, "The name parameter must be text, or null"],
-    [{ userDeletesObject: "yes" }, '"Deletes the object" must be true, false, or null to detect it'],
   ])("refuses a bad choice (%j)", (badChoice, errorMessage) => {
     expect(validateActionInput({ ...BASE_ACTION, ...badChoice })).toEqual({ isValid: false, errorMessage });
   });
 });
 
 describe("validateRunParameterValuesInput", () => {
+  /** A run with the version's own values that cleans up afterwards (the default). */
+  const DEFAULT_RUN_INPUT = { parameterValues: {}, cleanUpAfterwards: true };
+
   it("treats no body, and no values, as running with the version's own values", () => {
-    expect(validateRunParameterValuesInput(undefined)).toEqual({ isValid: true, input: { parameterValues: {} } });
-    expect(validateRunParameterValuesInput({})).toEqual({ isValid: true, input: { parameterValues: {} } });
-    expect(validateRunParameterValuesInput({ parameterValues: null })).toEqual({ isValid: true, input: { parameterValues: {} } });
+    expect(validateRunParameterValuesInput(undefined)).toEqual({ isValid: true, input: DEFAULT_RUN_INPUT });
+    expect(validateRunParameterValuesInput({})).toEqual({ isValid: true, input: DEFAULT_RUN_INPUT });
+    expect(validateRunParameterValuesInput({ parameterValues: null })).toEqual({ isValid: true, input: DEFAULT_RUN_INPUT });
   });
 
   it("takes text values as typed - spaces and blanks included", () => {
     expect(validateRunParameterValuesInput({ parameterValues: { projectName: " Apollo 7 ", notes: "" } })).toEqual({
       isValid: true,
-      input: { parameterValues: { projectName: " Apollo 7 ", notes: "" } },
+      input: { parameterValues: { projectName: " Apollo 7 ", notes: "" }, cleanUpAfterwards: true },
+    });
+  });
+
+  it("reads the cleanup flag: left out or null means clean up, false turns it off, anything else is refused", () => {
+    expect(validateRunParameterValuesInput({ cleanUpAfterwards: null })).toEqual({ isValid: true, input: DEFAULT_RUN_INPUT });
+    expect(validateRunParameterValuesInput({ cleanUpAfterwards: false, parameterValues: { a: "b" } })).toEqual({
+      isValid: true,
+      input: { parameterValues: { a: "b" }, cleanUpAfterwards: false },
+    });
+    expect(validateRunParameterValuesInput({ cleanUpAfterwards: "yes" })).toEqual({
+      isValid: false,
+      errorMessage: '"cleanUpAfterwards" must be true or false',
     });
   });
 

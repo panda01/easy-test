@@ -11,6 +11,9 @@ const mockDbService = vi.hoisted(() => ({
   updateActionForWebsite: vi.fn(),
   softDeleteActionForWebsite: vi.fn(),
   findCredentialForWebsite: vi.fn(),
+  findActionCleanupForCreateAction: vi.fn(),
+  linkActionCleanup: vi.fn(),
+  listActionCleanupsForWebsite: vi.fn(),
 }));
 
 /** The parameter service is replaced: its own spec covers what it reads and syncs. */
@@ -19,10 +22,14 @@ const mockActionParameterService = vi.hoisted(() => ({
   syncActionParametersQuietly: vi.fn(),
 }));
 
+/** Claude's delete-action proposal is replaced: its own spec covers the call. */
+const mockDeleteActionGenerationService = vi.hoisted(() => ({ proposeDeleteAction: vi.fn() }));
+
 // The real dbService builds a PrismaClient at load time; this spec is about
 // the HTTP contract of the routes, so the whole service is replaced.
 vi.mock("../../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../../server/services/actionParameterService.js", () => mockActionParameterService);
+vi.mock("../../../server/services/deleteActionGenerationService.js", () => mockDeleteActionGenerationService);
 
 import { registerActionRoutes } from "../../../server/controllers/actions.js";
 
@@ -67,7 +74,6 @@ const DETECT_EVERY_ROLE_CHOICE = {
   userActionKind: null,
   userObjectTypeKey: null,
   userNameParameterKey: null,
-  userDeletesObject: null,
 };
 
 const ACTIONS_PATH = `/api/websites/${REQUESTED_WEBSITE_ID}/actions`;
@@ -116,6 +122,9 @@ describe("action routes", () => {
     mockActionParameterService.syncActionParametersQuietly.mockResolvedValue(undefined);
     // Every route checks the website first; it exists unless a test says not.
     mockDbService.findWebsiteById.mockResolvedValue(foundWebsite);
+    // No action is linked to another unless a test says so.
+    mockDbService.listActionCleanupsForWebsite.mockResolvedValue([]);
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue(null);
   });
 
   describe("GET /api/websites/:websiteId/actions", () => {
@@ -125,7 +134,7 @@ describe("action routes", () => {
       const res = await request(createActionsApp()).get(ACTIONS_PATH);
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual([sampleAction]);
+      expect(res.body).toEqual([{ ...sampleAction, deleteAction: null, createActions: [] }]);
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.listActionsForWebsite).toHaveBeenCalledWith(foundWebsite.id);
     });
@@ -161,7 +170,35 @@ describe("action routes", () => {
       const res = await request(createActionsApp()).get(ACTIONS_PATH);
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(actionsWithNewestScripts);
+      expect(res.body).toEqual(
+        actionsWithNewestScripts.map((action) => ({ ...action, deleteAction: null, createActions: [] })),
+      );
+    });
+
+    it("names each action's cleanup links from the website's links, read once", async () => {
+      const createAction = { ...sampleAction, id: "action-create", title: "Create a project" };
+      const deleteAction = { ...sampleAction, id: "action-delete", title: "Delete the project" };
+      mockDbService.listActionsForWebsite.mockResolvedValue([createAction, deleteAction, sampleAction]);
+      mockDbService.listActionCleanupsForWebsite.mockResolvedValue([
+        {
+          id: "cleanup-1",
+          createActionId: "action-create",
+          deleteActionId: "action-delete",
+          createAction: { id: "action-create", title: "Create a project" },
+          deleteAction: { id: "action-delete", title: "Delete the project" },
+        },
+      ]);
+
+      const res = await request(createActionsApp()).get(ACTIONS_PATH);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([
+        { ...createAction, deleteAction: { id: "action-delete", title: "Delete the project" }, createActions: [] },
+        { ...deleteAction, deleteAction: null, createActions: [{ id: "action-create", title: "Create a project" }] },
+        { ...sampleAction, deleteAction: null, createActions: [] },
+      ]);
+      expect(mockDbService.listActionCleanupsForWebsite).toHaveBeenCalledTimes(1);
+      expect(mockDbService.listActionCleanupsForWebsite).toHaveBeenCalledWith(foundWebsite.id);
     });
 
     it("returns 404 Website not found and lists nothing when the website does not exist or was deleted", async () => {
@@ -202,7 +239,7 @@ describe("action routes", () => {
         .send({ title: " Log in  ", description: "  Enter credentials and submit the form " });
 
       expect(res.status).toBe(201);
-      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE });
+      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE, deleteAction: null, createActions: [] });
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.createActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, {
         title: "Log in",
@@ -226,7 +263,7 @@ describe("action routes", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body).toEqual({ ...sampleLinkedAction, objectRole: SAMPLE_OBJECT_ROLE });
+      expect(res.body).toEqual({ ...sampleLinkedAction, objectRole: SAMPLE_OBJECT_ROLE, deleteAction: null, createActions: [] });
       expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         foundCredential.id,
@@ -349,7 +386,7 @@ describe("action routes", () => {
       const res = await request(createActionsApp()).get(ACTION_PATH);
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE });
+      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE, deleteAction: null, createActions: [] });
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.findActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
@@ -396,7 +433,7 @@ describe("action routes", () => {
         .send({ title: "  Log out", description: "Open the menu and log out  " });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ...updatedAction, objectRole: SAMPLE_OBJECT_ROLE });
+      expect(res.body).toEqual({ ...updatedAction, objectRole: SAMPLE_OBJECT_ROLE, deleteAction: null, createActions: [] });
       expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
@@ -414,7 +451,7 @@ describe("action routes", () => {
         .send({ title: "Log in", description: "Enter credentials", credentialId: foundCredential.id });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ...sampleLinkedAction, objectRole: SAMPLE_OBJECT_ROLE });
+      expect(res.body).toEqual({ ...sampleLinkedAction, objectRole: SAMPLE_OBJECT_ROLE, deleteAction: null, createActions: [] });
       expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         foundCredential.id,
@@ -434,7 +471,7 @@ describe("action routes", () => {
         .send({ title: "Log in", description: "Enter credentials" });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE });
+      expect(res.body).toEqual({ ...sampleAction, objectRole: SAMPLE_OBJECT_ROLE, deleteAction: null, createActions: [] });
       expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
       expect(mockDbService.updateActionForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
@@ -570,7 +607,6 @@ describe("action routes", () => {
         userActionKind: "create",
         userObjectTypeKey: "/projects/{project}",
         userNameParameterKey: "projectName",
-        userDeletesObject: null,
       });
 
       expect(res.status).toBe(201);
@@ -581,7 +617,6 @@ describe("action routes", () => {
         userActionKind: "create",
         userObjectTypeKey: "/projects/{project}",
         userNameParameterKey: "projectName",
-        userDeletesObject: null,
       });
       expect(mockActionParameterService.loadActionRole).toHaveBeenCalledWith(foundWebsite.id, sampleAction);
     });
@@ -592,7 +627,7 @@ describe("action routes", () => {
         .send({ title: "Log in", description: "Enter credentials", userActionKind: "destroy" });
 
       expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: "The action kind must be one of: detect, parameters, object, create" });
+      expect(res.body).toEqual({ error: "The action kind must be one of: detect, parameters, create, read, update, delete" });
       expect(mockDbService.updateActionForWebsite).not.toHaveBeenCalled();
     });
 
@@ -612,6 +647,176 @@ describe("action routes", () => {
 
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: "web objects unavailable" });
+    });
+  });
+});
+
+describe("delete-action routes", () => {
+  const PROPOSAL_PATH = `${ACTION_PATH}/delete-action/proposal`;
+  const DELETE_ACTION_PATH = `${ACTION_PATH}/delete-action`;
+  const NOT_A_CREATE_ACTION_MESSAGE = "Only a Create action gets a delete action; this action's kind is not Create";
+  const ALREADY_LINKED_MESSAGE = "This action already has a delete action";
+
+  /** The found action's role: a Create action that makes Projects. */
+  const createRole = {
+    ...SAMPLE_OBJECT_ROLE,
+    kind: "create",
+    objectTypeKey: "/projects/{project}",
+    objectTypeName: "Project",
+  };
+  /** The Create action, found under the path's id. */
+  const sampleCreateAction = {
+    ...sampleAction,
+    id: "action-create",
+    title: "Create a project",
+    description: "Adds a project called Apollo 7",
+  };
+  /** What Claude proposes. */
+  const proposal = { title: "Delete the project Apollo 7", description: "Open Projects…", modelId: "claude-opus-5-5" };
+  /** The Delete action the create route saves. */
+  const createdDeleteAction = { ...sampleAction, id: "action-delete", title: proposal.title, description: proposal.description };
+  /** The link the create route writes. */
+  const link = {
+    id: "cleanup-1",
+    createActionId: "action-create",
+    deleteActionId: "action-delete",
+    createAction: { id: "action-create", title: "Create a project" },
+    deleteAction: { id: "action-delete", title: proposal.title },
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockDbService.findWebsiteById.mockResolvedValue(foundWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(sampleCreateAction);
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue(null);
+    mockDbService.listActionCleanupsForWebsite.mockResolvedValue([]);
+    mockActionParameterService.loadActionRole.mockResolvedValue(createRole);
+    mockActionParameterService.syncActionParametersQuietly.mockResolvedValue(undefined);
+    mockDeleteActionGenerationService.proposeDeleteAction.mockResolvedValue(proposal);
+  });
+
+  describe("POST .../delete-action/proposal", () => {
+    it("answers Claude's proposal for a Create action, built from the website, the action, its type, and its credential's name", async () => {
+      const res = await request(createActionsApp()).post(PROPOSAL_PATH);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(proposal);
+      expect(mockDbService.findActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, "action-1");
+      expect(mockDeleteActionGenerationService.proposeDeleteAction).toHaveBeenCalledWith({
+        websiteName: foundWebsite.name,
+        createTitle: "Create a project",
+        createDescription: "Adds a project called Apollo 7",
+        objectTypeName: "Project",
+        credentialName: null,
+      });
+    });
+
+    it("refuses an action whose kind is not Create, asking Claude nothing", async () => {
+      mockActionParameterService.loadActionRole.mockResolvedValue(SAMPLE_OBJECT_ROLE);
+
+      const res = await request(createActionsApp()).post(PROPOSAL_PATH);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: NOT_A_CREATE_ACTION_MESSAGE });
+      expect(mockDeleteActionGenerationService.proposeDeleteAction).not.toHaveBeenCalled();
+    });
+
+    it("refuses a Create action that already has a delete action", async () => {
+      mockDbService.findActionCleanupForCreateAction.mockResolvedValue(link);
+
+      const res = await request(createActionsApp()).post(PROPOSAL_PATH);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: ALREADY_LINKED_MESSAGE });
+    });
+
+    it("answers 404 for a missing website or action", async () => {
+      mockDbService.findActionForWebsite.mockResolvedValue(null);
+      expect((await request(createActionsApp()).post(PROPOSAL_PATH)).status).toBe(404);
+
+      mockDbService.findWebsiteById.mockResolvedValue(null);
+      expect((await request(createActionsApp()).post(PROPOSAL_PATH)).status).toBe(404);
+    });
+
+    it("maps Claude's known failures to their statuses, and anything else to 500", async () => {
+      mockDeleteActionGenerationService.proposeDeleteAction.mockRejectedValue(
+        Object.assign(new Error("Claude declined to write the delete action (harmful)"), {
+          name: "ScriptGenerationError",
+          reason: "refused",
+        }),
+      );
+      const refused = await request(createActionsApp()).post(PROPOSAL_PATH);
+      expect(refused.status).toBe(502);
+      expect(refused.body).toEqual({ error: "Claude declined to write the delete action (harmful)" });
+
+      mockDeleteActionGenerationService.proposeDeleteAction.mockRejectedValue(new Error("network down"));
+      const failed = await request(createActionsApp()).post(PROPOSAL_PATH);
+      expect(failed.status).toBe(500);
+      expect(failed.body).toEqual({ error: "network down" });
+    });
+  });
+
+  describe("POST .../delete-action", () => {
+    it("creates the Delete action with the Create action's credential and type, links the two, syncs it, and answers 201 naming the Create action", async () => {
+      mockDbService.createActionForWebsite.mockResolvedValue(createdDeleteAction);
+      mockDbService.linkActionCleanup.mockResolvedValue(link);
+      mockDbService.listActionCleanupsForWebsite.mockResolvedValue([link]);
+
+      const res = await request(createActionsApp())
+        .post(DELETE_ACTION_PATH)
+        .send({ title: ` ${proposal.title} `, description: proposal.description });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual({
+        ...createdDeleteAction,
+        objectRole: createRole,
+        deleteAction: null,
+        createActions: [{ id: "action-create", title: "Create a project" }],
+      });
+      expect(mockDbService.createActionForWebsite).toHaveBeenCalledWith(foundWebsite.id, {
+        title: proposal.title,
+        description: proposal.description,
+        credentialId: null,
+        userActionKind: "delete",
+        userObjectTypeKey: "/projects/{project}",
+        userNameParameterKey: null,
+      });
+      expect(mockDbService.linkActionCleanup).toHaveBeenCalledWith(foundWebsite.id, "action-create", "action-delete");
+      expect(mockActionParameterService.syncActionParametersQuietly).toHaveBeenCalledWith(foundWebsite.id, createdDeleteAction);
+    });
+
+    it("refuses an invalid body before touching anything", async () => {
+      const res = await request(createActionsApp()).post(DELETE_ACTION_PATH).send({ title: "  ", description: "x" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "A title is required" });
+      expect(mockDbService.findWebsiteById).not.toHaveBeenCalled();
+    });
+
+    it("refuses a non-Create action and an already linked one, creating nothing", async () => {
+      mockActionParameterService.loadActionRole.mockResolvedValue(SAMPLE_OBJECT_ROLE);
+      const notCreate = await request(createActionsApp()).post(DELETE_ACTION_PATH).send({ title: "T", description: "D" });
+      expect(notCreate.status).toBe(409);
+      expect(notCreate.body).toEqual({ error: NOT_A_CREATE_ACTION_MESSAGE });
+
+      mockActionParameterService.loadActionRole.mockResolvedValue(createRole);
+      mockDbService.findActionCleanupForCreateAction.mockResolvedValue(link);
+      const linked = await request(createActionsApp()).post(DELETE_ACTION_PATH).send({ title: "T", description: "D" });
+      expect(linked.status).toBe(409);
+      expect(linked.body).toEqual({ error: ALREADY_LINKED_MESSAGE });
+
+      expect(mockDbService.createActionForWebsite).not.toHaveBeenCalled();
+      expect(mockDbService.linkActionCleanup).not.toHaveBeenCalled();
+    });
+
+    it("answers 500 when the link cannot be written", async () => {
+      mockDbService.createActionForWebsite.mockResolvedValue(createdDeleteAction);
+      mockDbService.linkActionCleanup.mockRejectedValue(new Error("db down"));
+
+      const res = await request(createActionsApp()).post(DELETE_ACTION_PATH).send({ title: "T", description: "D" });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "db down" });
     });
   });
 });

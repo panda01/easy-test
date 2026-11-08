@@ -47,10 +47,12 @@ export interface WebsiteItemRecord {
   userObjectTypeKey?: string | null;
   /** Actions only: the parameter the user says names a created object, or null to detect it. */
   userNameParameterKey?: string | null;
-  /** Actions only: the user's "deletes the object" choice, or null to detect it. */
-  userDeletesObject?: boolean | null;
   /** A single action only: what it does with an object, with the detections. Undefined on use cases and in the action list. */
   objectRole?: ActionObjectRoleRecord;
+  /** Actions only: the Delete action that cleans up after this (Create) action, or null when it has none. Undefined on use cases. */
+  deleteAction?: LinkedActionRecord | null;
+  /** Actions only: the Create actions this (Delete) action cleans up after; empty when none. Undefined on use cases. */
+  createActions?: LinkedActionRecord[];
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -68,8 +70,14 @@ export interface WebsiteItemRequestBody {
   userObjectTypeKey?: string | null;
   /** Actions only: the parameter that names a created object, or null to detect it. */
   userNameParameterKey?: string | null;
-  /** Actions only: whether an Object action deletes its object, or null to detect it. */
-  userDeletesObject?: boolean | null;
+}
+
+/** Another action an action is linked to through a cleanup link: just enough to name and open it. */
+export interface LinkedActionRecord {
+  /** The linked action's cuid. */
+  id: string;
+  /** Its title. */
+  title: string;
 }
 
 /**

@@ -2,18 +2,21 @@ import { describe, it, expect } from "vitest";
 import {
   describeConfidence,
   detectActionKind,
-  detectDeletesObject,
   detectObjectType,
   findWordMatches,
   isOneTypoApart,
+  kindActsOnAnExistingObject,
+  kindNeedsAnObjectType,
+  kindTakesAnObjectType,
   readActionKind,
   resolveActionObjectRole,
   scoreWordMatch,
   splitIntoWords,
   stemWord,
   sumWordMatches,
+  ACTION_KINDS,
   CREATE_WORDS,
-  OBJECT_WORDS,
+  READ_WORDS,
   type ObjectTypeCandidate,
 } from "../../../server/utils/scoreActionObjectRole.js";
 
@@ -61,7 +64,7 @@ describe("word matching", () => {
   });
 
   it("matches two-word phrases as phrases and skips stop words", () => {
-    const matches = findWordMatches("Go to the page and sign up", [...OBJECT_WORDS, ...CREATE_WORDS], true);
+    const matches = findWordMatches("Go to the page and sign up", [...READ_WORDS, ...CREATE_WORDS], true);
     expect(matches.map((match) => [match.word, match.listWord])).toEqual([
       ["go to", "go to"],
       ["sign up", "sign up"],
@@ -79,34 +82,43 @@ describe("word matching", () => {
 describe("detectActionKind", () => {
   it.each([
     ["Create a school", "Adds a new school", "create", "high"],
-    ["Open a project", "", "object", "high"],
+    ["Open a project", "", "read", "high"],
+    ["Rename a project", "", "update", "high"],
+    ["Delete a project", "Removes it", "delete", "high"],
     ["Craete a projct", "", "create", "high"],
   ] as const)("detects %s / %s as %s (%s)", (title, description, kind, confidence) => {
     expect(detectActionKind(title, description)).toMatchObject({ kind, reason: "won", confidence });
   });
 
-  it("scores the title twice and stems the description: Rename a project is Object, High (76%)", () => {
+  it("scores the title twice and stems the description, scoring every object kind", () => {
     const detection = detectActionKind("Rename a project", "Opens the project and creates a label");
 
-    expect(detection).toMatchObject({ kind: "object", confidence: "high", objectScore: 2.9, createScore: 0.9 });
-    expect(detection.confidenceShare).toBeCloseTo(2.9 / 3.8);
-    expect(detection.evidence).toEqual(["rename", "opens"]);
+    expect(detection).toMatchObject({
+      kind: "update",
+      confidence: "medium",
+      scores: { create: 0.9, read: 0.9, update: 2, delete: 0 },
+    });
+    expect(detection.confidenceShare).toBeCloseTo(2 / 3.8);
+    expect(detection.evidence).toEqual(["rename"]);
   });
 
-  it("calls a tie Parameters, with both sides' words", () => {
+  it("calls a tie for first place Parameters, with the tied kinds' words", () => {
     expect(detectActionKind("Project labels", "Add or remove labels")).toEqual({
       kind: "parameters",
       reason: "tie",
       confidence: "low",
       confidenceShare: 0.5,
-      objectScore: 1,
-      createScore: 1,
-      evidence: ["remove", "add"],
+      scores: { create: 1, read: 0, update: 0, delete: 1 },
+      evidence: ["add", "remove"],
     });
   });
 
-  it("calls no match at all Parameters", () => {
-    expect(detectActionKind("Check the footer", "")).toMatchObject({ kind: "parameters", reason: "noMatch", evidence: [] });
+  it("calls no match at all Parameters - so a login-style action stays Parameters", () => {
+    expect(detectActionKind("Log in", "Sign in with the admin account")).toMatchObject({
+      kind: "parameters",
+      reason: "noMatch",
+      evidence: [],
+    });
   });
 
   it("says Medium when the winner's share is below High", () => {
@@ -117,10 +129,15 @@ describe("detectActionKind", () => {
   });
 });
 
-describe("detectDeletesObject", () => {
-  it("finds the delete words", () => {
-    expect(detectDeletesObject("Delete a project", "Removes it")).toEqual({ deletesObject: true, evidence: ["delete", "removes"] });
-    expect(detectDeletesObject("Open a project", "")).toEqual({ deletesObject: false, evidence: [] });
+describe("the kind predicates", () => {
+  it("lists Parameters first, then the four object kinds", () => {
+    expect(ACTION_KINDS).toEqual(["parameters", "create", "read", "update", "delete"]);
+  });
+
+  it("say which kinds take, need, and act on an existing object", () => {
+    expect(ACTION_KINDS.filter(kindTakesAnObjectType)).toEqual(["create", "read", "update", "delete"]);
+    expect(ACTION_KINDS.filter(kindNeedsAnObjectType)).toEqual(["create", "update", "delete"]);
+    expect(ACTION_KINDS.filter(kindActsOnAnExistingObject)).toEqual(["read", "update", "delete"]);
   });
 });
 
@@ -162,7 +179,7 @@ describe("detectObjectType", () => {
 
 describe("resolveActionObjectRole", () => {
   /** An action left on "detect" for everything. */
-  const detectEverything = { userActionKind: null, userObjectTypeKey: null, userDeletesObject: null };
+  const detectEverything = { userActionKind: null, userObjectTypeKey: null };
 
   it("detects every choice left on detect", () => {
     const role = resolveActionObjectRole(
@@ -171,13 +188,11 @@ describe("resolveActionObjectRole", () => {
       [],
     );
     expect(role).toMatchObject({
-      kind: "object",
+      kind: "delete",
       kindSource: "detected",
       objectTypeKey: "/projects/{project}",
       objectTypeName: "Project",
       objectTypeSource: "detected",
-      deletesObject: true,
-      deletesObjectSource: "detected",
       warnings: [],
     });
   });
@@ -187,38 +202,44 @@ describe("resolveActionObjectRole", () => {
       {
         title: "Delete a project",
         description: "",
-        userActionKind: "object",
+        userActionKind: "update",
         userObjectTypeKey: "/gone/{gone}",
-        userDeletesObject: false,
       },
       CANDIDATES,
       [],
     );
     expect(role).toMatchObject({
-      kind: "object",
+      kind: "update",
       kindSource: "you",
       objectTypeKey: "/gone/{gone}",
       objectTypeName: null,
       objectTypeSource: "you",
-      deletesObject: false,
-      deletesObjectSource: "you",
     });
     expect(role.warnings).toEqual(["The chosen kind of object is no longer found by the latest crawl; pick it again"]);
   });
 
-  it("gives a Parameters action no type and never deletes", () => {
+  it("gives a Parameters action no type", () => {
     const role = resolveActionObjectRole(
-      { title: "Delete a project", description: "", userActionKind: "parameters", userObjectTypeKey: "/projects/{project}", userDeletesObject: true },
+      { title: "Delete a project", description: "", userActionKind: "parameters", userObjectTypeKey: "/projects/{project}" },
       CANDIDATES,
       [],
     );
-    expect(role).toMatchObject({ kind: "parameters", objectTypeKey: null, objectTypeSource: null, deletesObject: false });
+    expect(role).toMatchObject({ kind: "parameters", objectTypeKey: null, objectTypeSource: null, warnings: [] });
+  });
+
+  it("lets a Read action go without a type, but warns a Create, Update, or Delete action", () => {
+    expect(resolveActionObjectRole({ title: "Open the dashboard", description: "", ...detectEverything }, CANDIDATES, []).warnings).toEqual([]);
+    for (const userActionKind of ["create", "update", "delete"]) {
+      expect(
+        resolveActionObjectRole({ title: "Do the widget", description: "", userActionKind, userObjectTypeKey: null }, CANDIDATES, []).warnings,
+      ).toEqual(["Pick the kind of object this action works on - none was detected"]);
+    }
   });
 
   it("warns about a tie, a missing type, and an unsure type", () => {
     expect(
       resolveActionObjectRole({ title: "Project labels", description: "Add or remove labels", ...detectEverything }, CANDIDATES, []).warnings,
-    ).toEqual(["Check this: the object words and the create words tied (remove, add), so it was set to Parameters"]);
+    ).toEqual(["Check this: the kind words tied (add, remove), so it was set to Parameters"]);
     expect(resolveActionObjectRole({ title: "Create a widget", description: "", ...detectEverything }, CANDIDATES, []).warnings).toEqual([
       "Pick the kind of object this action works on - none was detected",
     ]);

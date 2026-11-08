@@ -18,7 +18,7 @@ import {
   type FormField,
 } from "./formFields.js";
 import { readAriaSnapshotOutline } from "./readAriaSnapshotFields.js";
-import type { ActionKind } from "./scoreActionObjectRole.js";
+import { type ActionKind, kindActsOnAnExistingObject } from "./scoreActionObjectRole.js";
 
 /** One crawled page, as detection reads it: its address, aria snapshot, and form fields. */
 export interface DetectionPage {
@@ -388,7 +388,7 @@ export function detectActionParameters(input: ParameterDetectionInput): Detected
 
   const { role } = input;
   const objectRows: DetectedParameter[] =
-    role.kind === "object" && role.objectTypeKey !== null
+    kindActsOnAnExistingObject(role.kind) && role.objectTypeKey !== null
       ? [
           {
             key: OBJECT_PARAMETER_KEY,

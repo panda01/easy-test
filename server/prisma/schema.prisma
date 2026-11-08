@@ -40,7 +40,8 @@ generator client {
 /// timestamp on the website's active use cases, actions, screenshot runs,
 /// action scripts, action script runs, action script refinements, crawl runs,
 /// crawled pages, credentials, web objects, page patterns, action parameters,
-/// and created objects) instead of removing the row. Every dbService query filters `deletedAt: null`.
+/// action cleanups, and created objects) instead of removing the row. Every
+/// dbService query filters `deletedAt: null`.
 ///
 /// Two per-website settings control WHEN the Playwright controller takes a
 /// screenshot, after the page's `load` event:
@@ -82,6 +83,7 @@ model Website {
   actionParameters        ActionParameter[]
   createdObjects          CreatedObject[]
   autoRefineJobs          AutoRefineJob[]
+  actionCleanups          ActionCleanup[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -120,15 +122,23 @@ model UseCase {
 /// action does with an object. Each is null for "detect" - worked out on read
 /// from the title and description (`resolveActionObjectRole`), so it follows
 /// edits to them:
-/// - `userActionKind`: `parameters` (only typed values), `object` (acts on an
-///   existing object, which is then always required), or `create` (makes a
-///   new object, recorded as a `CreatedObject`).
+/// - `userActionKind`: `parameters` (the special kind for login-style actions
+///   that only type values and touch no object), or one of the four object
+///   kinds: `create` (makes a new object, recorded as a `CreatedObject`),
+///   `read` (opens or checks an existing object), `update` (changes one), or
+///   `delete` (deletes one; a passed run marks the `CreatedObject` it ran on
+///   as deleted on the site). Read, Update and Delete runs name the object
+///   they act on through the `object` parameter.
 /// - `userObjectTypeKey`: the web object (its `instancePatternKey`) the
 ///   action acts on or creates.
 /// - `userNameParameterKey`: the parameter that names a created object.
-/// - `userDeletesObject`: true when an `object` action deletes its object.
 /// `parametersSyncedAt` is when the action's `ActionParameter` rows were last
 /// synced; null means never, so the first read syncs them.
+///
+/// CLEANUP: a Create action is linked to the Delete action that cleans up
+/// after it through `ActionCleanup` (`cleanupsAsCreate`, at most one active
+/// row); the Delete action sees the link from the other side
+/// (`cleanupsAsDelete`). Deleting either action soft deletes the link.
 model Action {
   id                   String                   @id @default(cuid())
   websiteId            String
@@ -138,7 +148,6 @@ model Action {
   userActionKind       String?
   userObjectTypeKey    String?
   userNameParameterKey String?
-  userDeletesObject    Boolean?
   parametersSyncedAt   DateTime?
   createdAt            DateTime                 @default(now())
   updatedAt            DateTime                 @updatedAt
@@ -151,10 +160,42 @@ model Action {
   parameters           ActionParameter[]
   createdObjects       CreatedObject[]
   autoRefineJobs       AutoRefineJob[]
+  cleanupsAsCreate     ActionCleanup[]          @relation("CleanupCreateAction")
+  cleanupsAsDelete     ActionCleanup[]          @relation("CleanupDeleteAction")
 
   @@index([websiteId])
   @@index([credentialId])
   @@map("actions")
+}
+
+/// The link between a Create action and the Delete action that cleans up
+/// after it: after a run of the Create action records the object it made,
+/// the Delete action's newest version is run on that object (see
+/// `ActionScriptRun.cleanupOutcome`). Belongs to one website (denormalized
+/// for the cascades).
+///
+/// Written when the user accepts the Delete action proposed for a new Create
+/// action (or adds one later). A Create action has at most ONE active link
+/// (partial unique index on `createActionId`), but the table shape lets one
+/// Delete action serve several Create actions. Soft deleted together with
+/// either action or the website (same `deletedAt`); a Create action whose
+/// link was deleted has no cleanup again, and its runs fail until it gets one.
+model ActionCleanup {
+  id             String    @id @default(cuid())
+  websiteId      String
+  createActionId String
+  deleteActionId String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+  website        Website   @relation(fields: [websiteId], references: [id])
+  createAction   Action    @relation("CleanupCreateAction", fields: [createActionId], references: [id])
+  deleteAction   Action    @relation("CleanupDeleteAction", fields: [deleteActionId], references: [id])
+
+  @@unique([createActionId], where: { deletedAt: null })
+  @@index([websiteId])
+  @@index([deleteActionId])
+  @@map("action_cleanups")
 }
 
 /// One visit the Playwright controller made to a website: a headless browser
@@ -299,6 +340,22 @@ model ActionScript {
 /// `confirmStepSucceeded` whether it ran without an error showing (null when
 /// the run never reached it). A `CreatedObject` is recorded exactly when it
 /// is true - see `createdObject`.
+///
+/// CLEANUP (Create actions only; every field null for other kinds): after
+/// the object is recorded, the linked Delete action's newest version is run
+/// on it, and that run is an ordinary run of the Delete action named here by
+/// `cleanupActionScriptRunId` (`cleanupRun`; the Delete run sees the Create
+/// run as `cleanedUpRun`). `cleanupOutcome` says what happened:
+/// - `passed` / `failed`: the Delete run passed or failed;
+/// - `off`: the user unticked "Clean up afterwards" for this run;
+/// - `notReached`: no object was recorded, so there was nothing to clean up;
+/// - `missing`: the action has no Delete action, or that has no version yet.
+/// `cleanupErrorMessage` is the Delete run's error, or why the cleanup could
+/// not start. A run whose outcome is `failed` or `missing` has
+/// `succeeded: false` even when its own steps passed, and its
+/// `errorMessage` then starts with "Cleanup". These three columns are the ONE
+/// exception to runs being create-only: they are written once, right after
+/// the run row exists, because the cleanup needs the recorded object.
 model ActionScriptRun {
   id                        String                   @id @default(cuid())
   websiteId                 String
@@ -319,6 +376,9 @@ model ActionScriptRun {
   finalPageUrl              String?
   confirmStepNumber         Int?
   confirmStepSucceeded      Boolean?
+  cleanupOutcome            String?
+  cleanupActionScriptRunId  String?                  @unique
+  cleanupErrorMessage       String?
   createdAt                 DateTime                 @default(now())
   updatedAt                 DateTime                 @updatedAt
   deletedAt                 DateTime?
@@ -328,6 +388,8 @@ model ActionScriptRun {
   refinements               ActionScriptRefinement[]
   createdObject             CreatedObject?           @relation("CreatedObjectRun")
   deletedObjects            CreatedObject[]          @relation("CreatedObjectDeletingRun")
+  cleanupRun                ActionScriptRun?         @relation("RunCleanup", fields: [cleanupActionScriptRunId], references: [id])
+  cleanedUpRun              ActionScriptRun?         @relation("RunCleanup")
 
   @@index([websiteId])
   @@index([actionId])
@@ -484,8 +546,11 @@ model CrawlRun {
 /// with `status: "running"`, updated after every step, and finished when the
 /// loop ends. `status` is one of:
 /// - `running`: still going; `phase` says what it is doing right now -
-///   `running` (a run of `currentActionScriptId` is in progress) or
-///   `refining` (Claude is refining that version).
+///   `running` (a run of `currentActionScriptId` is in progress),
+///   `refining` (Claude is refining that version), `refiningCleanup`
+///   (Claude is refining the Delete action's version after a cleanup
+///   failed), or `runningCleanup` (that refined Delete version is being run
+///   on its own, on the object the failed cleanup left behind).
 /// - `passed`: a run passed; `currentActionScriptId` is the version that
 ///   passed.
 /// - `gaveUp`: `maxRefinements` refinements were made and the last version's
@@ -512,27 +577,37 @@ model CrawlRun {
 /// first, and `actionScriptRunIds` the runs it recorded, oldest first - the
 /// page follows them to show each new version and run as it appears.
 /// `finishedAt` is null while the job runs.
+///
+/// CLEANUP (Create actions): when a run's own steps passed but its cleanup
+/// (the Delete action's run) failed, the job refines the DELETE action's
+/// version from that failed run and runs the refined Delete version alone,
+/// repeating until a Delete run passes; only then does it run the Create
+/// action again. Those Delete versions and runs are listed in
+/// `cleanupActionScriptIds` and `cleanupActionScriptRunIds`, oldest first,
+/// and the refinements count toward `refinementsDone`.
 model AutoRefineJob {
-  id                     String    @id @default(cuid())
-  websiteId              String
-  actionId               String
-  startActionScriptId    String
-  currentActionScriptId  String
-  status                 String
-  phase                  String?
-  refinementsDone        Int       @default(0)
-  maxRefinements         Int
-  parameterValues        Json      @default("{}")
-  createdActionScriptIds String[]  @default([])
-  actionScriptRunIds     String[]  @default([])
-  stopRequestedAt        DateTime?
-  errorMessage           String?
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
-  finishedAt             DateTime?
-  deletedAt              DateTime?
-  website                Website   @relation(fields: [websiteId], references: [id])
-  action                 Action    @relation(fields: [actionId], references: [id])
+  id                        String    @id @default(cuid())
+  websiteId                 String
+  actionId                  String
+  startActionScriptId       String
+  currentActionScriptId     String
+  status                    String
+  phase                     String?
+  refinementsDone           Int       @default(0)
+  maxRefinements            Int
+  parameterValues           Json      @default("{}")
+  createdActionScriptIds    String[]  @default([])
+  actionScriptRunIds        String[]  @default([])
+  cleanupActionScriptIds    String[]  @default([])
+  cleanupActionScriptRunIds String[]  @default([])
+  stopRequestedAt           DateTime?
+  errorMessage              String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  finishedAt                DateTime?
+  deletedAt                 DateTime?
+  website                   Website   @relation(fields: [websiteId], references: [id])
+  action                    Action    @relation(fields: [actionId], references: [id])
 
   @@index([websiteId])
   @@index([actionId])

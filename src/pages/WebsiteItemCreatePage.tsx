@@ -1,6 +1,7 @@
-import { type ReactElement } from "react";
+import { type ReactElement, useState } from "react";
 import Container from "@mui/material/Container";
 import Typography from "@mui/material/Typography";
+import DeleteActionStep from "../components/DeleteActionStep";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import TitleDescriptionForm from "../components/TitleDescriptionForm";
@@ -26,8 +27,7 @@ const EMPTY_ITEM_VALUES: WebsiteItemRequestBody = { title: "", description: "" }
  * The create page for a use case or an action
  * (`/websites/:websiteId/<use-cases|actions>/new`). An action's form also
  * asks which of the website's credentials it logs in as (or none), and what
- * it does with an object (Kind, Object type, Deletes the object - each on
- * "Detect" to start).
+ * it does with an object (Kind and Object type - each on "Detect" to start).
  *
  * Loads the owning website first - for the breadcrumb, and so a deleted or
  * unknown website shows "Website not found" instead of a form that cannot be
@@ -35,6 +35,11 @@ const EMPTY_ITEM_VALUES: WebsiteItemRequestBody = { title: "", description: "" }
  * Cancel returns to the website history-aware (see `useReturnNavigation`).
  * Its "Create use case" / "Create action" button carries a plus, like every
  * button that creates something.
+ *
+ * STEP 2: when the saved action's kind is Create, the page does not leave
+ * yet - it shows `DeleteActionStep`, Claude's proposed Delete action for the
+ * user to correct and save (or skip), and moves on to the Create action's
+ * page once that is done.
  * @param props - Which kind of item to create
  * @returns The rendered create page
  */
@@ -58,6 +63,8 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
     key: webObject.instancePatternKey,
     name: webObject.name ?? webObject.detectedName,
   }));
+  // Step 2 of a Create action: the Create action just saved, while its Delete action is proposed.
+  const [createdCreateAction, setCreatedCreateAction] = useState<WebsiteItemRecord | null>(null);
 
   /**
    * POSTs the new item and, when the server accepts it, moves on to the
@@ -69,7 +76,18 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
     const result = await sendJsonRequest("POST", websiteItemsApiUrl(itemKind, websiteId), values);
     if (!result.succeeded) return;
     const createdItem = result.data as WebsiteItemRecord;
+    const itemIsACreateAction = itemTakesACredential && createdItem.objectRole?.kind === "create";
+    if (itemIsACreateAction) {
+      setCreatedCreateAction(createdItem);
+      return;
+    }
     replaceKeepingReturnState(websiteItemDetailPath(itemKind, websiteId, createdItem.id));
+  };
+
+  /** Moves on to the saved Create action's page, with or without a Delete action. */
+  const finishCreateActionStep = (): void => {
+    if (createdCreateAction === null) return;
+    replaceKeepingReturnState(websiteItemDetailPath(itemKind, websiteId, createdCreateAction.id));
   };
 
   /**
@@ -96,7 +114,7 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
         ]}
       />
       <Typography variant="h4" component="h1" gutterBottom>
-        New {itemKind.singularLabel}
+        {createdCreateAction === null ? `New ${itemKind.singularLabel}` : "Step 2: its delete action"}
       </Typography>
 
       <LoadStatusNotice
@@ -113,7 +131,16 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
         />
       )}
 
-      {website !== null && formIsReady && (
+      {createdCreateAction !== null && (
+        <DeleteActionStep
+          websiteId={websiteId}
+          createAction={createdCreateAction}
+          onCreated={finishCreateActionStep}
+          onSkip={finishCreateActionStep}
+        />
+      )}
+
+      {website !== null && formIsReady && createdCreateAction === null && (
         <TitleDescriptionForm
           key={`${itemKind.kindId}-${website.id}`}
           initialValues={EMPTY_ITEM_VALUES}

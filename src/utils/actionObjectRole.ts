@@ -1,25 +1,39 @@
 import {
   type ActionKindRecord,
   type ActionObjectRoleRecord,
+  type CrudActionKindRecord,
   type DetectionConfidenceRecord,
 } from "./actionParameters";
 
 /** The kind select's value for "Detect" (the server's null). */
 export const DETECT_CHOICE_VALUE = "detect";
 
-/** What each action kind is called in the form. */
+/** What each action kind is called in the form, in the order the select lists them. */
 export const ACTION_KIND_LABELS: Record<ActionKindRecord, string> = {
   parameters: "Parameters",
-  object: "Object",
   create: "Create",
+  read: "Read",
+  update: "Update",
+  delete: "Delete",
 };
 
 /** What each action kind means, under the kind select. */
 export const ACTION_KIND_HELP: Record<ActionKindRecord, string> = {
-  parameters: "The action only takes typed values.",
-  object: "The action works on an existing object, which every run must name.",
-  create: "The action makes a new object, which each run records.",
+  parameters: "The action only takes typed values, like logging in; it touches no object.",
+  create: "The action makes a new object, which each run records and its delete action cleans up.",
+  read: "The action opens or checks an existing object without changing it.",
+  update: "The action changes an existing object, which every run must name.",
+  delete: "The action deletes an existing object, which every run must name; a passed run marks it deleted.",
 };
+
+/**
+ * Says whether a kind can have an object type: every kind but Parameters.
+ * @param kind - The kind, or null before anything is detected (then yes)
+ * @returns True for the four object kinds and for null
+ */
+export function kindTakesAnObjectType(kind: ActionKindRecord | null): boolean {
+  return kind !== "parameters";
+}
 
 /**
  * Names a confidence level the way the form shows it.
@@ -33,7 +47,7 @@ export function describeConfidence(confidence: DetectionConfidenceRecord): strin
 /**
  * Describes what "Detect" picks for the kind, for its option in the form:
  * "Detect — Create (High: create, adds)", "Detect — Parameters (tie: add,
- * remove)", or "Detect — Parameters (no object or create words)".
+ * remove)", or "Detect — Parameters (no kind words)".
  * @param role - The action's role, or null before the action exists
  * @returns The option's text
  */
@@ -42,7 +56,7 @@ export function describeDetectedKindChoice(role: ActionObjectRoleRecord | null):
   const { detectedKind } = role;
   const kindLabel = ACTION_KIND_LABELS[detectedKind.kind];
   const evidenceText = detectedKind.evidence.join(", ");
-  if (detectedKind.reason === "noMatch") return `Detect — ${kindLabel} (no object or create words)`;
+  if (detectedKind.reason === "noMatch") return `Detect — ${kindLabel} (no kind words)`;
   if (detectedKind.reason === "tie") return `Detect — ${kindLabel} (tie: ${evidenceText})`;
   return `Detect — ${kindLabel} (${describeConfidence(detectedKind.confidence)}: ${evidenceText})`;
 }
@@ -60,25 +74,21 @@ export function describeDetectedObjectTypeChoice(role: ActionObjectRoleRecord | 
   return `Detect — ${detectedType.objectTypeName} (${describeConfidence(detectedType.confidence)})`;
 }
 
-/**
- * Describes what "Detect" picks for "Deletes the object": "Detect — Yes
- * (delete)" or "Detect — No".
- * @param role - The action's role, or null before the action exists
- * @returns The option's text
- */
-export function describeDetectedDeletesChoice(role: ActionObjectRoleRecord | null): string {
-  if (role === null) return "Detect from the title and description";
-  const { detectedDeletesObject } = role;
-  return detectedDeletesObject.deletesObject
-    ? `Detect — Yes (${detectedDeletesObject.evidence.join(", ")})`
-    : "Detect — No";
-}
+/** The verb each object kind's header line starts with. */
+const OBJECT_KIND_VERBS: Record<CrudActionKindRecord, string> = {
+  create: "Creates",
+  read: "Reads",
+  update: "Updates",
+  delete: "Deletes",
+};
 
 /**
  * Describes an action's object role in one line for its page's header:
- * "Takes a Project (detected, High)", "Deletes a Project (you chose)",
- * "Creates a Project, named by School name, confirmed by step 7", or null
- * for an action that only takes typed values.
+ * "Reads a Project (detected, High)", "Deletes a Project (you chose)",
+ * "Creates a Project, named by School name, confirmed by step 7 (detected,
+ * High)", or null for an action that only takes typed values. The cleanup
+ * links (which Delete action cleans up after a Create action) are shown
+ * beside it by the page, not in this line.
  * @param role - The action's role
  * @param createDetails - For a Create action: the name parameter's label and the confirm step, when known
  * @param createDetails.nameParameterLabel - The label of the parameter that names a created object, or null
@@ -94,13 +104,13 @@ export function describeObjectRole(
   const article = /^[aeiou]/i.test(typeName) ? "an" : "a";
   const sourceText =
     role.kindSource === "you" ? "you chose" : `detected, ${describeConfidence(role.detectedKind.confidence)}`;
-  if (role.kind === "object") {
-    const verb = role.deletesObject ? "Deletes" : "Takes";
+  const verb = OBJECT_KIND_VERBS[role.kind];
+  if (role.kind !== "create") {
     return `${verb} ${article} ${typeName} (${sourceText})`;
   }
   const nameText =
     createDetails.nameParameterLabel === null ? "" : `, named by ${createDetails.nameParameterLabel}`;
   const confirmText =
     createDetails.confirmStepNumber === null ? "" : `, confirmed by step ${String(createDetails.confirmStepNumber)}`;
-  return `Creates ${article} ${typeName}${nameText}${confirmText} (${sourceText})`;
+  return `${verb} ${article} ${typeName}${nameText}${confirmText} (${sourceText})`;
 }

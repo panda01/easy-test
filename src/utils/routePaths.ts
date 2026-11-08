@@ -467,3 +467,37 @@ export function createdObjectsApiUrl(websiteId: string): string {
 export function createdObjectApiUrl(websiteId: string, createdObjectId: string): string {
   return `${createdObjectsApiUrl(websiteId)}/${encodeURIComponent(createdObjectId)}`;
 }
+
+/**
+ * Builds the path of the page that adds the Delete action cleaning up after
+ * a Create action (step 2 of making a Create action, reached again later from
+ * the action's page when it was skipped).
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Create action's cuid
+ * @returns `/websites/<websiteId>/actions/<actionId>/delete-action/new`
+ */
+export function newDeleteActionPath(websiteId: string, actionId: string): string {
+  return `${websiteItemDetailPath(ACTION_KIND, websiteId, actionId)}/delete-action/new`;
+}
+
+/**
+ * Builds the API url that asks Claude to propose the Delete action for a
+ * Create action (POST; nothing is saved).
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Create action's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/delete-action/proposal`
+ */
+export function deleteActionProposalApiUrl(websiteId: string, actionId: string): string {
+  return `${websiteItemApiUrl(ACTION_KIND, websiteId, actionId)}/delete-action/proposal`;
+}
+
+/**
+ * Builds the API url that creates and links a Create action's Delete action
+ * (POST `{ title, description }`).
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Create action's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/delete-action`
+ */
+export function deleteActionApiUrl(websiteId: string, actionId: string): string {
+  return `${websiteItemApiUrl(ACTION_KIND, websiteId, actionId)}/delete-action`;
+}

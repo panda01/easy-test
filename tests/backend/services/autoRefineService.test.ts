@@ -19,10 +19,16 @@ const { mockDbService, mockExecutionService, mockActionParameterService } = vi.h
     markAutoRefineJobPhase: vi.fn(),
     appendAutoRefineJobRun: vi.fn(),
     appendAutoRefineJobScript: vi.fn(),
+    appendAutoRefineJobCleanupRun: vi.fn(),
+    appendAutoRefineJobCleanupScript: vi.fn(),
+    findActionForWebsite: vi.fn(),
+    findActionScriptForAction: vi.fn(),
+    findActionScriptRunWithObjects: vi.fn(),
     finishAutoRefineJob: vi.fn(),
     markRunningAutoRefineJobsInterrupted: vi.fn(),
   },
   mockExecutionService: {
+    CLEANUP_DELETE_ACTION_BUSY_MESSAGE: "Its delete action is already running",
     claimActionRun: vi.fn(),
     releaseActionRun: vi.fn(),
     claimRunRefinement: vi.fn(),
@@ -30,6 +36,7 @@ const { mockDbService, mockExecutionService, mockActionParameterService } = vi.h
     describeFailedRun: vi.fn(),
     performActionScriptRun: vi.fn(),
     performRefinement: vi.fn(),
+    runFailedOnlyInItsCleanup: vi.fn(),
   },
   /** The parameters view is replaced: its own spec covers the detection and the object choices. */
   mockActionParameterService: { loadVersionParameters: vi.fn() },
@@ -69,7 +76,6 @@ const action: ActionWithCredential = {
   userActionKind: null,
   userObjectTypeKey: null,
   userNameParameterKey: null,
-  userDeletesObject: null,
   parametersSyncedAt: null,
   createdAt: new Date("2026-03-01T00:00:00.000Z"),
   updatedAt: new Date("2026-03-01T00:00:00.000Z"),
@@ -155,6 +161,8 @@ const createdJob: AutoRefineJob = {
   parameterValues,
   createdActionScriptIds: [],
   actionScriptRunIds: [],
+  cleanupActionScriptIds: [],
+  cleanupActionScriptRunIds: [],
   stopRequestedAt: null,
   errorMessage: null,
   createdAt: new Date("2026-03-03T00:00:00.000Z"),
@@ -229,6 +237,9 @@ describe("startAutoRefineJob", () => {
     mockExecutionService.claimActionRun.mockReturnValue(true);
     mockExecutionService.claimRunRefinement.mockReturnValue(true);
     mockExecutionService.describeFailedRun.mockReturnValue(failedRunDetails);
+    mockExecutionService.runFailedOnlyInItsCleanup.mockReturnValue(false);
+    mockDbService.appendAutoRefineJobCleanupRun.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobCleanupScript.mockResolvedValue(true);
     mockDbService.createAutoRefineJob.mockResolvedValue(createdJob);
     mockDbService.findAutoRefineJobForAction.mockResolvedValue(createdJob);
     mockDbService.markAutoRefineJobPhase.mockResolvedValue(true);
@@ -551,6 +562,236 @@ describe("startAutoRefineJob", () => {
       { website, action, script: startVersion },
       { notes: "Keep" },
     );
+  });
+});
+
+describe("startAutoRefineJob: the Delete side", () => {
+  /** The linked Delete action and its versions. */
+  const deleteAction: ActionWithCredential = { ...action, id: "action-delete", title: "Delete the project" };
+  const deleteVersion1 = { ...buildVersion("delete-script-1", buildPlanClicking("Delete")), actionId: "action-delete" };
+  const deleteVersion2 = { ...buildVersion("delete-script-2", buildPlanClicking("Yes, delete")), actionId: "action-delete" };
+  const deleteVersion3 = { ...buildVersion("delete-script-3", buildPlanClicking("Confirm")), actionId: "action-delete" };
+
+  /**
+   * Builds a Create run whose own steps passed but whose cleanup went wrong.
+   * @param id - The run's cuid
+   * @param cleanupOutcome - `failed` or `missing`
+   * @param cleanupRunId - The Delete run, when one ran
+   * @returns The run, with the object it made
+   */
+  function buildCreateRunWithCleanupProblem(id: string, cleanupOutcome: "failed" | "missing", cleanupRunId: string | null) {
+    const cleanupErrorMessage = cleanupOutcome === "failed" ? "Step 1 (click): button not found" : "This action has no delete action yet";
+    return {
+      ...buildRun(id, true),
+      succeeded: false,
+      errorMessage: `Cleanup ${cleanupOutcome}: ${cleanupErrorMessage}`,
+      cleanupOutcome,
+      cleanupActionScriptRunId: cleanupRunId,
+      cleanupErrorMessage,
+      createdObject: { id: "created-1", name: "Apollo 7", url: null, objectTypeName: "Project" },
+    };
+  }
+
+  /**
+   * Builds a Delete run as `findActionScriptRunWithObjects` or a cleanup run answers it.
+   * @param id - The run's cuid
+   * @param succeeded - Whether it passed
+   * @param actionScriptId - The Delete version it ran
+   * @returns The run row
+   */
+  function buildDeleteRun(id: string, succeeded: boolean, actionScriptId: string) {
+    return { ...buildRun(id, succeeded), actionId: "action-delete", actionScriptId, cleanupOutcome: null };
+  }
+
+  const CLEANUP_RUN_OPTIONS = { cleanUpAfterwards: false, isCleanupRun: true, markDeletedCreatedObjectId: "created-1" };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockExecutionService.claimActionRun.mockReturnValue(true);
+    mockExecutionService.claimRunRefinement.mockReturnValue(true);
+    mockExecutionService.describeFailedRun.mockReturnValue(failedRunDetails);
+    mockExecutionService.runFailedOnlyInItsCleanup.mockImplementation(
+      (run: { cleanupOutcome?: string | null }) => run.cleanupOutcome === "failed" || run.cleanupOutcome === "missing",
+    );
+    mockDbService.createAutoRefineJob.mockResolvedValue(createdJob);
+    mockDbService.findAutoRefineJobForAction.mockResolvedValue(createdJob);
+    mockDbService.markAutoRefineJobPhase.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobRun.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobScript.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobCleanupRun.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobCleanupScript.mockResolvedValue(true);
+    mockDbService.finishAutoRefineJob.mockResolvedValue(true);
+    mockDbService.findActionScriptRunWithObjects.mockResolvedValue(buildDeleteRun("delete-run-1", false, "delete-script-1"));
+    mockDbService.findActionForWebsite.mockResolvedValue(deleteAction);
+    mockDbService.findActionScriptForAction.mockResolvedValue(deleteVersion1);
+    mockActionParameterService.loadVersionParameters.mockResolvedValue(parametersViewWithProjectName);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("refines the delete action from its failed cleanup run, runs that version alone on the leftover object, then runs the Create action again", async () => {
+    mockExecutionService.performActionScriptRun
+      .mockResolvedValueOnce(buildCreateRunWithCleanupProblem("run-1", "failed", "delete-run-1"))
+      .mockResolvedValueOnce(buildDeleteRun("delete-run-2", true, "delete-script-2"))
+      .mockResolvedValueOnce(buildRun("run-2", true));
+    mockExecutionService.performRefinement.mockResolvedValueOnce(deleteVersion2);
+
+    const { completion } = await startJobThatMustStart();
+    await completion;
+
+    expect(mockExecutionService.performRefinement).toHaveBeenCalledTimes(1);
+    expect(mockExecutionService.performRefinement).toHaveBeenCalledWith(
+      ACTION_SCRIPT_DIRECTORY,
+      {
+        website,
+        action: deleteAction,
+        script: deleteVersion1,
+        run: buildDeleteRun("delete-run-1", false, "delete-script-1"),
+        failedRun: failedRunDetails,
+        sourceModelId: "claude-opus-5-5",
+      },
+      null,
+    );
+    expect(mockDbService.appendAutoRefineJobCleanupScript).toHaveBeenCalledWith("website-1", "action-1", "job-1", "delete-script-2", 1);
+    expect(mockExecutionService.performActionScriptRun).toHaveBeenNthCalledWith(
+      2,
+      ACTION_SCRIPT_DIRECTORY,
+      { website, action: deleteAction, script: deleteVersion2 },
+      { object: "Apollo 7" },
+      CLEANUP_RUN_OPTIONS,
+    );
+    expect(mockDbService.appendAutoRefineJobCleanupRun).toHaveBeenCalledWith("website-1", "action-1", "job-1", "delete-run-2");
+    expect(mockExecutionService.claimActionRun).toHaveBeenCalledWith("action-delete");
+    expect(mockExecutionService.releaseActionRun).toHaveBeenCalledWith("action-delete");
+    expect(mockDbService.markAutoRefineJobPhase).toHaveBeenCalledWith("website-1", "action-1", "job-1", {
+      phase: "refiningCleanup",
+      currentActionScriptId: "script-1",
+    });
+    expect(mockDbService.markAutoRefineJobPhase).toHaveBeenCalledWith("website-1", "action-1", "job-1", {
+      phase: "runningCleanup",
+      currentActionScriptId: "script-1",
+    });
+    // The Create action is run again only once the Delete run passed, with the job's values.
+    expect(mockExecutionService.performActionScriptRun).toHaveBeenNthCalledWith(
+      3,
+      ACTION_SCRIPT_DIRECTORY,
+      { website, action, script: startVersion },
+      parameterValues,
+    );
+    expect(mockDbService.appendAutoRefineJobScript).not.toHaveBeenCalled();
+    expect(readFinishes()).toEqual([{ status: "passed", errorMessage: null, currentActionScriptId: "script-1" }]);
+  });
+
+  it("keeps refining the delete action while its own run still fails, counting against the same cap", async () => {
+    mockExecutionService.performActionScriptRun
+      .mockResolvedValueOnce(buildCreateRunWithCleanupProblem("run-1", "failed", "delete-run-1"))
+      .mockResolvedValueOnce(buildDeleteRun("delete-run-2", false, "delete-script-2"))
+      .mockResolvedValueOnce(buildDeleteRun("delete-run-3", true, "delete-script-3"))
+      .mockResolvedValueOnce(buildRun("run-2", true));
+    mockExecutionService.performRefinement.mockResolvedValueOnce(deleteVersion2).mockResolvedValueOnce(deleteVersion3);
+
+    const { completion } = await startJobThatMustStart();
+    await completion;
+
+    expect(mockExecutionService.performRefinement).toHaveBeenCalledTimes(2);
+    expect(mockExecutionService.performRefinement).toHaveBeenLastCalledWith(
+      ACTION_SCRIPT_DIRECTORY,
+      expect.objectContaining({ script: deleteVersion2, run: buildDeleteRun("delete-run-2", false, "delete-script-2") }),
+      null,
+    );
+    expect(mockDbService.appendAutoRefineJobCleanupScript).toHaveBeenLastCalledWith("website-1", "action-1", "job-1", "delete-script-3", 2);
+    expect(mockExecutionService.performActionScriptRun).toHaveBeenCalledTimes(4);
+    expect(readFinishes()).toEqual([{ status: "passed", errorMessage: null, currentActionScriptId: "script-1" }]);
+  });
+
+  it("ends failed with the reason when the cleanup could not start (no delete action or version)", async () => {
+    mockExecutionService.performActionScriptRun.mockResolvedValueOnce(buildCreateRunWithCleanupProblem("run-1", "missing", null));
+
+    const { completion } = await startJobThatMustStart();
+    await completion;
+
+    expect(mockExecutionService.performRefinement).not.toHaveBeenCalled();
+    expect(readFinishes()).toEqual([
+      { status: "failed", errorMessage: "This action has no delete action yet", currentActionScriptId: "script-1" },
+    ]);
+  });
+
+  it("ends failed when the delete run cannot be read back, naming the cleanup's error", async () => {
+    mockExecutionService.performActionScriptRun.mockResolvedValueOnce(buildCreateRunWithCleanupProblem("run-1", "failed", null));
+
+    const { completion } = await startJobThatMustStart();
+    await completion;
+
+    expect(mockDbService.findActionScriptRunWithObjects).not.toHaveBeenCalled();
+    expect(mockExecutionService.performRefinement).not.toHaveBeenCalled();
+    expect(readFinishes()).toEqual([
+      { status: "failed", errorMessage: "Step 1 (click): button not found", currentActionScriptId: "script-1" },
+    ]);
+  });
+
+  it("ends failed when the delete action is already running, refining nothing more", async () => {
+    mockExecutionService.claimActionRun.mockReturnValueOnce(true).mockReturnValueOnce(false);
+    mockExecutionService.performActionScriptRun.mockResolvedValueOnce(buildCreateRunWithCleanupProblem("run-1", "failed", "delete-run-1"));
+    mockExecutionService.performRefinement.mockResolvedValueOnce(deleteVersion2);
+
+    const { completion } = await startJobThatMustStart();
+    await completion;
+
+    expect(mockExecutionService.performActionScriptRun).toHaveBeenCalledTimes(1);
+    expect(readFinishes()).toEqual([
+      { status: "failed", errorMessage: "Its delete action is already running", currentActionScriptId: "script-1" },
+    ]);
+  });
+
+  it("gives up when the delete refinements reach the cap, and ends unchanged when a delete refinement changes nothing", async () => {
+    mockExecutionService.performActionScriptRun.mockResolvedValueOnce(buildCreateRunWithCleanupProblem("run-1", "failed", "delete-run-1"));
+    mockExecutionService.performRefinement.mockResolvedValueOnce({ ...deleteVersion1, id: "delete-script-copy" });
+
+    const { completion } = await startJobThatMustStart();
+    await completion;
+
+    expect(readFinishes()).toEqual([
+      {
+        status: "unchanged",
+        errorMessage: "its delete action's refinement came back identical to the version it refined, so refining again would go nowhere",
+        currentActionScriptId: "script-1",
+      },
+    ]);
+
+    vi.clearAllMocks();
+    mockExecutionService.claimActionRun.mockReturnValue(true);
+    mockExecutionService.claimRunRefinement.mockReturnValue(true);
+    mockExecutionService.describeFailedRun.mockReturnValue(failedRunDetails);
+    mockDbService.createAutoRefineJob.mockResolvedValue(createdJob);
+    mockDbService.findAutoRefineJobForAction.mockResolvedValue(createdJob);
+    mockDbService.markAutoRefineJobPhase.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobRun.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobCleanupRun.mockResolvedValue(true);
+    mockDbService.appendAutoRefineJobCleanupScript.mockResolvedValue(true);
+    mockDbService.finishAutoRefineJob.mockResolvedValue(true);
+    mockDbService.findActionScriptRunWithObjects.mockResolvedValue(buildDeleteRun("delete-run-1", false, "delete-script-1"));
+    mockDbService.findActionForWebsite.mockResolvedValue(deleteAction);
+    mockDbService.findActionScriptForAction.mockResolvedValue(deleteVersion1);
+    mockActionParameterService.loadVersionParameters.mockResolvedValue(parametersViewWithProjectName);
+    let deleteRefinementCount = 0;
+    mockExecutionService.performRefinement.mockImplementation(() => {
+      deleteRefinementCount += 1;
+      return Promise.resolve({ ...buildVersion(`delete-script-${String(deleteRefinementCount + 1)}`, buildPlanClicking(`Delete ${String(deleteRefinementCount)}`)), actionId: "action-delete" });
+    });
+    let deleteRunCount = 1;
+    mockExecutionService.performActionScriptRun.mockImplementation((_directory: string, found: { action: { id: string } }) => {
+      if (found.action.id === "action-1") return Promise.resolve(buildCreateRunWithCleanupProblem("run-1", "failed", "delete-run-1"));
+      deleteRunCount += 1;
+      return Promise.resolve(buildDeleteRun(`delete-run-${String(deleteRunCount)}`, false, `delete-script-${String(deleteRunCount)}`));
+    });
+
+    const second = await startJobThatMustStart();
+    await second.completion;
+
+    expect(mockExecutionService.performRefinement).toHaveBeenCalledTimes(MAX_AUTO_REFINEMENTS);
+    expect(readFinishes()).toEqual([{ status: "gaveUp", errorMessage: null, currentActionScriptId: "script-1" }]);
   });
 });
 

@@ -15,6 +15,7 @@ import {
   saveSyncedActionParameters,
   type ActionWithCredential,
   type CrawledPageFields,
+  type CreatedObject,
   type CreatedObjectCheck,
   type WebObjectWithPatterns,
 } from "./dbService.js";
@@ -40,6 +41,7 @@ import { urlMatchesPatternKey } from "../utils/detectPagePatterns.js";
 import { normalizeFieldName } from "../utils/formFields.js";
 import { readAriaSnapshotOutline } from "../utils/readAriaSnapshotFields.js";
 import {
+  kindActsOnAnExistingObject,
   resolveActionObjectRole,
   type ObjectTypeCandidate,
   type ResolvedActionRole,
@@ -99,6 +101,20 @@ export interface RunFollowUp {
   applied: AppliedParameterValues;
   /** What the runner reported. */
   runResult: ActionPlanRunResult;
+  /**
+   * For a cleanup run of a Delete action: the created object it was run on,
+   * marked deleted by id when the run passed (instead of matching the typed
+   * name); null for every other run.
+   */
+  markDeletedCreatedObjectId: string | null;
+}
+
+/** What following up a recorded run found out, for the cleanup that may follow. */
+export interface RunFollowUpOutcome {
+  /** The created object the run recorded, or null when it recorded none. */
+  createdObjectId: string | null;
+  /** That object's name, or null. */
+  createdObjectName: string | null;
 }
 
 /**
@@ -411,7 +427,7 @@ export async function loadVersionParameters(
   const webObjects = await listWebObjectsForWebsite(websiteId);
   const role = await resolveRoleForAction(websiteId, action, webObjects);
   const objectContext = buildObjectContext(role.objectTypeKey, webObjects);
-  const actionActsOnAnObject = role.kind === "object" && role.objectTypeKey !== null;
+  const actionActsOnAnObject = kindActsOnAnExistingObject(role.kind) && role.objectTypeKey !== null;
   const objectChoices = actionActsOnAnObject
     ? await loadObjectChoices(websiteId, action.credentialId, objectContext, webObjects)
     : [];
@@ -510,12 +526,12 @@ function findTypeOfAddress(url: string, webObjects: WebObjectWithPatterns[]): We
  * confirm step and the final page that is an instance page; its type is the
  * one that address is an instance of, else the action's.
  * @param followUp - The run and what it ran with
- * @returns Resolves once recorded (or nothing was to be)
+ * @returns The recorded object, or null when nothing was to be recorded
  */
-async function recordCreatedObject(followUp: RunFollowUp): Promise<void> {
+async function recordCreatedObject(followUp: RunFollowUp): Promise<CreatedObject | null> {
   const { view, runResult, applied } = followUp;
   const confirmStepSucceeded = view.role.kind === "create" && runResult.confirmStepSucceeded === true;
-  if (!confirmStepSucceeded) return;
+  if (!confirmStepSucceeded) return null;
   const webObjects = await listWebObjectsForWebsite(followUp.websiteId);
   const addressCandidates = [runResult.pageUrlAfterConfirm, runResult.finalPageUrl].flatMap((url) =>
     url === null ? [] : [url],
@@ -526,7 +542,7 @@ async function recordCreatedObject(followUp: RunFollowUp): Promise<void> {
   const typeObject = addressedInstance?.webObject ?? webObjects.find((webObject) => webObject.instancePatternKey === view.role.objectTypeKey);
   const nameValue = applied.usedValues.find((usedValue) => usedValue.key === view.nameParameterKey)?.value ?? "";
   const objectTypeName = typeObject === undefined ? view.role.objectTypeName : (typeObject.name ?? typeObject.detectedName);
-  await createCreatedObject(followUp.websiteId, {
+  const createdObject = await createCreatedObject(followUp.websiteId, {
     actionId: followUp.action.id,
     actionScriptId: followUp.actionScriptId,
     actionScriptRunId: followUp.actionScriptRunId,
@@ -535,20 +551,29 @@ async function recordCreatedObject(followUp: RunFollowUp): Promise<void> {
     name: nameValue.trim() === "" ? `Unnamed ${objectTypeName ?? "object"}` : nameValue,
     url: addressedInstance?.url ?? null,
   });
+  return createdObject;
 }
 
 /**
- * Marks the created object a passed run of a deleting Object action ran on
- * as deleted on the site: the object value it ran with, matched to the
- * created objects by address (when the chosen one has one) or by name.
+ * Marks the created object a passed run of a Delete action ran on as deleted
+ * on the site. A cleanup run names the object by id
+ * (`markDeletedCreatedObjectId`); any other run's object value is matched to
+ * the created objects by name.
  * @param followUp - The run and what it ran with
  * @returns Resolves once marked (or nothing was to be)
  */
 async function markDeletedObject(followUp: RunFollowUp): Promise<void> {
   const { view, runResult, applied } = followUp;
-  const runDeletedAnObject = view.role.kind === "object" && view.role.deletesObject && runResult.succeeded;
+  const runDeletedAnObject = view.role.kind === "delete" && runResult.succeeded;
+  if (!runDeletedAnObject) return;
+  const cleanupObjectId = followUp.markDeletedCreatedObjectId;
+  const cleanupRunNamesItsObject = cleanupObjectId !== null;
+  if (cleanupRunNamesItsObject) {
+    await markCreatedObjectDeletedByRun(followUp.websiteId, cleanupObjectId, followUp.actionScriptRunId);
+    return;
+  }
   const objectTypeKey = view.role.objectTypeKey;
-  if (!runDeletedAnObject || objectTypeKey === null) return;
+  if (objectTypeKey === null) return;
   const chosenName = applied.usedValues.find((usedValue) => usedValue.key === OBJECT_PARAMETER_KEY)?.value ?? "";
   const chosenChoice = view.objectChoices.find(
     (choice) => choice.source === "created" && normalizeFieldName(choice.name) === normalizeFieldName(chosenName),
@@ -564,9 +589,11 @@ async function markDeletedObject(followUp: RunFollowUp): Promise<void> {
  * object a deleting run deleted. NEVER rejects - the run is already
  * recorded; each failure is logged.
  * @param followUp - The run and what it ran with
- * @returns Resolves once done
+ * @returns The created object it recorded (id and name), or nulls
  */
-export async function followUpRecordedRun(followUp: RunFollowUp): Promise<void> {
+export async function followUpRecordedRun(followUp: RunFollowUp): Promise<RunFollowUpOutcome> {
+  // Held on an object because the record step sets it from inside a closure.
+  const recorded: { createdObject: CreatedObject | null } = { createdObject: null };
   const steps: [string, () => Promise<void>][] = [
     [
       "sync its parameters",
@@ -577,7 +604,12 @@ export async function followUpRecordedRun(followUp: RunFollowUp): Promise<void> 
           readAt: new Date(),
         }),
     ],
-    ["record the object it created", () => recordCreatedObject(followUp)],
+    [
+      "record the object it created",
+      async () => {
+        recorded.createdObject = await recordCreatedObject(followUp);
+      },
+    ],
     ["mark the object it deleted", () => markDeletedObject(followUp)],
   ];
   for (const [description, followUpStep] of steps) {
@@ -589,6 +621,8 @@ export async function followUpRecordedRun(followUp: RunFollowUp): Promise<void> 
       );
     }
   }
+  const { createdObject } = recorded;
+  return { createdObjectId: createdObject?.id ?? null, createdObjectName: createdObject?.name ?? null };
 }
 
 /**

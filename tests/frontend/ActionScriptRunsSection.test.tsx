@@ -52,6 +52,7 @@ function buildSectionProps(
     isRunning: false,
     runErrorMessage: null,
     onRunClick: vi.fn(),
+    cleanupControl: null,
     values: {},
     onValueChange: vi.fn(),
     isAutoRefining: false,
@@ -343,7 +344,7 @@ describe("ActionScriptRunsSection", () => {
       await user.type(nameField, "Voyager");
       await user.click(screen.getByRole("button", { name: "Run again" }));
 
-      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" });
+      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" }, true);
     });
 
     it("reports each typed value to the page by its parameter key", async () => {
@@ -368,7 +369,7 @@ describe("ActionScriptRunsSection", () => {
       expect(screen.getByRole("textbox", { name: "Project name" })).toHaveValue("Voyager");
       await user.click(screen.getByRole("button", { name: "Run again" }));
 
-      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" });
+      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" }, true);
     });
 
     it("keeps Run enabled while a required value is blank, and marks the field Required when Run is clicked", async () => {
@@ -397,7 +398,7 @@ describe("ActionScriptRunsSection", () => {
       expect(screen.queryByText("Required")).not.toBeInTheDocument();
 
       await user.click(runButton);
-      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" });
+      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" }, true);
     });
 
     it("starts no run while a value holds {{, showing the problem under the field", async () => {
@@ -493,7 +494,7 @@ describe("ActionScriptRunsSection", () => {
       await user.keyboard("{Escape}");
       expect(screen.getByText("Pick a known one, or type any name")).toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "Run again" }));
-      expect(onRunClick).toHaveBeenCalledWith({ object: "Gemini 5" });
+      expect(onRunClick).toHaveBeenCalledWith({ object: "Gemini 5" }, true);
     });
 
     it("shows no values form for a version without parameters", () => {
@@ -524,5 +525,54 @@ describe("ActionScriptRunsSection", () => {
 
       expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
     });
+  });
+});
+
+describe("ActionScriptRunsSection: the cleanup control", () => {
+  it("shows no cleanup control for an action that is not a Create action", () => {
+    renderSection({ cleanupControl: null });
+
+    expect(screen.queryByRole("checkbox", { name: "Clean up afterwards" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/no delete action/)).not.toBeInTheDocument();
+  });
+
+  it("offers Clean up afterwards, on by default, and sends the choice with Run", async () => {
+    const user = userEvent.setup();
+    const onRunClick = vi.fn();
+    const onChange = vi.fn();
+    renderSection({ cleanupControl: { hasDeleteAction: true, checked: true, onChange }, onRunClick });
+
+    const checkbox = screen.getByRole("checkbox", { name: "Clean up afterwards" });
+    expect(checkbox).toBeChecked();
+    expect(
+      screen.getByText("Runs its delete action on the object this run makes; the run passes only when both pass."),
+    ).toBeInTheDocument();
+    await user.click(checkbox);
+    expect(onChange).toHaveBeenCalledWith(false);
+
+    await user.click(screen.getByRole("button", { name: "Run again" }));
+    expect(onRunClick).toHaveBeenCalledWith({}, true);
+  });
+
+  it("sends false when the box is unticked, and locks the box while a run is in flight", async () => {
+    const user = userEvent.setup();
+    const onRunClick = vi.fn();
+    renderSection({ cleanupControl: { hasDeleteAction: true, checked: false, onChange: vi.fn() }, onRunClick });
+
+    expect(screen.getByRole("checkbox", { name: "Clean up afterwards" })).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Run again" }));
+    expect(onRunClick).toHaveBeenCalledWith({}, false);
+
+    renderSection({ cleanupControl: { hasDeleteAction: true, checked: true, onChange: vi.fn() }, isRunning: true });
+    expect(screen.getAllByRole("checkbox", { name: "Clean up afterwards" }).at(-1)).toBeDisabled();
+  });
+
+  it("warns instead of offering the box when the Create action has no delete action", () => {
+    renderSection({ cleanupControl: { hasDeleteAction: false, checked: true, onChange: vi.fn() } });
+
+    expect(screen.queryByRole("checkbox", { name: "Clean up afterwards" })).not.toBeInTheDocument();
+    expect(
+      screen.getByText("This action has no delete action, so its runs fail until one is added (see the top of the page)."),
+    ).toBeInTheDocument();
   });
 });

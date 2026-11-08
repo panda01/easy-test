@@ -58,7 +58,7 @@ function renderWebsiteItemCreatePage(routerStart: RouterStart): RenderResult {
 }
 
 /** What an action form sends for its object role when every choice is left on "Detect". */
-const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null, userDeletesObject: null };
+const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null };
 
 /**
  * Stubs a successful load of the owning website and its credentials, plus
@@ -374,5 +374,65 @@ describe("WebsiteItemCreatePage ('use-cases'): no credential", () => {
     expect(screen.queryByRole("combobox", { name: /^Log in as/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("progressbar", { name: "Loading credentials" })).not.toBeInTheDocument();
     expect(countRequests(fetchStub, "GET", CREDENTIALS_API_URL)).toBe(0);
+  });
+});
+
+describe("WebsiteItemCreatePage ('actions'): step 2, the delete action", () => {
+  const PROPOSAL_API_URL = `${ACTIONS_API_URL}/item-9/delete-action/proposal`;
+  const DELETE_ACTION_API_URL = `${ACTIONS_API_URL}/item-9/delete-action`;
+  const openedFromWebsite: RouterStart = {
+    initialEntries: [WEBSITE_PATH, { pathname: ACTION_CREATE_PATH, state: { returnTo: WEBSITE_PATH } }],
+  };
+  /** What the server answers for the saved action when its kind is Create. */
+  const savedCreateAction = buildWebsiteItemRecord({
+    id: "item-9",
+    title: "Log in",
+    objectRole: { kind: "create", kindSource: "detected", warnings: [] } as never,
+  });
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("stays on the page as step 2 for a Create action, proposes the delete action, and moves on once it is created", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedWebsite({
+      [`POST ${ACTIONS_API_URL}`]: { status: 201, body: savedCreateAction },
+      [`POST ${PROPOSAL_API_URL}`]: { status: 200, body: { title: "Delete the thing", description: "Remove it", modelId: "m" } },
+      [`POST ${DELETE_ACTION_API_URL}`]: { status: 201, body: buildWebsiteItemRecord({ id: "item-10" }) },
+    });
+    renderWebsiteItemCreatePage(openedFromWebsite);
+
+    await fillForm(user);
+    await user.click(screen.getByRole("button", { name: "Create action" }));
+
+    expect(await screen.findByRole("heading", { name: "Step 2: its delete action" })).toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue("Delete the thing");
+    expect(countRequests(fetchStub, "POST", PROPOSAL_API_URL)).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Create delete action" }));
+
+    const landing = await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
+    expect(landing.navigationType).toBe("REPLACE");
+    expect(fetchStub).toHaveBeenCalledWith(DELETE_ACTION_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Delete the thing", description: "Remove it" }),
+    });
+  });
+
+  it("moves on without a delete action on Skip for now", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedWebsite({
+      [`POST ${ACTIONS_API_URL}`]: { status: 201, body: savedCreateAction },
+      [`POST ${PROPOSAL_API_URL}`]: { status: 200, body: { title: "Delete the thing", description: "Remove it", modelId: "m" } },
+    });
+    renderWebsiteItemCreatePage(openedFromWebsite);
+
+    await fillForm(user);
+    await user.click(screen.getByRole("button", { name: "Create action" }));
+    await user.click(await screen.findByRole("button", { name: "Skip for now" }));
+
+    await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
+    expect(countRequests(fetchStub, "POST", DELETE_ACTION_API_URL)).toBe(0);
   });
 });

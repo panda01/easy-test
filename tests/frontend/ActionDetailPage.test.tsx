@@ -316,7 +316,7 @@ async function pickFromSelect(user: UserEvent, selectName: RegExp, optionName: s
 const RUN_WITH_NO_CHANGED_VALUES: RequestInit = {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ parameterValues: {} }),
+  body: JSON.stringify({ parameterValues: {}, cleanUpAfterwards: true }),
 };
 
 /** A failed run of script-1, at step 2, with a failure screenshot and a failing page. */
@@ -1422,8 +1422,7 @@ describe("ActionDetailPage", () => {
         reason: "won",
         confidence: "high",
         confidenceShare: 1,
-        objectScore: 0,
-        createScore: 3,
+        scores: { create: 3, read: 0, update: 0, delete: 0 },
         evidence: ["create"],
       },
       objectTypeKey: "/projects/{project}",
@@ -1484,11 +1483,11 @@ describe("ActionDetailPage", () => {
       stubLoadedAction([], {
         [`GET ${ACTION_API_URL}`]: {
           status: 200,
-          body: buildWebsiteItemRecord({ objectRole: buildActionObjectRoleRecord({ ...createRole, kind: "object" }) }),
+          body: buildWebsiteItemRecord({ objectRole: buildActionObjectRoleRecord({ ...createRole, kind: "read" }) }),
         },
       });
       renderActionDetailPage();
-      expect(await screen.findByText("Takes a Project (detected, High)")).toBeInTheDocument();
+      expect(await screen.findByText("Reads a Project (detected, High)")).toBeInTheDocument();
     });
 
     it("runs with the changed values, then fetches the parameters again", async () => {
@@ -1507,7 +1506,7 @@ describe("ActionDetailPage", () => {
         expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ parameterValues: { projectName: "Voyager" } }),
+          body: JSON.stringify({ parameterValues: { projectName: "Voyager" }, cleanUpAfterwards: true }),
         });
       });
       await waitFor(() => {
@@ -1573,7 +1572,6 @@ describe("ActionDetailPage", () => {
             userActionKind: null,
             userObjectTypeKey: null,
             userNameParameterKey: "projectName",
-            userDeletesObject: null,
           }),
         });
       });
@@ -1887,5 +1885,142 @@ describe("ActionDetailPage", () => {
       );
       expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeEnabled();
     });
+  });
+});
+
+describe("ActionDetailPage: cleanup links and control", () => {
+  /** The detected role of a Create action that makes Projects. */
+  const createRole = buildActionObjectRoleRecord({
+    kind: "create",
+    detectedKind: {
+      kind: "create",
+      reason: "won",
+      confidence: "high",
+      confidenceShare: 1,
+      scores: { create: 3, read: 0, update: 0, delete: 0 },
+      evidence: ["create"],
+    },
+    objectTypeKey: "/projects/{project}",
+    objectTypeName: "Project",
+    objectTypeSource: "detected",
+  });
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("warns a Create action without a delete action, links to adding one, and warns in the run panel too", async () => {
+    stubLoadedAction([olderScript], {
+      [`GET ${ACTION_API_URL}`]: {
+        status: 200,
+        body: buildWebsiteItemRecord({ objectRole: createRole, deleteAction: null, createActions: [] }),
+      },
+      [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+      [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: buildVersionParametersRecord({ role: createRole }) },
+    });
+    renderActionDetailPage();
+
+    expect(
+      await screen.findByText("Runs fail until this action has a delete action to clean up what it makes."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Add its delete action" })).toHaveAttribute(
+      "href",
+      "/websites/website-1/actions/item-1/delete-action/new",
+    );
+    expect(
+      await screen.findByText("This action has no delete action, so its runs fail until one is added (see the top of the page)."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Clean up afterwards" })).not.toBeInTheDocument();
+  });
+
+  it("links a Create action to its delete action, offers Clean up afterwards on by default, and sends the choice with the run", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedAction([olderScript], {
+      [`GET ${ACTION_API_URL}`]: {
+        status: 200,
+        body: buildWebsiteItemRecord({
+          objectRole: createRole,
+          deleteAction: { id: "item-2", title: "Delete the project" },
+          createActions: [],
+        }),
+      },
+      [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+      [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: buildVersionParametersRecord({ role: createRole }) },
+      [`POST ${runsApiUrl("script-1")}`]: { status: 201, body: buildActionScriptRunRecord({ id: "run-new" }) },
+    });
+    renderActionDetailPage();
+
+    expect(await screen.findByRole("link", { name: "Delete the project" })).toHaveAttribute(
+      "href",
+      "/websites/website-1/actions/item-2",
+    );
+    const checkbox = await screen.findByRole("checkbox", { name: "Clean up afterwards" });
+    expect(checkbox).toBeChecked();
+    await user.click(checkbox);
+    expect(checkbox).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    await waitFor(() => {
+      expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parameterValues: {}, cleanUpAfterwards: false }),
+      });
+    });
+  });
+
+  it("names the Create actions a Delete action cleans up after", async () => {
+    stubLoadedAction([], {
+      [`GET ${ACTION_API_URL}`]: {
+        status: 200,
+        body: buildWebsiteItemRecord({
+          objectRole: buildActionObjectRoleRecord({ ...createRole, kind: "delete" }),
+          deleteAction: null,
+          createActions: [{ id: "item-1", title: "Create a project" }],
+        }),
+      },
+    });
+    renderActionDetailPage();
+
+    expect(await screen.findByText(/Cleans up after/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Create a project" })).toHaveAttribute("href", "/websites/website-1/actions/item-1");
+    expect(screen.queryByText(/Runs fail until/)).not.toBeInTheDocument();
+  });
+
+  it("shows the newest version and the named run when a cleanup link opens the page with ?script= and ?run=", async () => {
+    const cleanupRun = buildActionScriptRunRecord({ id: "run-delete-7", succeeded: false, failedStepNumber: 1, errorMessage: "Step 1 failed" });
+    stubLoadedAction([newerScript, olderScript], {
+      [`GET ${runsApiUrl("script-2")}`]: { status: 200, body: [] },
+      [`GET ${runsApiUrl("script-1")}`]: {
+        status: 200,
+        body: [buildActionScriptRunRecord({ id: "run-newest" }), cleanupRun],
+      },
+    });
+    renderActionDetailPage({ initialEntries: [`/websites/website-1/actions/item-1?script=script-1&run=run-delete-7`] });
+
+    expect(await screen.findByRole("heading", { name: "Version 1" })).toBeInTheDocument();
+    expect(await within(await screen.findByRole("status")).findByText("Failed at step 1")).toBeInTheDocument();
+  });
+
+  it("notes what a conversion did about the delete action", async () => {
+    const user = userEvent.setup();
+    stubLoadedAction([], {
+      [`GET ${ACTION_API_URL}`]: {
+        status: 200,
+        body: buildWebsiteItemRecord({ objectRole: createRole, deleteAction: { id: "item-2", title: "Delete the project" }, createActions: [] }),
+      },
+      [`POST ${SCRIPTS_API_URL}`]: {
+        status: 201,
+        body: { ...olderScript, deleteActionScript: { ...olderScript, id: "script-delete-1" }, deleteActionConversionError: null },
+      },
+      [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
+    });
+    renderActionDetailPage();
+
+    await user.click(await waitForConvertButton());
+
+    expect(
+      await screen.findByText("Its delete action was converted too, so the first run can clean up after itself."),
+    ).toBeInTheDocument();
   });
 });

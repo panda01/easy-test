@@ -9,7 +9,7 @@ import {
 import { normalizeFieldName } from "./formFields.js";
 import { urlMatchesPatternKey } from "./detectPagePatterns.js";
 import { normalizeCrawlUrl } from "./normalizeCrawlUrl.js";
-import type { ActionKind } from "./scoreActionObjectRole.js";
+import { type ActionKind, kindActsOnAnExistingObject } from "./scoreActionObjectRole.js";
 
 /** The kinds of value a parameter holds: typed text, a picked option, or which object to act on. */
 export const PARAMETER_KINDS = ["text", "option", "object"] as const;
@@ -656,7 +656,7 @@ export function resolveVersionParameters(
   }
 
   const objectRow = rows.find((row) => row.kind === "object" && row.source !== "you");
-  if (objectRow !== undefined && actionKind === "object") {
+  if (objectRow !== undefined && kindActsOnAnExistingObject(actionKind)) {
     const objectBinding = bindObjectParameter(plan, objectContext, takenUses);
     const uses = claimUses(objectBinding.uses);
     if (uses.length > 0) {

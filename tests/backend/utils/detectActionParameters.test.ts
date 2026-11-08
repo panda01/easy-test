@@ -280,8 +280,8 @@ describe("detectActionParameters", () => {
     ]);
   });
 
-  it("adds the object row for an Object action with a type - named by the type - and for no other", () => {
-    const objectRole = { kind: "object" as const, objectTypeKey: "/projects/{project}", objectTypeName: "Project" };
+  it("adds the object row for a Read, Update, or Delete action with a type - named by the type - and for no other", () => {
+    const objectRole = { kind: "delete" as const, objectTypeKey: "/projects/{project}", objectTypeName: "Project" };
 
     const rows = detectActionParameters(buildInput({ versionPlans: [PROJECT_PLAN], role: objectRole }));
 

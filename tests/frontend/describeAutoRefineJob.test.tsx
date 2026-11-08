@@ -150,3 +150,39 @@ describe("describeAutoRefineOutcome", () => {
     });
   });
 });
+
+describe("describeAutoRefineProgress: the Delete side", () => {
+  it("says the version passed and the delete action is being refined", () => {
+    const job = buildAutoRefineJobRecord({ phase: "refiningCleanup", refinementsDone: 1, currentActionScriptId: "script-2" });
+
+    expect(describeAutoRefineProgress(job, versionNumberOf)).toBe(
+      "Refinement 1 of 5 · Version 2 passed; refining its delete action…",
+    );
+  });
+
+  it("says the delete action is being run on its own", () => {
+    const job = buildAutoRefineJobRecord({ phase: "runningCleanup", refinementsDone: 2, currentActionScriptId: "script-2" });
+
+    expect(describeAutoRefineProgress(job, versionNumberOf)).toBe("Refinement 2 of 5 · Running its delete action on its own…");
+    expect(describeAutoRefineProgress({ ...job, stopRequestedAt: "2026-04-05T03:06:05.000Z" }, versionNumberOf)).toBe(
+      "Refinement 2 of 5 · Running its delete action on its own… · Stopping after this step…",
+    );
+  });
+});
+
+describe("describeAutoRefineOutcome: the Delete side", () => {
+  it("says the version passed but the delete action's refinement changed nothing", () => {
+    const job = buildAutoRefineJobRecord({
+      status: "unchanged",
+      phase: null,
+      currentActionScriptId: "script-1",
+      cleanupActionScriptIds: ["delete-script-2"],
+      errorMessage: "its delete action's refinement came back identical to the version it refined, so refining again would go nowhere",
+    });
+
+    expect(describeAutoRefineOutcome(job, versionNumberOf)).toEqual({
+      severity: "warning",
+      text: "Stopped: Version 1 passed, but its delete action's refinement came back identical to the version it refined, so refining again would go nowhere.",
+    });
+  });
+});

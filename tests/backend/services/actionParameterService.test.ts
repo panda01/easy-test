@@ -71,7 +71,6 @@ function buildAction(overrides: Partial<ActionWithCredential> = {}): ActionWithC
     userActionKind: null,
     userObjectTypeKey: null,
     userNameParameterKey: null,
-    userDeletesObject: null,
     parametersSyncedAt: new Date("2026-10-02T00:00:00.000Z"),
     createdAt: new Date("2026-09-01T00:00:00.000Z"),
     updatedAt: new Date("2026-09-01T00:00:00.000Z"),
@@ -632,6 +631,7 @@ describe("followUpRecordedRun", () => {
       view,
       applied,
       runResult,
+      markDeletedCreatedObjectId: null,
     };
   }
 
@@ -724,12 +724,26 @@ describe("followUpRecordedRun", () => {
         buildCrawledChoice("Mercury", "https://example.com/projects/m"),
       ],
     };
-    expect(deleteView.role).toMatchObject({ kind: "object", deletesObject: true });
+    expect(deleteView.role).toMatchObject({ kind: "delete" });
 
     await followUpRecordedRun(
       buildFollowUp(deleteView, buildApplied([{ key: "object", label: "Project", value: "apollo 7" }]), buildRunResult()),
     );
     expect(mockDbService.markCreatedObjectDeletedByRun).toHaveBeenCalledWith(WEBSITE_ID, "created-1", "run-9");
+
+    // A cleanup run names its object by id instead of by the typed name.
+    mockDbService.markCreatedObjectDeletedByRun.mockClear();
+    await followUpRecordedRun({
+      ...buildFollowUp(deleteView, buildApplied([{ key: "object", label: "Project", value: "Mercury" }]), buildRunResult()),
+      markDeletedCreatedObjectId: "created-7",
+    });
+    expect(mockDbService.markCreatedObjectDeletedByRun).toHaveBeenCalledWith(WEBSITE_ID, "created-7", "run-9");
+    mockDbService.markCreatedObjectDeletedByRun.mockClear();
+    await followUpRecordedRun({
+      ...buildFollowUp(deleteView, buildApplied([]), buildRunResult({ succeeded: false })),
+      markDeletedCreatedObjectId: "created-7",
+    });
+    expect(mockDbService.markCreatedObjectDeletedByRun).not.toHaveBeenCalled();
 
     mockDbService.markCreatedObjectDeletedByRun.mockClear();
     await followUpRecordedRun(
@@ -752,7 +766,7 @@ describe("followUpRecordedRun", () => {
 
     await expect(
       followUpRecordedRun(buildFollowUp(view, buildApplied([]), buildRunResult({ confirmStepSucceeded: true }))),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ createdObjectId: null, createdObjectName: null });
 
     expect(console.error).toHaveBeenCalledWith("[parameters] run run-9 could not sync its parameters: locked");
     expect(console.error).toHaveBeenCalledWith("[parameters] run run-9 could not record the object it created: duplicate run");

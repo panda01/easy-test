@@ -1,19 +1,27 @@
 import { type Express } from "express";
 import {
+  findActionCleanupForCreateAction,
+  findActionForWebsite,
   findLatestCrawledPagesForWebsite,
+  findNewestActionScriptForAction,
   listActionScriptsForAction,
   createActionScriptForAction,
   listActionScriptRunsForScript,
   findActionScriptRunForScript,
+  type ActionScriptWithPlan,
+  type ActionWithCredential,
+  type Website,
 } from "../services/dbService.js";
-import { convertActionToPlan } from "../services/scriptGenerationService.js";
+import { convertActionToPlan, type ScriptModelChoice } from "../services/scriptGenerationService.js";
 import { findScriptModel } from "../services/scriptModelService.js";
 import { syncActionParametersQuietly } from "../services/actionParameterService.js";
 import {
   ACTION_ALREADY_RUNNING_MESSAGE,
+  CLEANUP_FAILURE_CANNOT_BE_REFINED_MESSAGE,
   EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE,
   ONLY_A_FAILED_RUN_CAN_BE_REFINED_MESSAGE,
   RUN_ALREADY_BEING_REFINED_MESSAGE,
+  runFailedOnlyInItsCleanup,
   allowedOriginsFor,
   claimActionRun,
   claimRunRefinement,
@@ -41,6 +49,74 @@ import { findWebsiteAndAction, findWebsiteActionAndScript } from "./actionLookup
 const SCRIPT_RUN_NOT_FOUND_MESSAGE = "Script run not found";
 const RUN_HAS_NO_FAILURE_SCREENSHOT_MESSAGE = "This run did not capture a failure screenshot";
 const FAILURE_SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Failure screenshot file not found";
+
+/**
+ * Converts one action into a plan with Claude and saves it as a new version
+ * - the work behind "Convert to script", shared by the action being
+ * converted and, for a Create action, its Delete action. Claude gets the
+ * website, the action, the NAME of its credential, and the aria snapshots of
+ * the crawled pages most relevant to it (from the newest crawl done the way
+ * the action runs); the same snapshots are stored on the version, and the
+ * action's parameters are synced once it is saved.
+ * @param website - The website
+ * @param action - The action to convert
+ * @param choice - The model and effort level to use
+ * @returns The saved version
+ * @throws {ScriptGenerationError} When Claude declined, its reply was cut off, or the reply was not a valid plan
+ * @throws Anything else the Anthropic API call or a query rejects with
+ */
+async function convertActionAndSaveVersion(
+  website: Website,
+  action: ActionWithCredential,
+  choice: ScriptModelChoice,
+): Promise<ActionScriptWithPlan> {
+  const credential = await findActionCredential(website, action);
+  const allowedOrigins = allowedOriginsFor(website, credential);
+  const crawledPages = await findLatestCrawledPagesForWebsite(website.id, credential?.id ?? null);
+  const searchTerms = extractActionSearchTerms(action.title, action.description);
+  const contextPages = selectRelevantCrawledPages(crawledPages, searchTerms);
+
+  const snapshots = {
+    websiteName: website.name,
+    startUrl: website.url,
+    actionTitle: action.title,
+    actionDescription: action.description,
+    credentialId: credential?.id ?? null,
+    credentialName: credential?.name ?? null,
+  };
+  const conversion = await convertActionToPlan({ ...snapshots, allowedOrigins, contextPages }, choice);
+  const created = await createActionScriptForAction(website.id, action.id, {
+    ...snapshots,
+    summary: conversion.summary,
+    assumptions: conversion.assumptions,
+    plan: conversion.plan,
+    contextPageUrls: contextPages.map((page) => page.url),
+    modelId: conversion.modelId,
+    effort: conversion.effort,
+    editedFromActionScriptId: null,
+  });
+  await syncActionParametersQuietly(website.id, action);
+  return created;
+}
+
+/**
+ * Finds the Delete action linked to a Create action when that Delete action
+ * has no version yet - the one "Convert to script" also converts.
+ * @param website - The website
+ * @param action - The action being converted (any kind; only a linked Create action finds anything)
+ * @returns The linked Delete action without a version, or null
+ */
+async function findDeleteActionWithoutAVersion(
+  website: Website,
+  action: ActionWithCredential,
+): Promise<ActionWithCredential | null> {
+  const link = await findActionCleanupForCreateAction(website.id, action.id);
+  if (link === null) return null;
+  const deleteAction = await findActionForWebsite(website.id, link.deleteActionId);
+  if (deleteAction === null) return null;
+  const deleteActionHasAVersion = (await findNewestActionScriptForAction(website.id, deleteAction.id)) !== null;
+  return deleteActionHasAVersion ? null : deleteAction;
+}
 
 /**
  * Registers the action script routes: converting an action into a JSON step
@@ -103,12 +179,20 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * action runs). The reply must pass every plan rule; the same snapshots are
    * stored on the version, with the pages' URLs (`contextPageUrls`), the
    * model that answered, and the effort level sent. The action's parameters
-   * are synced once it is saved. The request lasts as long as Claude takes.
+   * are synced once it is saved.
+   *
+   * A CREATE action's linked Delete action is converted too, in the same
+   * request with the same model and effort, when it has no version yet - so
+   * the first run can clean up. That version is answered as
+   * `deleteActionScript` (null when none was made); a failure of that second
+   * conversion does not fail the request: the Create version is saved and
+   * `deleteActionConversionError` says what went wrong. The request lasts as
+   * long as Claude takes, once or twice.
    * @route POST /api/websites/:websiteId/actions/:actionId/scripts
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action to convert
    * @param body - JSON `{ modelId, effort }`; `modelId` required, `effort` a level the model offers or null for "Standard"
-   * @returns 201 with the saved version; 400 with `{ error }` for an invalid body, a model not in the catalog, or an effort level the model does not offer; 404 with `{ error }` when the website or action does not exist or was deleted; 502 with `{ error }` when Claude declined, its reply was cut off, or the reply was not a valid plan; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call or a query fails
+   * @returns 201 with the saved version plus `deleteActionScript` and `deleteActionConversionError`; 400 with `{ error }` for an invalid body, a model not in the catalog, or an effort level the model does not offer; 404 with `{ error }` when the website or action does not exist or was deleted; 502 with `{ error }` when Claude declined, its reply was cut off, or the reply was not a valid plan; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call or a query fails
    */
   app.post("/api/websites/:websiteId/actions/:actionId/scripts", async (req, res) => {
     const choiceValidation = validateScriptModelChoiceInput(req.body);
@@ -137,37 +221,23 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
         return;
       }
 
-      const credential = await findActionCredential(website, action);
-      const allowedOrigins = allowedOriginsFor(website, credential);
-      const crawledPages = await findLatestCrawledPagesForWebsite(website.id, credential?.id ?? null);
-      const searchTerms = extractActionSearchTerms(action.title, action.description);
-      const contextPages = selectRelevantCrawledPages(crawledPages, searchTerms);
+      const choice = { model, effort: effortResolution.effort };
+      const created = await convertActionAndSaveVersion(website, action, choice);
 
-      const snapshots = {
-        websiteName: website.name,
-        startUrl: website.url,
-        actionTitle: action.title,
-        actionDescription: action.description,
-        credentialId: credential?.id ?? null,
-        credentialName: credential?.name ?? null,
-      };
-      const conversion = await convertActionToPlan(
-        { ...snapshots, allowedOrigins, contextPages },
-        { model, effort: effortResolution.effort },
-      );
-
-      const created = await createActionScriptForAction(website.id, action.id, {
-        ...snapshots,
-        summary: conversion.summary,
-        assumptions: conversion.assumptions,
-        plan: conversion.plan,
-        contextPageUrls: contextPages.map((page) => page.url),
-        modelId: conversion.modelId,
-        effort: conversion.effort,
-        editedFromActionScriptId: null,
-      });
-      await syncActionParametersQuietly(website.id, action);
-      res.status(201).json(created);
+      // A Create action's Delete action gets its first version in the same
+      // request, so the first run can clean up; a failure there is reported
+      // in the body, not as a failed request - the Create version is saved.
+      let deleteActionScript: ActionScriptWithPlan | null = null;
+      let deleteActionConversionError: string | null = null;
+      const deleteActionToConvert = await findDeleteActionWithoutAVersion(website, action);
+      if (deleteActionToConvert !== null) {
+        try {
+          deleteActionScript = await convertActionAndSaveVersion(website, deleteActionToConvert, choice);
+        } catch (deleteConversionError: unknown) {
+          deleteActionConversionError = describeError(deleteConversionError);
+        }
+      }
+      res.status(201).json({ ...created, deleteActionScript, deleteActionConversionError });
     } catch (error: unknown) {
       res.status(statusForScriptGenerationFailure(error)).json({ error: describeError(error) });
     }
@@ -298,14 +368,22 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * 5 minute time limit) is still a successfully recorded run, so it answers
    * 201 with `succeeded: false`, plus the address (`failingPageUrl`) and aria
    * snapshot (`failingPageAriaSnapshot`) of the page it failed on, when they
-   * could be read. The request lasts as long as the run does, at most 5
-   * minutes plus a few seconds to stop it.
+   * could be read.
+   *
+   * CLEANUP: a run of a Create action then runs its linked Delete action's
+   * newest version on the object it made (unless `cleanUpAfterwards` is
+   * false), and records the outcome on the run as `cleanupOutcome`,
+   * `cleanupActionScriptRunId` (the Delete run, answered as `cleanupRun`) and
+   * `cleanupErrorMessage`; a run whose cleanup failed or could not start (no
+   * delete action, or no version of it) is recorded as FAILED even when its
+   * own steps passed. The request then lasts as long as both runs do: each at
+   * most 5 minutes plus a few seconds to stop it.
    * @route POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the owning action's cuid
    * @param actionScriptId - Path parameter: the version to run
-   * @param body - Optional JSON `{ parameterValues }`: the values by parameter key, each text of at most 1000 characters without `{{`
-   * @returns 201 with the recorded run (with `createdObject` and `deletedObjects`); 400 with `{ error }` when the body is invalid, a key is not one of the version's parameters, a required value is blank, an object value has no known address for a version that opens it by address, the plan the values make breaks a plan rule, or the action's credential has no login URL and neither does the website; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the action is already running, its credential is gone, the plan no longer passes the plan rules, or the plan types a credential the action does not have; 503 with `{ error }` when the action has a credential but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when the password cannot be decrypted, the run folder cannot be written, the browser cannot start, or a query fails
+   * @param body - Optional JSON `{ parameterValues, cleanUpAfterwards }`: the values by parameter key, each text of at most 1000 characters without `{{`; `cleanUpAfterwards` true (the default) or false
+   * @returns 201 with the recorded run (with `createdObject`, `deletedObjects`, `cleanupRun`, and `cleanedUpRun`); 400 with `{ error }` when the body is invalid, a key is not one of the version's parameters, a required value is blank, an object value has no known address for a version that opens it by address, the plan the values make breaks a plan rule, or the action's credential has no login URL and neither does the website; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the action is already running, its credential is gone, the plan no longer passes the plan rules, or the plan types a credential the action does not have; 503 with `{ error }` when the action has a credential but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when the password cannot be decrypted, the run folder cannot be written, the browser cannot start, or a query fails
    */
   app.post(
     "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs",
@@ -340,6 +418,11 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
             actionScriptDirectory,
             { website, action, script },
             valuesValidation.input.parameterValues,
+            {
+              cleanUpAfterwards: valuesValidation.input.cleanUpAfterwards,
+              isCleanupRun: false,
+              markDeletedCreatedObjectId: null,
+            },
           );
           res.status(201).json(recordedRun);
         } finally {
@@ -463,7 +546,7 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * @param actionScriptId - Path parameter: the version whose run failed
    * @param actionScriptRunId - Path parameter: the failed run to refine
    * @param body - Optional JSON `{ note }`; `note` is text of at most 2000 characters once trimmed, or null / left out / blank for no note
-   * @returns 201 with the new version, including its `refinement` (the refinement row plus `actionScriptRun: { id, errorMessage, failedStepNumber, timedOut, failingPageAriaSnapshot }`); 400 with `{ error }` when the body is not a JSON object, the note is not text, or the note is over 2000 characters; 404 with `{ error }` when the website, action, version, or run does not exist or was deleted; 409 with `{ error }` when the run passed (or recorded no error), the version was saved from the step editor (no model wrote it), the run is already being refined, or the model that wrote the version is no longer offered; 502 with `{ error }` when Claude declined, its reply was cut off, or the reply was not a valid plan; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call, the screenshot read, or a query fails
+   * @returns 201 with the new version, including its `refinement` (the refinement row plus `actionScriptRun: { id, errorMessage, failedStepNumber, timedOut, failingPageAriaSnapshot }`); 400 with `{ error }` when the body is not a JSON object, the note is not text, or the note is over 2000 characters; 404 with `{ error }` when the website, action, version, or run does not exist or was deleted; 409 with `{ error }` when the run passed (or recorded no error), the run failed only in its cleanup (refine the delete action's run instead), the version was saved from the step editor (no model wrote it), the run is already being refined, or the model that wrote the version is no longer offered; 502 with `{ error }` when Claude declined, its reply was cut off, or the reply was not a valid plan; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call, the screenshot read, or a query fails
    */
   app.post(
     "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs/:actionScriptRunId/refinements",
@@ -500,6 +583,10 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
         const failedRun = describeFailedRun(run);
         if (failedRun === null) {
           res.status(409).json({ error: ONLY_A_FAILED_RUN_CAN_BE_REFINED_MESSAGE });
+          return;
+        }
+        if (runFailedOnlyInItsCleanup(run)) {
+          res.status(409).json({ error: CLEANUP_FAILURE_CANNOT_BE_REFINED_MESSAGE });
           return;
         }
         const sourceModelId = script.modelId;

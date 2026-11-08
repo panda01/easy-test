@@ -55,11 +55,62 @@ export interface ActionScriptRunRecord {
   confirmStepSucceeded: boolean | null;
   /** The object a Create run made (still in the record), or null. */
   createdObject: RunObjectSummary | null;
-  /** The created objects a deleting run deleted on the site. */
+  /** The created objects a Delete run deleted on the site. */
   deletedObjects: RunObjectSummary[];
+  /** A Create run's cleanup outcome (see `CleanupOutcomeRecord`), or null for other kinds and older runs. */
+  cleanupOutcome: CleanupOutcomeRecord | null;
+  /** The Delete action's run that cleaned up after this Create run, or null. */
+  cleanupActionScriptRunId: string | null;
+  /** The Delete run's error, or why the cleanup could not start; null when it passed, was turned off, or does not apply. */
+  cleanupErrorMessage: string | null;
+  /** The cleanup run named by `cleanupActionScriptRunId`, when it could be read. */
+  cleanupRun: RunCleanupSummary | null;
+  /** For a Delete run that was a cleanup: the Create run it cleaned up after, or null. */
+  cleanedUpRun: CleanedUpRunSummary | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+}
+
+/**
+ * What happened to a Create run's cleanup: `passed` / `failed` (the Delete
+ * run's outcome), `off` (unticked for this run), `notReached` (no object was
+ * made), or `missing` (no Delete action, or none of its versions).
+ */
+export type CleanupOutcomeRecord = "missing" | "off" | "notReached" | "passed" | "failed";
+
+/** The Delete action's run that cleaned up after a Create run, as the run list names it. */
+export interface RunCleanupSummary {
+  /** The Delete run's cuid. */
+  id: string;
+  /** The Delete action's cuid. */
+  actionId: string;
+  /** The Delete version's cuid. */
+  actionScriptId: string;
+  /** Whether the Delete run passed. */
+  succeeded: boolean;
+  /** Why it stopped, or null. */
+  errorMessage: string | null;
+  /** The step it stopped at, or null. */
+  failedStepNumber: number | null;
+  /** True when it hit the time limit. */
+  timedOut: boolean;
+  /** When it ran (ISO). */
+  createdAt: string;
+  /** The Delete action, by title. */
+  action: { title: string };
+}
+
+/** The Create run a Delete run cleaned up after, as the run list names it. */
+export interface CleanedUpRunSummary {
+  /** The Create run's cuid. */
+  id: string;
+  /** The Create action's cuid. */
+  actionId: string;
+  /** The Create version's cuid. */
+  actionScriptId: string;
+  /** The Create action, by title. */
+  action: { title: string };
 }
 
 /** What `useActionScriptRuns` hands back. */

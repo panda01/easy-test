@@ -11,9 +11,9 @@ import {
   ACTION_KIND_HELP,
   ACTION_KIND_LABELS,
   DETECT_CHOICE_VALUE,
-  describeDetectedDeletesChoice,
   describeDetectedKindChoice,
   describeDetectedObjectTypeChoice,
+  kindTakesAnObjectType,
 } from "../utils/actionObjectRole";
 import { type ActionKindRecord, type ActionObjectRoleRecord } from "../utils/actionParameters";
 
@@ -44,16 +44,13 @@ export interface ObjectRoleChoices {
   detectedRole: ActionObjectRoleRecord | null;
 }
 
-/** The "Deletes the object" select's values. */
-const DELETES_CHOICE_VALUES = { yes: "yes", no: "no" } as const;
-
 /**
  * Reads the kind select's value back.
  * @param choiceValue - The select's value
  * @returns The kind, or null for "Detect"
  */
 function readKindChoice(choiceValue: string): ActionKindRecord | null {
-  const kinds: ActionKindRecord[] = ["parameters", "object", "create"];
+  const kinds = Object.keys(ACTION_KIND_LABELS) as ActionKindRecord[];
   return kinds.find((kind) => kind === choiceValue) ?? null;
 }
 
@@ -75,8 +72,10 @@ export interface TitleDescriptionFormProps {
   errorMessage: string | null;
   /** Called with the field values when the form is submitted. */
   onSubmit: (values: WebsiteItemRequestBody) => void;
-  /** Called when the user clicks Cancel. */
+  /** Called when the user clicks Cancel (or the button `cancelLabel` names). */
   onCancel: () => void;
+  /** The cancel button's text; "Cancel" when omitted. Step 2 of a Create action uses "Skip for now". */
+  cancelLabel?: string;
   /**
    * The website's credentials, to show the "Log in as" select (actions
    * only); undefined hides it and leaves `credentialId` out of the values.
@@ -84,7 +83,7 @@ export interface TitleDescriptionFormProps {
   credentialOptions?: CredentialOption[];
   /**
    * The object role choices (actions only): shows the Kind, Object type,
-   * and Deletes the object selects; undefined hides them and leaves the
+   * selects; undefined hides them and leaves the
    * role fields out of the values.
    */
   objectRoleChoices?: ObjectRoleChoices;
@@ -103,10 +102,10 @@ export interface TitleDescriptionFormProps {
  * Given `objectRoleChoices` (actions), it also shows what the action does
  * with an object - each select starting on "Detect", which names what the
  * detection picks and how sure it is:
- * - Kind: Parameters, Object (acts on an existing object, always required),
- *   or Create (makes one, recorded on each run);
- * - Object type (for Object and Create): one of the website's web objects;
- * - Deletes the object (for Object): Yes or No.
+ * - Kind: Parameters (typed values only, like logging in), Create (makes an
+ *   object, recorded on each run), Read, Update, or Delete (act on an
+ *   existing object, which every run names);
+ * - Object type (every kind but Parameters): one of the website's web objects.
  * Their warnings (a tie, no type found, an unsure type) show under them. The
  * name parameter is kept as it was (it is picked in the Parameters section).
  *
@@ -127,6 +126,7 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
     errorMessage,
     onSubmit,
     onCancel,
+    cancelLabel = "Cancel",
     credentialOptions,
     objectRoleChoices,
   } = props;
@@ -134,19 +134,11 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
   const [objectTypeChoice, setObjectTypeChoice] = useState<string>(
     initialValues.userObjectTypeKey ?? DETECT_CHOICE_VALUE,
   );
-  const [deletesChoice, setDeletesChoice] = useState<string>(
-    initialValues.userDeletesObject === null || initialValues.userDeletesObject === undefined
-      ? DETECT_CHOICE_VALUE
-      : initialValues.userDeletesObject
-        ? DELETES_CHOICE_VALUES.yes
-        : DELETES_CHOICE_VALUES.no,
-  );
   const roleFieldsAreShown = objectRoleChoices !== undefined;
   const detectedRole = objectRoleChoices?.detectedRole ?? null;
   const effectiveKind = readKindChoice(kindChoice) ?? detectedRole?.detectedKind.kind ?? null;
-  // Before anything is detected (a new action on "Detect"), both may apply.
-  const kindTakesAType = effectiveKind !== "parameters";
-  const kindActsOnAnObject = effectiveKind === "object" || effectiveKind === null;
+  // Before anything is detected (a new action on "Detect"), a type may apply.
+  const kindTakesAType = kindTakesAnObjectType(effectiveKind);
   const [title, setTitle] = useState(initialValues.title);
   const [description, setDescription] = useState(initialValues.description);
   const [selectedCredentialId, setSelectedCredentialId] = useState(
@@ -214,7 +206,6 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
           userActionKind: readKindChoice(kindChoice),
           userObjectTypeKey: objectTypeChoice === DETECT_CHOICE_VALUE ? null : objectTypeChoice,
           userNameParameterKey: initialValues.userNameParameterKey ?? null,
-          userDeletesObject: deletesChoice === DETECT_CHOICE_VALUE ? null : deletesChoice === DELETES_CHOICE_VALUES.yes,
         }
       : {};
     onSubmit({ title, description, credentialId: actionRunsLoggedOut ? null : credentialIdToShow, ...roleValues });
@@ -295,22 +286,6 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
               )}
           </TextField>
         )}
-        {roleFieldsAreShown && kindTakesAType && kindActsOnAnObject && (
-          <TextField
-            select
-            label="Deletes the object"
-            value={deletesChoice}
-            onChange={(event) => {
-              setDeletesChoice(event.target.value);
-            }}
-            helperText="A passed run marks the created object it ran on as deleted"
-            fullWidth
-          >
-            <MenuItem value={DETECT_CHOICE_VALUE}>{describeDetectedDeletesChoice(detectedRole)}</MenuItem>
-            <MenuItem value={DELETES_CHOICE_VALUES.yes}>Yes</MenuItem>
-            <MenuItem value={DELETES_CHOICE_VALUES.no}>No</MenuItem>
-          </TextField>
-        )}
         {roleFieldsAreShown &&
           (detectedRole?.warnings ?? []).map((warning) => (
             <Alert key={warning} severity="warning">
@@ -327,7 +302,7 @@ export default function TitleDescriptionForm(props: TitleDescriptionFormProps): 
           >
             {submitLabel}
           </Button>
-          <Button onClick={onCancel}>Cancel</Button>
+          <Button onClick={onCancel}>{cancelLabel}</Button>
         </Stack>
       </Stack>
     </Box>

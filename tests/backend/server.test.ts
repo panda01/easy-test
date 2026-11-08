@@ -26,6 +26,7 @@ const mockDbService = vi.hoisted(() => ({
   softDeleteUseCaseForWebsite: vi.fn(),
   listActionsForWebsite: vi.fn(),
   findActionForWebsite: vi.fn(),
+  listActionCleanupsForWebsite: vi.fn(),
   createActionForWebsite: vi.fn(),
   updateActionForWebsite: vi.fn(),
   softDeleteActionForWebsite: vi.fn(),
@@ -230,11 +231,12 @@ describe("server.ts", () => {
   it("wires the action routes into the full app", async () => {
     mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
     mockDbService.listActionsForWebsite.mockResolvedValue([sampleAction]);
+    mockDbService.listActionCleanupsForWebsite.mockResolvedValue([]);
 
     const res = await request(app).get(`/api/websites/${sampleWebsite.id}/actions`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([sampleAction]);
+    expect(res.body).toEqual([{ ...sampleAction, deleteAction: null, createActions: [] }]);
     expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(sampleWebsite.id);
     expect(mockDbService.listActionsForWebsite).toHaveBeenCalledWith(sampleWebsite.id);
   });

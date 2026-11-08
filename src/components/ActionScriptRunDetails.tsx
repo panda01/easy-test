@@ -1,8 +1,10 @@
 import { type ChangeEvent, type ReactElement, type ReactNode, useState } from "react";
+import { Link as RouterLink } from "react-router-dom";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import LinearProgress from "@mui/material/LinearProgress";
+import Link from "@mui/material/Link";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import ActionScriptRunOutput, { describeOutputLineCount } from "./ActionScriptRunOutput";
@@ -11,10 +13,11 @@ import { CheckCircleOutlineIcon, HighlightOffIcon } from "./icons";
 import { type ActionScriptRunRecord } from "../hooks/useActionScriptRuns";
 import { MONOSPACE_FONT_FAMILY, nocturneTokens } from "../theme/nocturneTheme";
 import { readUsedParameterValues } from "../utils/actionParameters";
-import { describeActionScriptRunOutcome } from "../utils/describeActionScriptRun";
+import { describeActionScriptRunOutcome, runFailedOnlyInItsCleanup } from "../utils/describeActionScriptRun";
 import { formatRunDuration } from "../utils/describeScreenshotRun";
 import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeTime";
-import { actionScriptRunFailureScreenshotApiUrl } from "../utils/routePaths";
+import { actionScriptRunFailureScreenshotApiUrl, websiteItemDetailPath } from "../utils/routePaths";
+import { ACTION_KIND } from "../utils/websiteItemKinds";
 
 /** The longest note the server accepts with a refine request (its `MAX_REFINE_NOTE_LENGTH`). */
 export const MAX_REFINE_NOTE_LENGTH = 2000;
@@ -46,8 +49,32 @@ export interface ActionScriptRunDetailsProps {
 }
 
 /**
+ * Says what a Create run's cleanup did, as the suffix of its "Created …"
+ * line: cleaned up by which delete action, or why not.
+ * @param run - The run
+ * @returns The suffix (" · cleaned up by a run of …"), or "" when the run has no cleanup outcome
+ */
+function describeCleanupSuffix(run: ActionScriptRunRecord): string {
+  const deleteActionTitle = run.cleanupRun?.action.title ?? "its delete action";
+  switch (run.cleanupOutcome ?? null) {
+    case "passed":
+      return ` · cleaned up by a run of ${deleteActionTitle}`;
+    case "failed":
+      return ` · cleanup failed: ${run.cleanupErrorMessage ?? `a run of ${deleteActionTitle} failed`}`;
+    case "off":
+      return " · cleanup turned off for this run";
+    case "missing":
+      return ` · not cleaned up: ${run.cleanupErrorMessage ?? "no delete action"}`;
+    default:
+      return "";
+  }
+}
+
+/**
  * Says what a run did to the record of created objects: the object a Create
- * run made, why one was not recorded, or the objects a deleting run deleted.
+ * run made and how its cleanup went, why no object was recorded, the objects
+ * a Delete run deleted, or - for a Delete run that was a cleanup - the Create
+ * run it cleaned up after.
  * @param run - The run
  * @returns The lines to show (empty for a run that touched no object)
  */
@@ -55,7 +82,7 @@ export function describeRunObjectChanges(run: ActionScriptRunRecord): string[] {
   const lines: string[] = [];
   const { createdObject, confirmStepNumber, confirmStepSucceeded } = run;
   if (createdObject !== null) {
-    lines.push(`Created ${createdObject.name}`);
+    lines.push(`Created ${createdObject.name}${describeCleanupSuffix(run)}`);
   } else if (confirmStepNumber !== null && confirmStepSucceeded === false) {
     lines.push(`Not recorded: the confirm step (step ${String(confirmStepNumber)}) showed an error`);
   } else if (confirmStepNumber !== null && confirmStepSucceeded === null) {
@@ -63,6 +90,11 @@ export function describeRunObjectChanges(run: ActionScriptRunRecord): string[] {
   }
   for (const deletedObject of run.deletedObjects) {
     lines.push(`Deleted ${deletedObject.name}`);
+  }
+  // Read defensively: a run answered without its relations (or recorded before cleanups existed) has none.
+  const cleanedUpRun = run.cleanedUpRun ?? null;
+  if (cleanedUpRun !== null) {
+    lines.push(`Cleanup after a run of ${cleanedUpRun.action.title}`);
   }
   return lines;
 }
@@ -126,7 +158,10 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
   const runHasFailureScreenshot = run.failureScreenshotFileName !== null;
   const runFailedWithoutScreenshot = !run.succeeded && !runHasFailureScreenshot;
   const runHasAnErrorMessage = run.errorMessage !== null;
-  const refineAreaIsShown = runHasAnErrorMessage && versionCanBeRefined;
+  // A run whose own steps passed cannot be refined: its delete action's run is what failed.
+  const onlyTheCleanupFailed = runFailedOnlyInItsCleanup(run);
+  const refineAreaIsShown = runHasAnErrorMessage && versionCanBeRefined && !onlyTheCleanupFailed;
+  const cleanupRun = run.cleanupRun ?? null;
   const refineIsBlocked = isRefining || isRunning || isAutoRefining;
   const refineErrorIsShown = refineWasAttemptedForThisRun && refineErrorMessage !== null;
   const usedValues = readUsedParameterValues(run.parameterValues);
@@ -217,6 +252,21 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
             <Box key={objectChangeLine}>{objectChangeLine}</Box>
           ))}
         </Box>
+      )}
+      {onlyTheCleanupFailed && (
+        <Alert severity="warning">
+          This run&apos;s own steps passed; only its cleanup failed, so there is nothing to refine here.{" "}
+          {cleanupRun !== null ? (
+            <Link
+              component={RouterLink}
+              to={`${websiteItemDetailPath(ACTION_KIND, websiteId, cleanupRun.actionId)}?script=${encodeURIComponent(cleanupRun.actionScriptId)}&run=${encodeURIComponent(cleanupRun.id)}`}
+            >
+              Refine the delete action&apos;s run
+            </Link>
+          ) : (
+            "Add or convert its delete action from the header above."
+          )}
+        </Alert>
       )}
       {usedValues.length > 0 && (
         <DisclosureRow label="Values used" detail={String(usedValues.length)}>

@@ -22,8 +22,13 @@ export type AutoRefineJobStatus =
   | "failed"
   | "interrupted";
 
-/** Which step a running job is on: running the current version, or refining it into the next. */
-export type AutoRefineJobPhase = "running" | "refining";
+/**
+ * Which step a running job is on: running the current version, refining it
+ * into the next, or - after a Create version passed but its cleanup failed -
+ * refining the delete action's version (`refiningCleanup`) or running that
+ * on its own (`runningCleanup`).
+ */
+export type AutoRefineJobPhase = "running" | "refining" | "refiningCleanup" | "runningCleanup";
 
 /**
  * One auto-refine job of an action, as the API returns it: a background job
@@ -53,9 +58,13 @@ export interface AutoRefineJobRecord {
   createdActionScriptIds: string[];
   /** The runs the job recorded, oldest first. */
   actionScriptRunIds: string[];
+  /** The delete action's versions the job refined after a cleanup failed, oldest first. */
+  cleanupActionScriptIds: string[];
+  /** The delete action's runs the job made on its own after refining it, oldest first. */
+  cleanupActionScriptRunIds: string[];
   /** When the user asked the job to stop, or null. */
   stopRequestedAt: string | null;
-  /** Why the job failed, or null. */
+  /** Why the job failed - or, for an `unchanged` ending on the Delete side, which refinement changed nothing; null otherwise. */
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;

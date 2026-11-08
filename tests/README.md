@@ -58,6 +58,12 @@ field reader (`readRawFormFields`) against a real DOM rather than a stubbed
 element gets a box except those marked `data-hidden`.
 `actionParameterService.test.ts` mocks only dbService; parameter detection,
 binding, and scoring run for real (their own specs cover their rules).
+`deleteActionGenerationService.test.ts` replaces the Anthropic SDK and the
+model catalog the way `scriptGenerationService.test.ts` does, so no spec
+calls Claude. `actionScriptExecutionService.test.ts`'s cleanup specs drive
+the nested Delete run through the real `performActionScriptRun` with the
+runner mocked; `autoRefineService.test.ts`'s Delete-side specs mock
+`runFailedOnlyInItsCleanup` to read the run's `cleanupOutcome`.
 
 **Polling is tested with fake timers.** `usePolledJsonResource`,
 `useCrawlRunProgress`, and `CrawlRunPage`'s "while the crawl runs" specs use

@@ -20,6 +20,9 @@ const mockDbService = vi.hoisted(() => ({
   findActionScriptRunForScript: vi.fn(),
   createActionScriptRunForScript: vi.fn(),
   findActionScriptRunWithObjects: vi.fn(),
+  findActionCleanupForCreateAction: vi.fn(),
+  findNewestActionScriptForAction: vi.fn(),
+  recordActionScriptRunCleanup: vi.fn(),
 }));
 
 /**
@@ -436,10 +439,13 @@ describe("Action script routes", () => {
     // A version has no parameters, and a run's follow-up and a version's
     // sync succeed, unless a test says otherwise.
     mockActionParameterService.loadVersionParameters.mockResolvedValue(EMPTY_PARAMETERS_VIEW);
-    mockActionParameterService.followUpRecordedRun.mockResolvedValue(undefined);
+    mockActionParameterService.followUpRecordedRun.mockResolvedValue({ createdObjectId: null, createdObjectName: null });
     mockActionParameterService.syncActionParametersQuietly.mockResolvedValue(undefined);
     // The run route answers with the recorded run as created, unless a test says otherwise.
     mockDbService.findActionScriptRunWithObjects.mockResolvedValue(null);
+    // The action has no delete action linked unless a test says otherwise.
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue(null);
+    mockDbService.recordActionScriptRunCleanup.mockResolvedValue(true);
   });
 
   describe("GET /api/websites/:websiteId/actions/:actionId/scripts", () => {
@@ -539,7 +545,7 @@ describe("Action script routes", () => {
       const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
 
       expect(res.status).toBe(201);
-      expect(res.body).toEqual(foundScript);
+      expect(res.body).toEqual({ ...foundScript, deleteActionScript: null, deleteActionConversionError: null });
       expect(mockScriptModelService.findScriptModel).toHaveBeenCalledWith("claude-opus-5-5");
       // A logged-out action has no credential to look up, and reads the pages of a logged-out crawl.
       expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
@@ -2724,6 +2730,106 @@ describe("Action script routes", () => {
         const [refinementRequest] = mockScriptGenerationService.refineActionPlan.mock.calls[0] as [{ previousPlan: unknown }];
         expect(refinementRequest.previousPlan).toEqual(TYPE_NAME_PLAN);
       });
+    });
+  });
+});
+
+describe("Action script routes: cleanup", () => {
+  const REFINE_PATH = REFINEMENTS_PATH;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockDbService.findWebsiteById.mockResolvedValue(foundWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(foundAction);
+    mockDbService.findActionScriptForAction.mockResolvedValue(foundScript);
+    mockDbService.findCredentialForWebsite.mockResolvedValue(foundCredential);
+    mockDbService.findLatestCrawledPagesForWebsite.mockResolvedValue([]);
+    mockScriptModelService.findScriptModel.mockResolvedValue(opusModel);
+    mockActionParameterService.syncActionParametersQuietly.mockResolvedValue(undefined);
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue(null);
+  });
+
+  it("refuses to refine a run that failed only in its cleanup, pointing at the delete action's run", async () => {
+    mockDbService.findActionScriptRunForScript.mockResolvedValue({
+      ...sampleRun,
+      succeeded: false,
+      failedStepNumber: null,
+      errorMessage: "Cleanup failed: Step 2 (click): button not found",
+      cleanupOutcome: "failed",
+      cleanupActionScriptRunId: "run-delete-1",
+      cleanupErrorMessage: "Step 2 (click): button not found",
+    });
+
+    const res = await request(createActionScriptsApp()).post(REFINE_PATH).send({ note: null });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: "This run's own steps passed; only its cleanup failed. Refine the delete action's run instead",
+    });
+    expect(mockScriptGenerationService.refineActionPlan).not.toHaveBeenCalled();
+  });
+
+  it("converts the linked delete action too, with the same model and effort, when it has no version yet", async () => {
+    const deleteAction = { ...foundAction, id: "action-delete-from-db", title: "Delete the project", description: "Removes it" };
+    const deleteScript = { ...foundScript, id: "delete-script-from-db", actionId: deleteAction.id, actionTitle: deleteAction.title };
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue({
+      id: "cleanup-1",
+      createActionId: foundAction.id,
+      deleteActionId: deleteAction.id,
+      createAction: { id: foundAction.id, title: foundAction.title },
+      deleteAction: { id: deleteAction.id, title: deleteAction.title },
+    });
+    mockDbService.findActionForWebsite.mockResolvedValueOnce(foundAction).mockResolvedValueOnce(deleteAction);
+    mockDbService.findNewestActionScriptForAction.mockResolvedValue(null);
+    mockScriptGenerationService.convertActionToPlan.mockResolvedValue(cleanConversion);
+    mockDbService.createActionScriptForAction.mockResolvedValueOnce(foundScript).mockResolvedValueOnce(deleteScript);
+
+    const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ ...foundScript, deleteActionScript: deleteScript, deleteActionConversionError: null });
+    expect(mockScriptGenerationService.convertActionToPlan).toHaveBeenCalledTimes(2);
+    expect(mockScriptGenerationService.convertActionToPlan).toHaveBeenLastCalledWith(
+      expect.objectContaining({ actionTitle: "Delete the project", actionDescription: "Removes it" }),
+      { model: opusModel, effort: "high" },
+    );
+    expect(mockDbService.createActionScriptForAction).toHaveBeenLastCalledWith(
+      foundWebsite.id,
+      deleteAction.id,
+      expect.objectContaining({ actionTitle: "Delete the project", plan: cleanConversion.plan }),
+    );
+    expect(mockActionParameterService.syncActionParametersQuietly).toHaveBeenCalledWith(foundWebsite.id, deleteAction);
+  });
+
+  it("leaves the delete action alone when it already has a version, and reports a failed second conversion without failing the request", async () => {
+    const deleteAction = { ...foundAction, id: "action-delete-from-db", title: "Delete the project" };
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue({
+      id: "cleanup-1",
+      createActionId: foundAction.id,
+      deleteActionId: deleteAction.id,
+      createAction: { id: foundAction.id, title: foundAction.title },
+      deleteAction: { id: deleteAction.id, title: deleteAction.title },
+    });
+    mockDbService.findActionForWebsite.mockResolvedValue(deleteAction);
+    mockDbService.findNewestActionScriptForAction.mockResolvedValue(foundScript);
+    mockScriptGenerationService.convertActionToPlan.mockResolvedValue(cleanConversion);
+    mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
+
+    const withVersion = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
+    expect(withVersion.status).toBe(201);
+    expect(withVersion.body).toEqual({ ...foundScript, deleteActionScript: null, deleteActionConversionError: null });
+    expect(mockScriptGenerationService.convertActionToPlan).toHaveBeenCalledTimes(1);
+
+    mockDbService.findNewestActionScriptForAction.mockResolvedValue(null);
+    mockScriptGenerationService.convertActionToPlan
+      .mockResolvedValueOnce(cleanConversion)
+      .mockRejectedValueOnce(new Error("Claude's reply was cut off"));
+    const withFailedSecond = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
+    expect(withFailedSecond.status).toBe(201);
+    expect(withFailedSecond.body).toEqual({
+      ...foundScript,
+      deleteActionScript: null,
+      deleteActionConversionError: "Claude's reply was cut off",
     });
   });
 });

@@ -345,7 +345,7 @@ describe("resolveVersionParameters", () => {
     const objectRow = buildRow({ key: "object", kind: "object", label: "Project", fieldTarget: null, objectTypeKey: "/projects/{project}" });
     const context = { ...PROJECT_CONTEXT, instances: [buildChoice("Mercury", "https://example.com/projects/m")] };
 
-    const [objectParameter] = resolveVersionParameters(plan, [objectRow], "object", context);
+    const [objectParameter] = resolveVersionParameters(plan, [objectRow], "delete", context);
 
     expect(objectParameter).toMatchObject({ key: "object", kind: "object", isRequired: true, requiredReason: "object", defaultValue: "Mercury" });
     expect(objectParameter.uses).toEqual([
@@ -369,7 +369,7 @@ describe("resolveVersionParameters", () => {
       instances: [buildChoice("Mercury", "https://example.com/projects/m"), buildChoice("Gemini", null)],
     };
 
-    const [objectParameter] = resolveVersionParameters(plan, [objectRow], "object", context);
+    const [objectParameter] = resolveVersionParameters(plan, [objectRow], "delete", context);
 
     expect(objectParameter.defaultValue).toBe("Mercury");
     expect(objectParameter.uses).toEqual([
@@ -381,7 +381,7 @@ describe("resolveVersionParameters", () => {
     const [gotoOnlyParameter] = resolveVersionParameters(
       buildPlan([{ action: "goto", target: null, value: "https://example.com/projects/unknown" }], "https://example.com/"),
       [objectRow],
-      "object",
+      "delete",
       context,
     );
     expect(gotoOnlyParameter.defaultValue).toBe("");
@@ -389,7 +389,7 @@ describe("resolveVersionParameters", () => {
 
   it("leaves the object out when nothing in the version names an instance", () => {
     const objectRow = buildRow({ key: "object", kind: "object", fieldTarget: null });
-    expect(resolveVersionParameters(CREATE_PLAN, [objectRow], "object", PROJECT_CONTEXT)).toEqual([]);
+    expect(resolveVersionParameters(CREATE_PLAN, [objectRow], "read", PROJECT_CONTEXT)).toEqual([]);
   });
 });
 

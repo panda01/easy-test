@@ -1,7 +1,9 @@
 import { type ReactElement, type ReactNode, useEffect, useRef, useState } from "react";
 import { Link as RouterLink, useSearchParams } from "react-router-dom";
+import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Link from "@mui/material/Link";
 import Typography from "@mui/material/Typography";
 import ActionScriptDetails from "../components/ActionScriptDetails";
 import ActionScriptParameters from "../components/ActionScriptParameters";
@@ -51,8 +53,10 @@ import {
   actionScriptsApiUrl,
   autoRefineJobStopApiUrl,
   autoRefineJobsApiUrl,
+  newDeleteActionPath,
   websiteDetailPath,
   websiteItemApiUrl,
+  websiteItemDetailPath,
   websiteItemEditPath,
 } from "../utils/routePaths";
 import { ACTION_KIND } from "../utils/websiteItemKinds";
@@ -60,11 +64,44 @@ import { ACTION_KIND } from "../utils/websiteItemKinds";
 /** The query parameter naming the shown version by its number. */
 const VERSION_QUERY_PARAMETER = "version";
 
+/** The query parameter naming the shown version by its id (a link from another action's run, which knows no number); wins over `version`. */
+const SCRIPT_QUERY_PARAMETER = "script";
+
+/** The query parameter naming the run to show first, by its id (a link from the Create run a cleanup run belongs to). */
+const RUN_QUERY_PARAMETER = "run";
+
 /** The effort level a newly picked model starts on when it offers it. */
 const PREFERRED_EFFORT = "high";
 
 /** The message under "Auto-refine" for a version saved from the step editor, which no model wrote. */
 const EDITED_VERSION_CANNOT_BE_AUTO_REFINED_REASON = "Saved from the step editor, so Claude cannot refine it";
+
+/** What "Convert to script" answers: the new version, plus - for a Create action - what happened to its delete action. */
+type ConversionResponse = ActionScriptRecord & {
+  /** The delete action's first version, converted in the same request, or null when none was made. */
+  deleteActionScript?: ActionScriptRecord | null;
+  /** Why the delete action could not be converted, or null. */
+  deleteActionConversionError?: string | null;
+};
+
+/**
+ * Words what a conversion did about the action's delete action, for a note
+ * under the header, or null when there is nothing to say (not a Create action,
+ * or its delete action already had a version).
+ * @param conversion - The conversion response
+ * @returns The note, or null
+ */
+function describeDeleteActionConversion(conversion: ConversionResponse): string | null {
+  const deleteActionWasConverted = (conversion.deleteActionScript ?? null) !== null;
+  if (deleteActionWasConverted) {
+    return "Its delete action was converted too, so the first run can clean up after itself.";
+  }
+  const conversionError = conversion.deleteActionConversionError ?? null;
+  if (conversionError !== null) {
+    return `Its delete action could not be converted: ${conversionError}. Convert it from its own page before running.`;
+  }
+  return null;
+}
 
 /**
  * The run form's values, remembered with the version they were typed for, so
@@ -75,6 +112,8 @@ interface RunFormState {
   scriptId: string | null;
   /** The typed or picked values, by parameter key. */
   values: ParameterValues;
+  /** Whether the next run of a Create action cleans up afterwards (on by default). */
+  cleanUpAfterwards: boolean;
 }
 
 /**
@@ -176,22 +215,83 @@ interface ActionHeaderProps {
   deletion: WebsiteItemDeletion;
   /** True for the phone layout: a smaller title, no description, and Edit / Delete behind "⋯". */
   isPhoneLayout: boolean;
-  /** What the action does with an object, in one line ("Takes a Project (detected, High)"), or null for none. */
+  /** What the action does with an object, in one line ("Reads a Project (detected, High)"), or null for none. */
   objectRoleLine: string | null;
+  /** True when the action's kind is Create, so it needs a Delete action to clean up after it. */
+  isCreateAction: boolean;
+  /** The owning website's cuid, for the links to the other actions. */
+  websiteId: string;
+}
+
+/**
+ * The cleanup links under an action's role line: for a Create action, the
+ * Delete action that cleans up after it (or a warning with "Add its delete
+ * action" when it has none - its runs fail until then); for a Delete action,
+ * the Create actions it cleans up after.
+ * @param props - The action, whether it is a Create action, and the website for the links
+ * @returns The links, the warning, or null when there is nothing to show
+ */
+function ActionCleanupLinks(props: Pick<ActionHeaderProps, "action" | "isCreateAction" | "websiteId">): ReactElement | null {
+  const { action, isCreateAction, websiteId } = props;
+  const deleteAction = action.deleteAction ?? null;
+  const createActions = action.createActions ?? [];
+  const createActionHasNoDeleteAction = isCreateAction && deleteAction === null;
+  if (createActionHasNoDeleteAction) {
+    return (
+      <Alert
+        severity="warning"
+        sx={{ mt: 1 }}
+        action={
+          <Button component={RouterLink} to={newDeleteActionPath(websiteId, action.id)} color="inherit" size="small">
+            Add its delete action
+          </Button>
+        }
+      >
+        Runs fail until this action has a delete action to clean up what it makes.
+      </Alert>
+    );
+  }
+  const thereIsNothingToLink = deleteAction === null && createActions.length === 0;
+  if (thereIsNothingToLink) return null;
+  return (
+    <Typography sx={{ fontSize: 13, color: nocturneTokens.neutral[300], mt: "4px" }}>
+      {deleteAction !== null && (
+        <>
+          Cleaned up by{" "}
+          <Link component={RouterLink} to={websiteItemDetailPath(ACTION_KIND, websiteId, deleteAction.id)}>
+            {deleteAction.title}
+          </Link>
+        </>
+      )}
+      {createActions.length > 0 && (
+        <>
+          Cleans up after{" "}
+          {createActions.map((createAction, index) => (
+            <span key={createAction.id}>
+              {index > 0 && ", "}
+              <Link component={RouterLink} to={websiteItemDetailPath(ACTION_KIND, websiteId, createAction.id)}>
+                {createAction.title}
+              </Link>
+            </span>
+          ))}
+        </>
+      )}
+    </Typography>
+  );
 }
 
 /**
  * The top of an action's page, as the mockups draw it: the title, then the
  * description and who the action runs as ("Runs as **Admin**." or "Runs
  * logged out."), then what it does with an object ("Creates a Project, named
- * by Project name"), with Edit and Delete beside it - behind a "⋯" menu on a
- * phone, where the description is left out - and the delete confirmation
- * dialog.
+ * by Project name") and its cleanup links (`ActionCleanupLinks`), with Edit
+ * and Delete beside it - behind a "⋯" menu on a phone, where the description
+ * is left out - and the delete confirmation dialog.
  * @param props - The action, the edit link, the delete wiring, and the layout
  * @returns The rendered header
  */
 function ActionHeader(props: ActionHeaderProps): ReactElement {
-  const { action, editPath, editLinkState, deletion, isPhoneLayout, objectRoleLine } = props;
+  const { action, editPath, editLinkState, deletion, isPhoneLayout, objectRoleLine, isCreateAction, websiteId } = props;
   const credentialName = action.credential?.name ?? null;
   const runsAsText: ReactNode =
     credentialName === null ? (
@@ -229,6 +329,7 @@ function ActionHeader(props: ActionHeaderProps): ReactElement {
             {objectRoleLine}
           </Typography>
         )}
+        <ActionCleanupLinks action={action} isCreateAction={isCreateAction} websiteId={websiteId} />
       </Box>
       {isPhoneLayout ? (
         <MoreActionsMenu editPath={editPath} editLinkState={editLinkState} onDeleteClick={deletion.openDeleteDialog} />
@@ -325,7 +426,12 @@ export default function ActionDetailPage(): ReactElement {
     recordFinishedRun,
     reloadScripts,
   } = useActionScripts(websiteId, actionId);
-  const selectedScriptIndex = findShownVersionIndex(searchParams.get(VERSION_QUERY_PARAMETER), scripts.length);
+  const requestedScriptId = searchParams.get(SCRIPT_QUERY_PARAMETER);
+  const requestedScriptIndex = scripts.findIndex((script) => script.id === requestedScriptId);
+  const aListedVersionWasRequestedById = requestedScriptIndex >= 0;
+  const selectedScriptIndex = aListedVersionWasRequestedById
+    ? requestedScriptIndex
+    : findShownVersionIndex(searchParams.get(VERSION_QUERY_PARAMETER), scripts.length);
   const selectedScript = scripts.at(selectedScriptIndex) ?? null;
   const selectedScriptVersionNumber = scripts.length - selectedScriptIndex;
   const nextVersionNumber = scripts.length + 1;
@@ -407,16 +513,24 @@ export default function ActionDetailPage(): ReactElement {
     showParameters,
   } = useActionParameters(websiteId, actionId, selectedScript?.id ?? null);
   const [pickedRunId, setPickedRunId] = useState<string | null>(null);
-  const selectedRun = runs.find((run) => run.id === pickedRunId) ?? runs.at(0) ?? null;
+  // Until the user picks a run, a link may name the run to show first (`?run=`).
+  const runIdToShow = pickedRunId ?? searchParams.get(RUN_QUERY_PARAMETER);
+  const selectedRun = runs.find((run) => run.id === runIdToShow) ?? runs.at(0) ?? null;
 
   // The run form's values live here (not in the run panel) because the versions
   // column's "Auto-refine" sends them too.
-  const [runFormState, setRunFormState] = useState<RunFormState>({ scriptId: null, values: {} });
+  const [runFormState, setRunFormState] = useState<RunFormState>({
+    scriptId: null,
+    values: {},
+    cleanUpAfterwards: true,
+  });
   const runFormValuesAreForShownVersion = selectedScript !== null && runFormState.scriptId === selectedScript.id;
   const runFormValues: ParameterValues = runFormValuesAreForShownVersion ? runFormState.values : {};
+  const runFormCleanUpAfterwards = runFormValuesAreForShownVersion ? runFormState.cleanUpAfterwards : true;
   const shownParameters = parametersView?.parameters ?? [];
   const changedRunFormValues = listChangedParameterValues(shownParameters, runFormValues);
   const runFormParametersToFix = listParametersToFix(shownParameters, runFormValues);
+  const actionKind = (parametersView?.role ?? action?.objectRole ?? null)?.kind ?? null;
 
   /**
    * Remembers a value the user typed or picked in the run form, for the shown version.
@@ -425,7 +539,20 @@ export default function ActionDetailPage(): ReactElement {
    */
   const handleRunFormValueChange = (parameterKey: string, value: string): void => {
     if (selectedScript === null) return;
-    setRunFormState({ scriptId: selectedScript.id, values: { ...runFormValues, [parameterKey]: value } });
+    setRunFormState({
+      scriptId: selectedScript.id,
+      values: { ...runFormValues, [parameterKey]: value },
+      cleanUpAfterwards: runFormCleanUpAfterwards,
+    });
+  };
+
+  /**
+   * Remembers whether the next run of the shown version cleans up afterwards.
+   * @param cleanUpAfterwards - The checkbox's new state
+   */
+  const handleRunFormCleanupChange = (cleanUpAfterwards: boolean): void => {
+    if (selectedScript === null) return;
+    setRunFormState({ scriptId: selectedScript.id, values: runFormValues, cleanUpAfterwards });
   };
 
   const {
@@ -433,6 +560,8 @@ export default function ActionDetailPage(): ReactElement {
     isSubmitting: conversionIsInFlight,
     errorMessage: convertErrorMessage,
   } = useJsonMutation();
+  // What the last conversion did about the delete action, shown under the header until dismissed.
+  const [deleteActionConversionNote, setDeleteActionConversionNote] = useState<string | null>(null);
   const {
     sendJsonRequest: sendRunRequest,
     isSubmitting: runIsInFlight,
@@ -569,7 +698,6 @@ export default function ActionDetailPage(): ReactElement {
       userActionKind: action.userActionKind ?? null,
       userObjectTypeKey: action.userObjectTypeKey ?? null,
       userNameParameterKey: parameterKey,
-      userDeletesObject: action.userDeletesObject ?? null,
     };
     void sendParameterRequest("PUT", websiteItemApiUrl(ACTION_KIND, websiteId, actionId), actionBody).then(
       (result) => {
@@ -594,8 +722,11 @@ export default function ActionDetailPage(): ReactElement {
       modelChoice,
     );
     if (!result.succeeded) return;
-    // The API is the contract for this shape; see useJsonResource.
-    addAndShowCreatedScript(result.data as ActionScriptRecord);
+    // The API is the contract for this shape; see useJsonResource. A Create
+    // action's conversion also reports whether its delete action was converted.
+    const conversion = result.data as ConversionResponse;
+    addAndShowCreatedScript(conversion);
+    setDeleteActionConversionNote(describeDeleteActionConversion(conversion));
   };
 
   /** Starts a conversion without returning its promise (the button expects a void callback). */
@@ -768,15 +899,16 @@ export default function ActionDetailPage(): ReactElement {
    * and may have created an object). A failed RUN is still a recorded run;
    * only a failed REQUEST is shown from `runErrorMessage`.
    * @param parameterValues - The changed values, by parameter key
+   * @param cleanUpAfterwards - False when the user unticked "Clean up afterwards" for this run
    * @returns Resolves once the request is done
    */
-  const runSelectedScript = async (parameterValues: ParameterValues): Promise<void> => {
+  const runSelectedScript = async (parameterValues: ParameterValues, cleanUpAfterwards: boolean): Promise<void> => {
     const thereIsNoScriptToRun = selectedScript === null;
     if (thereIsNoScriptToRun) return;
     const result = await sendRunRequest(
       "POST",
       actionScriptRunsApiUrl(websiteId, actionId, selectedScript.id),
-      { parameterValues },
+      { parameterValues, cleanUpAfterwards },
     );
     if (!result.succeeded) return;
     const finishedRun = result.data as ActionScriptRunRecord;
@@ -789,9 +921,10 @@ export default function ActionDetailPage(): ReactElement {
   /**
    * Starts a run without returning its promise (the button expects a void callback).
    * @param parameterValues - The changed values, by parameter key
+   * @param cleanUpAfterwards - Whether the run cleans up afterwards
    */
-  const handleRunClick = (parameterValues: ParameterValues): void => {
-    void runSelectedScript(parameterValues);
+  const handleRunClick = (parameterValues: ParameterValues, cleanUpAfterwards: boolean): void => {
+    void runSelectedScript(parameterValues, cleanUpAfterwards);
   };
 
   const breadcrumbs = (
@@ -881,6 +1014,15 @@ export default function ActionDetailPage(): ReactElement {
       isRunning={runIsInFlight}
       runErrorMessage={runErrorMessage}
       onRunClick={handleRunClick}
+      cleanupControl={
+        actionKind === "create"
+          ? {
+              hasDeleteAction: (action.deleteAction ?? null) !== null,
+              checked: runFormCleanUpAfterwards,
+              onChange: handleRunFormCleanupChange,
+            }
+          : null
+      }
       values={runFormValues}
       onValueChange={handleRunFormValueChange}
       isAutoRefining={autoRefineJobIsRunning}
@@ -977,7 +1119,20 @@ export default function ActionDetailPage(): ReactElement {
         deletion={deletion}
         isPhoneLayout={isPhoneLayout}
         objectRoleLine={objectRoleLine}
+        isCreateAction={objectRole?.kind === "create"}
+        websiteId={websiteId}
       />
+      {deleteActionConversionNote !== null && (
+        <Alert
+          severity="info"
+          sx={{ mb: 2 }}
+          onClose={() => {
+            setDeleteActionConversionNote(null);
+          }}
+        >
+          {deleteActionConversionNote}
+        </Alert>
+      )}
 
       {isPhoneLayout ? (
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>

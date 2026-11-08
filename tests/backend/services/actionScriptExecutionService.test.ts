@@ -25,6 +25,10 @@ const mockDbService = vi.hoisted(() => ({
   createRefinedActionScriptForAction: vi.fn(),
   createActionScriptRunForScript: vi.fn(),
   findActionScriptRunWithObjects: vi.fn(),
+  findActionCleanupForCreateAction: vi.fn(),
+  findActionForWebsite: vi.fn(),
+  findNewestActionScriptForAction: vi.fn(),
+  recordActionScriptRunCleanup: vi.fn(),
 }));
 
 const mockActionParameterService = vi.hoisted(() => ({
@@ -60,6 +64,10 @@ import {
   ACTION_CREDENTIAL_MISSING_MESSAGE,
   ActionScriptRequestProblem,
   type RefinableRun,
+  CLEANUP_DELETE_ACTION_BUSY_MESSAGE,
+  CLEANUP_DELETE_ACTION_GONE_MESSAGE,
+  CLEANUP_NO_DELETE_ACTION_MESSAGE,
+  CLEANUP_NO_DELETE_VERSION_MESSAGE,
   PLAN_NEEDS_A_CREDENTIAL_MESSAGE,
   UPLOADS_FOLDER_NAME,
   claimActionRun,
@@ -70,6 +78,7 @@ import {
   performRefinement,
   releaseActionRun,
   releaseRunRefinement,
+  runFailedOnlyInItsCleanup,
 } from "../../../server/services/actionScriptExecutionService.js";
 
 const ACTION_SCRIPT_DIRECTORY = path.join(process.cwd(), "tests", "backend", "fixtures", "action-script-files");
@@ -129,7 +138,6 @@ const action: ActionWithCredential = {
   userActionKind: null,
   userObjectTypeKey: null,
   userNameParameterKey: null,
-  userDeletesObject: null,
   parametersSyncedAt: null,
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -222,6 +230,9 @@ const recordedRun: ActionScriptRun = {
   finalPageUrl: null,
   confirmStepNumber: null,
   confirmStepSucceeded: null,
+  cleanupOutcome: null,
+  cleanupActionScriptRunId: null,
+  cleanupErrorMessage: null,
   createdAt: new Date("2026-01-03T00:00:00.000Z"),
   updatedAt: new Date("2026-01-03T00:00:00.000Z"),
   deletedAt: null,
@@ -307,7 +318,8 @@ describe("actionScriptExecutionService", () => {
     vi.resetAllMocks();
     mockCredentialEncryption.credentialEncryptionIsConfigured.mockReturnValue(true);
     mockActionParameterService.loadVersionParameters.mockResolvedValue(EMPTY_PARAMETERS_VIEW);
-    mockActionParameterService.followUpRecordedRun.mockResolvedValue(undefined);
+    mockActionParameterService.followUpRecordedRun.mockResolvedValue({ createdObjectId: null, createdObjectName: null });
+    mockDbService.recordActionScriptRunCleanup.mockResolvedValue(true);
     mockActionParameterService.syncActionParametersQuietly.mockResolvedValue(undefined);
     mockActionPlanRunnerService.runActionPlan.mockResolvedValue(passingRunResult);
     mockDbService.createActionScriptRunForScript.mockResolvedValue(recordedRun);
@@ -509,6 +521,284 @@ describe("actionScriptExecutionService", () => {
       );
       expect(isActionScriptRequestProblem(launchError)).toBe(false);
       expect(mockDbService.createActionScriptRunForScript).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("cleanup after a Create run", () => {
+    /** The parameters view of a Create action that makes Projects. */
+    const createView = {
+      ...EMPTY_PARAMETERS_VIEW,
+      role: { kind: "create", objectTypeKey: "/projects/{project}", objectTypeName: "Project" },
+    };
+    /** The linked Delete action and its newest version. */
+    const deleteAction: ActionWithCredential = { ...action, id: "action-delete", title: "Delete the project" };
+    const deleteScript: ActionScriptWithPlan = { ...script, id: "script-delete", actionId: "action-delete" };
+    /** The Delete version's parameters view: its one `object` parameter names the project to delete. */
+    const deleteView = {
+      ...EMPTY_PARAMETERS_VIEW,
+      role: { kind: "delete", objectTypeKey: "/projects/{project}", objectTypeName: "Project" },
+      parameters: [
+        {
+          id: "parameter-object",
+          key: "object",
+          label: "Project",
+          detectedLabel: "Project",
+          userLabel: null,
+          kind: "object",
+          source: "steps",
+          foundBy: ["plan"],
+          isSecret: false,
+          isRequired: true,
+          requiredReason: "object",
+          userRequiredChoice: null,
+          defaultValue: "Sign in",
+          uses: [{ stepNumber: 1, field: "targetName" }],
+          addedField: null,
+          objectTypeKey: "/projects/{project}",
+          containerName: null,
+        },
+      ],
+    };
+    const link = {
+      id: "cleanup-1",
+      createActionId: "action-1",
+      deleteActionId: "action-delete",
+      createAction: { id: "action-1", title: "Log in" },
+      deleteAction: { id: "action-delete", title: "Delete the project" },
+    };
+    /** The Create run as recorded: its own steps passed. */
+    const passingRun: ActionScriptRun = { ...recordedRun, succeeded: true, errorMessage: null, failedStepNumber: null };
+    /** The Delete run as recorded. */
+    const passingDeleteRun: ActionScriptRun = { ...passingRun, id: "run-delete-1", actionId: "action-delete", actionScriptId: "script-delete" };
+    const failingDeleteRun: ActionScriptRun = { ...recordedRun, id: "run-delete-1", actionId: "action-delete", actionScriptId: "script-delete" };
+
+    /**
+     * Reads what was written as the Create run's cleanup outcome.
+     * @returns The cleanup record of the last write
+     */
+    function readRecordedCleanup(): unknown {
+      const lastCall = mockDbService.recordActionScriptRunCleanup.mock.calls.at(-1) as unknown[] | undefined;
+      return lastCall?.[2];
+    }
+
+    beforeEach(() => {
+      mockActionParameterService.loadVersionParameters.mockResolvedValue(createView);
+      mockDbService.createActionScriptRunForScript.mockResolvedValue(passingRun);
+      mockActionParameterService.followUpRecordedRun.mockResolvedValue({ createdObjectId: "created-1", createdObjectName: "Apollo 7" });
+      mockDbService.findActionCleanupForCreateAction.mockResolvedValue(link);
+      mockDbService.findActionForWebsite.mockResolvedValue(deleteAction);
+      mockDbService.findNewestActionScriptForAction.mockResolvedValue(deleteScript);
+    });
+
+    it("records off, running nothing more, when the user turned cleanup off for the run", async () => {
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {}, {
+        cleanUpAfterwards: false,
+        isCleanupRun: false,
+        markDeletedCreatedObjectId: null,
+      });
+
+      expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(1);
+      expect(mockDbService.recordActionScriptRunCleanup).toHaveBeenCalledWith("website-1", "run-1", {
+        cleanupOutcome: "off",
+        cleanupActionScriptRunId: null,
+        cleanupErrorMessage: null,
+        succeeded: true,
+        errorMessage: null,
+      });
+      expect(mockDbService.findActionCleanupForCreateAction).not.toHaveBeenCalled();
+    });
+
+    it("records missing and fails the run when there is no delete action, it is gone, or it has no version", async () => {
+      mockDbService.findActionCleanupForCreateAction.mockResolvedValue(null);
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+      expect(readRecordedCleanup()).toEqual({
+        cleanupOutcome: "missing",
+        cleanupActionScriptRunId: null,
+        cleanupErrorMessage: CLEANUP_NO_DELETE_ACTION_MESSAGE,
+        succeeded: false,
+        errorMessage: `Cleanup missing: ${CLEANUP_NO_DELETE_ACTION_MESSAGE}`,
+      });
+
+      mockDbService.findActionCleanupForCreateAction.mockResolvedValue(link);
+      mockDbService.findActionForWebsite.mockResolvedValue(null);
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+      expect(readRecordedCleanup()).toMatchObject({ cleanupOutcome: "missing", cleanupErrorMessage: CLEANUP_DELETE_ACTION_GONE_MESSAGE });
+
+      mockDbService.findActionForWebsite.mockResolvedValue(deleteAction);
+      mockDbService.findNewestActionScriptForAction.mockResolvedValue(null);
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+      expect(readRecordedCleanup()).toMatchObject({ cleanupOutcome: "missing", cleanupErrorMessage: CLEANUP_NO_DELETE_VERSION_MESSAGE });
+      expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(3);
+    });
+
+    it("records notReached, keeping the run's own outcome, when the run made no object", async () => {
+      mockActionParameterService.followUpRecordedRun.mockResolvedValue({ createdObjectId: null, createdObjectName: null });
+
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      expect(readRecordedCleanup()).toEqual({
+        cleanupOutcome: "notReached",
+        cleanupActionScriptRunId: null,
+        cleanupErrorMessage: null,
+        succeeded: true,
+        errorMessage: null,
+      });
+      expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs the delete action's newest version on the created object as a cleanup run, marks the object by id, and records passed", async () => {
+      mockActionParameterService.loadVersionParameters
+        .mockResolvedValueOnce(createView)
+        .mockResolvedValueOnce(deleteView)
+        .mockResolvedValueOnce(deleteView);
+      mockDbService.createActionScriptRunForScript.mockResolvedValueOnce(passingRun).mockResolvedValueOnce(passingDeleteRun);
+
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(2);
+      // The Delete version's step names the created object.
+      expect(readRunRequest(1).plan.steps[0]).toMatchObject({ target: { role: "button", name: "Apollo 7" } });
+      expect(mockDbService.createActionScriptRunForScript).toHaveBeenLastCalledWith(
+        "website-1",
+        "action-delete",
+        "script-delete",
+        expect.objectContaining({ parameterValues: [{ key: "object", label: "Project", value: "Apollo 7" }] }),
+      );
+      expect(mockActionParameterService.followUpRecordedRun).toHaveBeenLastCalledWith(
+        expect.objectContaining({ action: deleteAction, actionScriptRunId: "run-delete-1", markDeletedCreatedObjectId: "created-1" }),
+      );
+      expect(mockDbService.recordActionScriptRunCleanup).toHaveBeenCalledTimes(1);
+      expect(mockDbService.recordActionScriptRunCleanup).toHaveBeenCalledWith("website-1", "run-1", {
+        cleanupOutcome: "passed",
+        cleanupActionScriptRunId: "run-delete-1",
+        cleanupErrorMessage: null,
+        succeeded: true,
+        errorMessage: null,
+      });
+      // The delete action was claimed for the cleanup run and released again.
+      expect(claimActionRun("action-delete")).toBe(true);
+      releaseActionRun("action-delete");
+    });
+
+    it("records failed, failing the run with the cleanup's error, when the delete run fails", async () => {
+      mockActionParameterService.loadVersionParameters
+        .mockResolvedValueOnce(createView)
+        .mockResolvedValueOnce(deleteView)
+        .mockResolvedValueOnce(deleteView);
+      mockDbService.createActionScriptRunForScript.mockResolvedValueOnce(passingRun).mockResolvedValueOnce(failingDeleteRun);
+
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      expect(readRecordedCleanup()).toEqual({
+        cleanupOutcome: "failed",
+        cleanupActionScriptRunId: "run-delete-1",
+        cleanupErrorMessage: failingDeleteRun.errorMessage,
+        succeeded: false,
+        errorMessage: `Cleanup failed: ${failingDeleteRun.errorMessage ?? ""}`,
+      });
+    });
+
+    it("runs a Delete version that has no object parameter (no type resolved yet) with its own names instead of refusing it", async () => {
+      mockActionParameterService.loadVersionParameters
+        .mockResolvedValueOnce(createView)
+        .mockResolvedValueOnce(EMPTY_PARAMETERS_VIEW)
+        .mockResolvedValueOnce(EMPTY_PARAMETERS_VIEW);
+      mockDbService.createActionScriptRunForScript.mockResolvedValueOnce(passingRun).mockResolvedValueOnce(passingDeleteRun);
+
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(2);
+      expect(readRunRequest(1).plan).toEqual(deleteScript.plan);
+      expect(mockDbService.createActionScriptRunForScript).toHaveBeenLastCalledWith(
+        "website-1",
+        "action-delete",
+        "script-delete",
+        expect.objectContaining({ parameterValues: [] }),
+      );
+      expect(readRecordedCleanup()).toMatchObject({ cleanupOutcome: "passed", cleanupActionScriptRunId: "run-delete-1" });
+    });
+
+    it("records failed with the problem, running nothing, when the cleanup run cannot start", async () => {
+      // The Delete version names its object, but the run's values are refused by the plan rules.
+      const deleteViewWhoseValueIsRefused = {
+        ...deleteView,
+        parameters: [{ ...deleteView.parameters[0], uses: [{ stepNumber: 0, field: "url" }], defaultValue: "https://example.com/p/x" }],
+      };
+      mockActionParameterService.loadVersionParameters
+        .mockResolvedValueOnce(createView)
+        .mockResolvedValueOnce(deleteViewWhoseValueIsRefused)
+        .mockResolvedValueOnce(deleteViewWhoseValueIsRefused);
+
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(1);
+      const recordedCleanup = readRecordedCleanup() as { cleanupErrorMessage: string };
+      expect(recordedCleanup).toMatchObject({ cleanupOutcome: "failed", cleanupActionScriptRunId: null, succeeded: false });
+      expect(recordedCleanup.cleanupErrorMessage).toContain("has no known address");
+    });
+
+    it("records failed with the busy message when the delete action is already running", async () => {
+      expect(claimActionRun("action-delete")).toBe(true);
+      try {
+        await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+      } finally {
+        releaseActionRun("action-delete");
+      }
+
+      expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(1);
+      expect(readRecordedCleanup()).toMatchObject({ cleanupOutcome: "failed", cleanupErrorMessage: CLEANUP_DELETE_ACTION_BUSY_MESSAGE });
+    });
+
+    it("keeps the run's own error when its steps failed and the cleanup failed too", async () => {
+      mockDbService.createActionScriptRunForScript.mockResolvedValue(recordedRun);
+      mockActionParameterService.loadVersionParameters.mockResolvedValueOnce(createView).mockResolvedValue(deleteView);
+
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      expect(readRecordedCleanup()).toMatchObject({
+        cleanupOutcome: "failed",
+        succeeded: false,
+        errorMessage: recordedRun.errorMessage,
+      });
+    });
+
+    it("never cleans up after a cleanup run, nor after a non-Create action", async () => {
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {}, {
+        cleanUpAfterwards: true,
+        isCleanupRun: true,
+        markDeletedCreatedObjectId: "created-9",
+      });
+      expect(mockActionParameterService.followUpRecordedRun).toHaveBeenCalledWith(
+        expect.objectContaining({ markDeletedCreatedObjectId: "created-9" }),
+      );
+
+      mockActionParameterService.loadVersionParameters.mockResolvedValue(EMPTY_PARAMETERS_VIEW);
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      expect(mockDbService.recordActionScriptRunCleanup).not.toHaveBeenCalled();
+    });
+
+    it("logs instead of rejecting when the cleanup outcome cannot be written", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      mockDbService.recordActionScriptRunCleanup.mockRejectedValue(new Error("db down"));
+      mockDbService.findActionCleanupForCreateAction.mockResolvedValue(null);
+
+      await expect(performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {})).resolves.toBe(passingRun);
+      expect(console.error).toHaveBeenCalledWith("[cleanup] run run-1 could not record its cleanup: db down");
+    });
+
+    it("runFailedOnlyInItsCleanup is true only for a failed run whose own steps passed and whose cleanup failed or was missing", () => {
+      const cleanupFailure: ActionScriptRun = {
+        ...passingRun,
+        succeeded: false,
+        errorMessage: "Cleanup failed: Step 2 failed",
+        cleanupOutcome: "failed",
+      };
+      expect(runFailedOnlyInItsCleanup(cleanupFailure)).toBe(true);
+      expect(runFailedOnlyInItsCleanup({ ...cleanupFailure, cleanupOutcome: "missing", errorMessage: "Cleanup missing: no delete action" })).toBe(true);
+      expect(runFailedOnlyInItsCleanup({ ...cleanupFailure, succeeded: true })).toBe(false);
+      expect(runFailedOnlyInItsCleanup({ ...cleanupFailure, cleanupOutcome: "off" })).toBe(false);
+      expect(runFailedOnlyInItsCleanup({ ...recordedRun, cleanupOutcome: "failed" })).toBe(false);
     });
   });
 

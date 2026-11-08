@@ -125,7 +125,6 @@ export default function WebsiteItemEditPage(props: WebsiteItemPageProps): ReactE
             userActionKind: item.userActionKind ?? null,
             userObjectTypeKey: item.userObjectTypeKey ?? null,
             userNameParameterKey: item.userNameParameterKey ?? null,
-            userDeletesObject: item.userDeletesObject ?? null,
           }}
           submitLabel="Save changes"
           isSubmitting={isSubmitting}

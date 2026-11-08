@@ -23,6 +23,7 @@ const {
   mockActionParameterDelegate,
   mockCreatedObjectDelegate,
   mockAutoRefineJobDelegate,
+  mockActionCleanupDelegate,
   mockTransaction,
 } = vi.hoisted(
   () => {
@@ -64,6 +65,7 @@ const {
     const actionParameterDelegate = createMockModelDelegate();
     const createdObjectDelegate = createMockModelDelegate();
     const autoRefineJobDelegate = createMockModelDelegate();
+    const actionCleanupDelegate = createMockModelDelegate();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
@@ -82,6 +84,7 @@ const {
       actionParameter: actionParameterDelegate,
       createdObject: createdObjectDelegate,
       autoRefineJob: autoRefineJobDelegate,
+      actionCleanup: actionCleanupDelegate,
     };
 
     return {
@@ -100,6 +103,7 @@ const {
       mockActionParameterDelegate: actionParameterDelegate,
       mockCreatedObjectDelegate: createdObjectDelegate,
       mockAutoRefineJobDelegate: autoRefineJobDelegate,
+      mockActionCleanupDelegate: actionCleanupDelegate,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
@@ -136,6 +140,7 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     actionParameter = mockActionParameterDelegate;
     createdObject = mockCreatedObjectDelegate;
     autoRefineJob = mockAutoRefineJobDelegate;
+    actionCleanup = mockActionCleanupDelegate;
     $transaction = mockTransaction;
   },
   // dbService writes Prisma.DbNull to clear a JSON column; a stand-in proves it was used.
@@ -221,6 +226,13 @@ import {
   markCreatedObjectDeletedByRun,
   listCreatedObjectsToCheck,
   saveCreatedObjectChecks,
+  listActionCleanupsForWebsite,
+  findActionCleanupForCreateAction,
+  linkActionCleanup,
+  findNewestActionScriptForAction,
+  recordActionScriptRunCleanup,
+  appendAutoRefineJobCleanupRun,
+  appendAutoRefineJobCleanupScript,
   type ActionParameter,
   type WebObjectInput,
 } from "../../../server/services/dbService.js";
@@ -274,7 +286,6 @@ const DETECT_EVERY_ROLE_CHOICE = {
   userActionKind: null,
   userObjectTypeKey: null,
   userNameParameterKey: null,
-  userDeletesObject: null,
 };
 
 const sampleScreenshotRun = {
@@ -636,10 +647,26 @@ const sampleCrawledPage = {
   deletedAt: null,
 };
 
-/** What the run reads include: the object a run created and the created objects it deleted. */
+/** What the run reads include: the object a run created, the created objects it deleted, and its cleanup links. */
 const ACTION_SCRIPT_RUN_OBJECTS_INCLUDE = {
   createdObject: { where: { deletedAt: null }, select: { id: true, name: true, url: true, objectTypeName: true } },
   deletedObjects: { where: { deletedAt: null }, select: { id: true, name: true, url: true, objectTypeName: true } },
+  cleanupRun: {
+    select: {
+      id: true,
+      actionId: true,
+      actionScriptId: true,
+      succeeded: true,
+      errorMessage: true,
+      failedStepNumber: true,
+      timedOut: true,
+      createdAt: true,
+      action: { select: { title: true } },
+    },
+  },
+  cleanedUpRun: {
+    select: { id: true, actionId: true, actionScriptId: true, action: { select: { title: true } } },
+  },
 };
 
 /** What every crawl run read includes: the credential's id and name, deleted or not. */
@@ -962,6 +989,7 @@ describe("dbService", () => {
       mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 9 });
       mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 4 });
       mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionCleanupDelegate.updateMany.mockResolvedValue({ count: 1 });
 
       const websiteWasDeleted = await softDeleteWebsite("cuid-1");
 
@@ -1020,6 +1048,10 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockActionCleanupDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
     });
 
     it("softDeleteWebsite writes one shared deletedAt timestamp to every table it stamps", async () => {
@@ -1036,6 +1068,7 @@ describe("dbService", () => {
       mockPagePatternDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockActionCleanupDelegate.updateMany.mockResolvedValue({ count: 0 });
       const millisecondsBeforeCall = Date.now();
 
       await softDeleteWebsite("cuid-1");
@@ -1405,16 +1438,22 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteActionForWebsite stamps the active action and its scripts, script runs, and script refinements inside one transaction", async () => {
+    it("softDeleteActionForWebsite stamps the active action and its scripts, script runs, script refinements, and cleanup links inside one transaction", async () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionCleanupDelegate.updateMany.mockResolvedValue({ count: 1 });
 
       const actionWasDeleted = await softDeleteActionForWebsite("cuid-1", "action-1");
 
       expect(actionWasDeleted).toBe(true);
       expect(mockTransaction).toHaveBeenCalledTimes(1);
+      // The link rows go whichever side of them the action is on.
+      expect(mockActionCleanupDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null, OR: [{ createActionId: "action-1" }, { deleteActionId: "action-1" }] },
+        data: { deletedAt: expect.any(Date) },
+      });
       expect(mockActionDelegate.updateMany).toHaveBeenCalledWith({
         where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
@@ -1456,6 +1495,7 @@ describe("dbService", () => {
       expect(await softDeleteActionForWebsite("cuid-1", "already-deleted")).toBe(false);
       expect(mockActionScriptDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockActionCleanupDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRefinementDelegate.updateMany).not.toHaveBeenCalled();
     });
   });
@@ -3459,6 +3499,117 @@ describe("dbService", () => {
       mockCreatedObjectDelegate.updateMany.mockClear();
       await saveCreatedObjectChecks("cuid-1", [], checkedAt);
       expect(mockCreatedObjectDelegate.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("action cleanups", () => {
+    /** The relations every cleanup link read brings along. */
+    const ACTION_CLEANUP_INCLUDE = {
+      createAction: { select: { id: true, title: true } },
+      deleteAction: { select: { id: true, title: true } },
+    };
+
+    const sampleLink = {
+      id: "cleanup-1",
+      websiteId: "cuid-1",
+      createActionId: "action-create",
+      deleteActionId: "action-delete",
+      createdAt: new Date("2026-11-07T00:00:00.000Z"),
+      updatedAt: new Date("2026-11-07T00:00:00.000Z"),
+      deletedAt: null,
+      createAction: { id: "action-create", title: "Create a project" },
+      deleteAction: { id: "action-delete", title: "Delete the project" },
+    };
+
+    it("listActionCleanupsForWebsite lists the website's active links, oldest first, with both actions named", async () => {
+      mockActionCleanupDelegate.findMany.mockResolvedValue([sampleLink]);
+
+      const links = await listActionCleanupsForWebsite("cuid-1");
+
+      expect(mockActionCleanupDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        orderBy: { createdAt: "asc" },
+        include: ACTION_CLEANUP_INCLUDE,
+      });
+      expect(links).toEqual([sampleLink]);
+    });
+
+    it("findActionCleanupForCreateAction finds a Create action's active link, or null", async () => {
+      mockActionCleanupDelegate.findFirst.mockResolvedValue(sampleLink);
+
+      expect(await findActionCleanupForCreateAction("cuid-1", "action-create")).toEqual(sampleLink);
+      expect(mockActionCleanupDelegate.findFirst).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", createActionId: "action-create", deletedAt: null },
+        include: ACTION_CLEANUP_INCLUDE,
+      });
+
+      mockActionCleanupDelegate.findFirst.mockResolvedValue(null);
+      expect(await findActionCleanupForCreateAction("cuid-1", "action-create")).toBeNull();
+    });
+
+    it("linkActionCleanup creates the link between a Create action and its Delete action", async () => {
+      mockActionCleanupDelegate.create.mockResolvedValue(sampleLink);
+
+      const link = await linkActionCleanup("cuid-1", "action-create", "action-delete");
+
+      expect(mockActionCleanupDelegate.create).toHaveBeenCalledWith({
+        data: { websiteId: "cuid-1", createActionId: "action-create", deleteActionId: "action-delete" },
+        include: ACTION_CLEANUP_INCLUDE,
+      });
+      expect(link).toEqual(sampleLink);
+    });
+
+    it("findNewestActionScriptForAction reads the action's newest active version with the version include, or null", async () => {
+      mockActionScriptDelegate.findFirst.mockResolvedValue(toPrismaActionScriptRow(sampleActionScript));
+
+      expect(await findNewestActionScriptForAction("cuid-1", "action-1")).toEqual(sampleActionScript);
+      expect(mockActionScriptDelegate.findFirst).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", actionId: "action-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        include: ACTION_SCRIPT_INCLUDE,
+      });
+
+      mockActionScriptDelegate.findFirst.mockResolvedValue(null);
+      expect(await findNewestActionScriptForAction("cuid-1", "action-1")).toBeNull();
+    });
+
+    it("recordActionScriptRunCleanup writes the cleanup columns and the run's final outcome on the active run, scoped to the website", async () => {
+      mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+      const cleanup = {
+        cleanupOutcome: "failed" as const,
+        cleanupActionScriptRunId: "run-delete-1",
+        cleanupErrorMessage: "Step 3 failed",
+        succeeded: false,
+        errorMessage: "Cleanup failed: Step 3 failed",
+      };
+
+      expect(await recordActionScriptRunCleanup("cuid-1", "run-1", cleanup)).toBe(true);
+      expect(mockActionScriptRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { id: "run-1", websiteId: "cuid-1", deletedAt: null },
+        data: cleanup,
+      });
+
+      mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+      expect(await recordActionScriptRunCleanup("cuid-1", "gone", cleanup)).toBe(false);
+    });
+
+    it("appendAutoRefineJobCleanupRun and appendAutoRefineJobCleanupScript push onto the job's cleanup lists while it runs", async () => {
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      expect(await appendAutoRefineJobCleanupRun("cuid-1", "action-1", "job-1", "run-delete-2")).toBe(true);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenLastCalledWith({
+        where: { id: "job-1", websiteId: "cuid-1", actionId: "action-1", status: "running", deletedAt: null },
+        data: { cleanupActionScriptRunIds: { push: "run-delete-2" } },
+      });
+
+      expect(await appendAutoRefineJobCleanupScript("cuid-1", "action-1", "job-1", "script-delete-2", 3)).toBe(true);
+      expect(mockAutoRefineJobDelegate.updateMany).toHaveBeenLastCalledWith({
+        where: { id: "job-1", websiteId: "cuid-1", actionId: "action-1", status: "running", deletedAt: null },
+        data: { cleanupActionScriptIds: { push: "script-delete-2" }, refinementsDone: 3 },
+      });
+
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+      expect(await appendAutoRefineJobCleanupRun("cuid-1", "action-1", "job-gone", "run-x")).toBe(false);
     });
   });
 });

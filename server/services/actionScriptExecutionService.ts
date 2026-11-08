@@ -6,15 +6,21 @@ import {
   type ActionScriptRunWithObjects,
   type ActionScriptWithPlan,
   type ActionWithCredential,
+  type CleanupOutcome,
   type CredentialSummary,
   type Website,
+  findActionCleanupForCreateAction,
+  findActionForWebsite,
   findCredentialForWebsite,
   findCredentialWithPasswordForWebsite,
   findLatestCrawledPagesForWebsite,
+  findNewestActionScriptForAction,
   createRefinedActionScriptForAction,
   createActionScriptRunForScript,
   findActionScriptRunWithObjects,
+  recordActionScriptRunCleanup,
 } from "./dbService.js";
+import { describeError } from "../utils/describeError.js";
 import { type FailedRunDetails, refineActionPlan } from "./scriptGenerationService.js";
 import {
   type EffortLevel,
@@ -29,6 +35,7 @@ import {
 } from "./actionPlanRunnerService.js";
 import { buildCrawlLoginDetails } from "./crawlerLoginService.js";
 import {
+  type RunFollowUpOutcome,
   followUpRecordedRun,
   loadVersionParameters,
   prepareParameterRun,
@@ -40,7 +47,12 @@ import {
   validateActionPlan,
   type ActionPlan,
 } from "../utils/actionPlanSchema.js";
-import { applyParameterValues, expandAppliedPlan, readUsedParameterValues } from "../utils/actionParameters.js";
+import {
+  OBJECT_PARAMETER_KEY,
+  applyParameterValues,
+  expandAppliedPlan,
+  readUsedParameterValues,
+} from "../utils/actionParameters.js";
 import {
   CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE,
   credentialEncryptionIsConfigured,
@@ -63,6 +75,34 @@ export const EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE =
   "This version was saved from the step editor, so no model wrote it; only a version Claude wrote can be refined";
 export const RUN_ALREADY_BEING_REFINED_MESSAGE =
   "This run is already being refined; wait for that to finish";
+export const CLEANUP_FAILURE_CANNOT_BE_REFINED_MESSAGE =
+  "This run's own steps passed; only its cleanup failed. Refine the delete action's run instead";
+
+/** Why a Create run's cleanup could not start (its `cleanupErrorMessage`), by case. */
+export const CLEANUP_NO_DELETE_ACTION_MESSAGE = "This action has no delete action yet";
+export const CLEANUP_DELETE_ACTION_GONE_MESSAGE = "Its delete action no longer exists";
+export const CLEANUP_NO_DELETE_VERSION_MESSAGE = "Its delete action has no version yet";
+export const CLEANUP_DELETE_ACTION_BUSY_MESSAGE = "Its delete action is already running";
+
+/** The start of a Create run's `errorMessage` when its own steps passed and only the cleanup did not (see `runFailedOnlyInItsCleanup`). */
+export const CLEANUP_ERROR_PREFIX = "Cleanup ";
+
+/** How a run of a version is to be done, beyond its parameter values. */
+export interface ActionScriptRunOptions {
+  /** False when the user unticked "Clean up afterwards": a Create run then records `off` and runs no cleanup. */
+  cleanUpAfterwards: boolean;
+  /** True for the cleanup run itself (the Delete action's run), which never cleans up in turn. */
+  isCleanupRun: boolean;
+  /** For a cleanup run: the created object to mark deleted when it passes; null otherwise. */
+  markDeletedCreatedObjectId: string | null;
+}
+
+/** The options of an ordinary run started by the user or an auto-refine job. */
+export const DEFAULT_RUN_OPTIONS: ActionScriptRunOptions = {
+  cleanUpAfterwards: true,
+  isCleanupRun: false,
+  markDeletedCreatedObjectId: null,
+};
 
 
 /**
@@ -296,13 +336,21 @@ export function buildRunFolderName(websiteId: string): string {
  * parameter values in (see `prepareParameterRun`) and checks the plan they
  * make, runs it, records the run with the values it used, and follows the run
  * up (see `followUpRecordedRun`: the parameters learn from it, and a Create or
- * deleting run updates the created objects). A run that FAILED is still a
+ * Delete run updates the created objects). A run that FAILED is still a
  * successfully recorded run (`succeeded: false`); only a run that could not be
  * started or recorded throws.
+ *
+ * CLEANUP: a run of a Create action (not itself a cleanup run) then cleans up
+ * after itself (see `cleanUpAfterCreateRun`): the linked Delete action's
+ * newest version is run on the object this run recorded, and the outcome is
+ * written on this run - which counts as FAILED when the cleanup failed or
+ * could not start, however its own steps went. `options.cleanUpAfterwards`
+ * false skips that and records `off`.
  * @param actionScriptDirectory - Absolute path of the action script directory
  * @param found - The active website, action, and version to run
  * @param parameterValues - The run's values, by parameter key (validated as text)
- * @returns The recorded run, with the objects it created and deleted when they could be read
+ * @param options - Whether to clean up afterwards, and whether this IS the cleanup run (see `ActionScriptRunOptions`)
+ * @returns The recorded run, with the objects it created and deleted and its cleanup run when they could be read
  * @throws {ActionScriptRequestProblem} 503 when the action has a credential but no encryption key is configured; 409 when its credential is gone, the stored plan no longer passes the plan rules, or the plan types a credential the action does not have; 400 when the credential has no login URL and neither does the website, a value is not accepted, or the plan the values make breaks a plan rule
  * @throws Anything else the password decryption, the runner, or a query rejects with
  */
@@ -310,6 +358,7 @@ export async function performActionScriptRun(
   actionScriptDirectory: string,
   found: WebsiteActionAndScript,
   parameterValues: Record<string, string>,
+  options: ActionScriptRunOptions = DEFAULT_RUN_OPTIONS,
 ): Promise<ActionScriptRunWithObjects | ActionScriptRun> {
   const { website, action, script } = found;
   const { credentialId } = action;
@@ -396,7 +445,7 @@ export async function performActionScriptRun(
     confirmStepNumber: preparedRun.parameterRun.confirmStepNumber,
     confirmStepSucceeded: preparedRun.parameterRun.confirmStepNumber === null ? null : run.confirmStepSucceeded,
   });
-  await followUpRecordedRun({
+  const followUpOutcome = await followUpRecordedRun({
     websiteId: website.id,
     action,
     actionScriptId: script.id,
@@ -405,9 +454,152 @@ export async function performActionScriptRun(
     view: parametersView,
     applied: preparedRun.applied,
     runResult: run,
+    markDeletedCreatedObjectId: options.markDeletedCreatedObjectId,
   });
+  const runCleansUpAfterItself = !options.isCleanupRun && parametersView.role.kind === "create";
+  if (runCleansUpAfterItself) {
+    await cleanUpAfterCreateRun(actionScriptDirectory, found, created, followUpOutcome, options.cleanUpAfterwards);
+  }
   const createdWithObjects = await findActionScriptRunWithObjects(website.id, created.id);
   return createdWithObjects ?? created;
+}
+
+/** How a cleanup attempt ended, before it is written on the Create run. */
+interface CleanupAttempt {
+  /** What happened. */
+  outcome: CleanupOutcome;
+  /** The Delete action's run, when one ran. */
+  cleanupRun: ActionScriptRun | null;
+  /** The Delete run's error, or why no cleanup could start; null when it passed or was turned off. */
+  errorMessage: string | null;
+}
+
+/**
+ * Tries the cleanup of a Create run: finds the linked Delete action and its
+ * newest version, claims the Delete action, and runs that version on the
+ * created object (its name as the `object` value when the version has that
+ * parameter, its id for the delete mark). Every reason not to run is an
+ * outcome, never a throw.
+ * @param actionScriptDirectory - Absolute path of the action script directory
+ * @param found - The website, Create action, and version that just ran
+ * @param followUpOutcome - The object the Create run recorded, if any
+ * @param cleanUpAfterwards - False when the user turned cleanup off for this run
+ * @returns How the attempt ended
+ */
+async function attemptCleanup(
+  actionScriptDirectory: string,
+  found: WebsiteActionAndScript,
+  followUpOutcome: RunFollowUpOutcome,
+  cleanUpAfterwards: boolean,
+): Promise<CleanupAttempt> {
+  const { website, action } = found;
+  if (!cleanUpAfterwards) {
+    return { outcome: "off", cleanupRun: null, errorMessage: null };
+  }
+  const link = await findActionCleanupForCreateAction(website.id, action.id);
+  if (link === null) {
+    return { outcome: "missing", cleanupRun: null, errorMessage: CLEANUP_NO_DELETE_ACTION_MESSAGE };
+  }
+  const deleteAction = await findActionForWebsite(website.id, link.deleteActionId);
+  if (deleteAction === null) {
+    return { outcome: "missing", cleanupRun: null, errorMessage: CLEANUP_DELETE_ACTION_GONE_MESSAGE };
+  }
+  const deleteScript = await findNewestActionScriptForAction(website.id, deleteAction.id);
+  if (deleteScript === null) {
+    return { outcome: "missing", cleanupRun: null, errorMessage: CLEANUP_NO_DELETE_VERSION_MESSAGE };
+  }
+  const { createdObjectId, createdObjectName } = followUpOutcome;
+  const nothingWasCreated = createdObjectId === null || createdObjectName === null;
+  if (nothingWasCreated) {
+    return { outcome: "notReached", cleanupRun: null, errorMessage: null };
+  }
+  const deleteActionWasClaimed = claimActionRun(deleteAction.id);
+  if (!deleteActionWasClaimed) {
+    return { outcome: "failed", cleanupRun: null, errorMessage: CLEANUP_DELETE_ACTION_BUSY_MESSAGE };
+  }
+  try {
+    // The Delete version only has an `object` parameter when its steps name
+    // an instance of a resolved object type; without one (no type detected
+    // yet) it runs with its own literal names rather than being refused.
+    const deleteView = await loadVersionParameters(website.id, deleteAction, deleteScript);
+    const deleteVersionNamesItsObject = deleteView.parameters.some((parameter) => parameter.key === OBJECT_PARAMETER_KEY);
+    const cleanupValues: Record<string, string> = deleteVersionNamesItsObject
+      ? { [OBJECT_PARAMETER_KEY]: createdObjectName }
+      : {};
+    const cleanupRun = await performActionScriptRun(
+      actionScriptDirectory,
+      { website, action: deleteAction, script: deleteScript },
+      cleanupValues,
+      { cleanUpAfterwards: false, isCleanupRun: true, markDeletedCreatedObjectId: createdObjectId },
+    );
+    return {
+      outcome: cleanupRun.succeeded ? "passed" : "failed",
+      cleanupRun,
+      errorMessage: cleanupRun.succeeded ? null : cleanupRun.errorMessage,
+    };
+  } catch (cleanupError: unknown) {
+    return { outcome: "failed", cleanupRun: null, errorMessage: describeError(cleanupError) };
+  } finally {
+    releaseActionRun(deleteAction.id);
+  }
+}
+
+/**
+ * Cleans up after a recorded Create run and writes the outcome on it (see the
+ * `ActionScriptRun` model's cleanup doc): runs the linked Delete action's
+ * newest version on the object the run made, or records why it could not -
+ * turned off for this run (`off`), nothing was made (`notReached`), no Delete
+ * action or no version of it (`missing`). The run counts as FAILED when the
+ * outcome is `failed` or `missing`: when its own steps had passed, its error
+ * becomes "Cleanup failed: …" / "Cleanup missing: …"; when they had failed,
+ * its own error stays. NEVER rejects - the run is already recorded; a failure
+ * to write the outcome is logged.
+ * @param actionScriptDirectory - Absolute path of the action script directory
+ * @param found - The website, Create action, and version that just ran
+ * @param createdRun - The Create run as recorded
+ * @param followUpOutcome - The object the run recorded, if any
+ * @param cleanUpAfterwards - False when the user turned cleanup off for this run
+ * @returns Resolves once the outcome is written (or found to match no row)
+ */
+export async function cleanUpAfterCreateRun(
+  actionScriptDirectory: string,
+  found: WebsiteActionAndScript,
+  createdRun: ActionScriptRun,
+  followUpOutcome: RunFollowUpOutcome,
+  cleanUpAfterwards: boolean,
+): Promise<void> {
+  try {
+    const attempt = await attemptCleanup(actionScriptDirectory, found, followUpOutcome, cleanUpAfterwards);
+    const cleanupCountsAsAFailure = attempt.outcome === "failed" || attempt.outcome === "missing";
+    const ownStepsPassed = createdRun.succeeded;
+    const errorMessage =
+      ownStepsPassed && cleanupCountsAsAFailure
+        ? `${CLEANUP_ERROR_PREFIX}${attempt.outcome}: ${attempt.errorMessage ?? "no reason recorded"}`
+        : createdRun.errorMessage;
+    await recordActionScriptRunCleanup(found.website.id, createdRun.id, {
+      cleanupOutcome: attempt.outcome,
+      cleanupActionScriptRunId: attempt.cleanupRun?.id ?? null,
+      cleanupErrorMessage: attempt.errorMessage,
+      succeeded: ownStepsPassed && !cleanupCountsAsAFailure,
+      errorMessage,
+    });
+  } catch (recordError: unknown) {
+    console.error(`[cleanup] run ${createdRun.id} could not record its cleanup: ${describeError(recordError)}`);
+  }
+}
+
+/**
+ * Says whether a recorded run failed ONLY in its cleanup: its own steps
+ * passed, and the Delete action's run failed or could not start. Such a run
+ * cannot be refined - its plan is fine; the delete action's run is what needs
+ * refining.
+ * @param run - A recorded run
+ * @returns True for a cleanup-only failure
+ */
+export function runFailedOnlyInItsCleanup(run: ActionScriptRun): boolean {
+  const cleanupFailed = run.cleanupOutcome === "failed" || run.cleanupOutcome === "missing";
+  const errorIsTheCleanups = run.errorMessage?.startsWith(CLEANUP_ERROR_PREFIX) ?? false;
+  return !run.succeeded && cleanupFailed && errorIsTheCleanups;
 }
 
 /**

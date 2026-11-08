@@ -6,6 +6,7 @@ import ActionScriptComparePage from "./pages/ActionScriptComparePage";
 import CrawlRunPage from "./pages/CrawlRunPage";
 import CredentialCreatePage from "./pages/CredentialCreatePage";
 import CredentialEditPage from "./pages/CredentialEditPage";
+import DeleteActionCreatePage from "./pages/DeleteActionCreatePage";
 import HomePage from "./pages/HomePage";
 import UseCaseDetailPage from "./pages/UseCaseDetailPage";
 import WebsiteCreatePage from "./pages/WebsiteCreatePage";
@@ -78,6 +79,10 @@ export default function App(): ReactElement {
         <Route
           path="/websites/:websiteId/actions/:itemId/scripts/compare"
           element={<ActionScriptComparePage key="action-script-compare" />}
+        />
+        <Route
+          path="/websites/:websiteId/actions/:itemId/delete-action/new"
+          element={<DeleteActionCreatePage key="delete-action-create" />}
         />
         <Route
           path="/websites/:websiteId/actions/:itemId/edit"

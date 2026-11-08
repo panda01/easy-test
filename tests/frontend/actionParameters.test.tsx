@@ -12,9 +12,9 @@ import {
 } from "../../src/utils/actionParameters";
 import {
   describeConfidence,
-  describeDetectedDeletesChoice,
   describeDetectedKindChoice,
   describeDetectedObjectTypeChoice,
+  kindTakesAnObjectType,
   describeObjectRole,
 } from "../../src/utils/actionObjectRole";
 import {
@@ -121,8 +121,7 @@ describe("object role helpers", () => {
       reason: "won",
       confidence: "high",
       confidenceShare: 1,
-      objectScore: 0,
-      createScore: 2,
+      scores: { create: 2, read: 0, update: 0, delete: 0 },
       evidence: ["create", "adds"],
     },
     objectTypeName: "Project",
@@ -133,7 +132,6 @@ describe("object role helpers", () => {
       confidenceShare: 0.6,
       evidence: ["project"],
     },
-    detectedDeletesObject: { deletesObject: true, evidence: ["delete"] },
   });
 
   it("names confidence levels", () => {
@@ -144,7 +142,7 @@ describe("object role helpers", () => {
   it("describes what Detect picks for each choice", () => {
     expect(describeDetectedKindChoice(null)).toBe("Detect from the title and description");
     expect(describeDetectedKindChoice(createRole)).toBe("Detect — Create (High: create, adds)");
-    expect(describeDetectedKindChoice(buildActionObjectRoleRecord())).toBe("Detect — Parameters (no object or create words)");
+    expect(describeDetectedKindChoice(buildActionObjectRoleRecord())).toBe("Detect — Parameters (no kind words)");
     expect(
       describeDetectedKindChoice(
         buildActionObjectRoleRecord({
@@ -155,9 +153,6 @@ describe("object role helpers", () => {
     expect(describeDetectedObjectTypeChoice(null)).toBe("Detect from the title, description, and addresses");
     expect(describeDetectedObjectTypeChoice(createRole)).toBe("Detect — Project (Medium)");
     expect(describeDetectedObjectTypeChoice(buildActionObjectRoleRecord())).toBe("Detect — none found");
-    expect(describeDetectedDeletesChoice(null)).toBe("Detect from the title and description");
-    expect(describeDetectedDeletesChoice(createRole)).toBe("Detect — Yes (delete)");
-    expect(describeDetectedDeletesChoice(buildActionObjectRoleRecord())).toBe("Detect — No");
   });
 
   it("describes the role in one line for the header", () => {
@@ -166,12 +161,23 @@ describe("object role helpers", () => {
     expect(describeObjectRole(createRole, { nameParameterLabel: "Project name", confirmStepNumber: 3 })).toBe(
       "Creates a Project, named by Project name, confirmed by step 3 (detected, High)",
     );
-    expect(describeObjectRole({ ...createRole, kind: "object", kindSource: "you", objectTypeName: "Order" }, noDetails)).toBe(
-      "Takes an Order (you chose)",
+    expect(describeObjectRole({ ...createRole, kind: "read", kindSource: "you", objectTypeName: "Order" }, noDetails)).toBe(
+      "Reads an Order (you chose)",
     );
-    expect(describeObjectRole({ ...createRole, kind: "object", deletesObject: true, objectTypeName: null }, noDetails)).toBe(
+    expect(describeObjectRole({ ...createRole, kind: "update", objectTypeName: "Order" }, noDetails)).toBe(
+      "Updates an Order (detected, High)",
+    );
+    expect(describeObjectRole({ ...createRole, kind: "delete", objectTypeName: null }, noDetails)).toBe(
       "Deletes an object (detected, High)",
     );
     expect(describeObjectRole(createRole, noDetails)).toBe("Creates a Project (detected, High)");
+  });
+
+  it("says which kinds take an object type", () => {
+    expect(kindTakesAnObjectType("parameters")).toBe(false);
+    expect(kindTakesAnObjectType(null)).toBe(true);
+    for (const kind of ["create", "read", "update", "delete"] as const) {
+      expect(kindTakesAnObjectType(kind)).toBe(true);
+    }
   });
 });
