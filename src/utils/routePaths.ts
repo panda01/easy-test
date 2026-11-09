@@ -91,6 +91,45 @@ export function actionScriptComparePath(websiteId: string, actionId: string): st
 }
 
 /**
+ * Builds the path of one action run's own page: the run's details and the
+ * screenshots it took after each step.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The action's cuid
+ * @param actionScriptId - The version that was run
+ * @param actionScriptRunId - The run's cuid
+ * @returns `/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/runs/<actionScriptRunId>`
+ */
+export function actionScriptRunDetailPath(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+): string {
+  const actionPath = websiteItemDetailPath(ACTION_KIND, websiteId, actionId);
+  return `${actionPath}/scripts/${encodeURIComponent(actionScriptId)}/runs/${encodeURIComponent(actionScriptRunId)}`;
+}
+
+/**
+ * Builds the path of an action's page opened on one version and one of its
+ * runs (the page reads `?script=` and `?run=` to select them) - where the
+ * run page's breadcrumb leads back to.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The action's cuid
+ * @param actionScriptId - The version to select
+ * @param actionScriptRunId - The run to select
+ * @returns `/websites/<websiteId>/actions/<actionId>?script=<actionScriptId>&run=<actionScriptRunId>`
+ */
+export function actionDetailPathWithRun(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+): string {
+  const actionPath = websiteItemDetailPath(ACTION_KIND, websiteId, actionId);
+  return `${actionPath}?script=${encodeURIComponent(actionScriptId)}&run=${encodeURIComponent(actionScriptRunId)}`;
+}
+
+/**
  * Builds the path of one crawl run's page: the tree of pages the crawl found
  * and each page's aria snapshot. Which page is selected is kept in the page's
  * own query string (`?page=<crawledPageId>`), so it is not part of this path.
@@ -236,6 +275,45 @@ export function actionScriptEditsApiUrl(
   actionScriptId: string,
 ): string {
   return `${actionScriptsApiUrl(websiteId, actionId)}/${encodeURIComponent(actionScriptId)}/edits`;
+}
+
+/**
+ * Builds the API url of one run, as the run page reads it: the run with its
+ * created and deleted objects, its cleanup links, and its step screenshots.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @param actionScriptRunId - The run's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/runs/<actionScriptRunId>`
+ */
+export function actionScriptRunApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+): string {
+  const runsApiUrl = actionScriptRunsApiUrl(websiteId, actionId, actionScriptId);
+  return `${runsApiUrl}/${encodeURIComponent(actionScriptRunId)}`;
+}
+
+/**
+ * Builds the API url of one step screenshot PNG of a run, for an `<img src>`.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @param actionScriptRunId - The run's cuid
+ * @param screenshotId - The step screenshot's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/scripts/<actionScriptId>/runs/<actionScriptRunId>/screenshots/<screenshotId>`
+ */
+export function actionScriptRunScreenshotApiUrl(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+  screenshotId: string,
+): string {
+  const runApiUrl = actionScriptRunApiUrl(websiteId, actionId, actionScriptId, actionScriptRunId);
+  return `${runApiUrl}/screenshots/${encodeURIComponent(screenshotId)}`;
 }
 
 /**

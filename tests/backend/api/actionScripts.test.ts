@@ -18,6 +18,8 @@ const mockDbService = vi.hoisted(() => ({
   createRefinedActionScriptForAction: vi.fn(),
   listActionScriptRunsForScript: vi.fn(),
   findActionScriptRunForScript: vi.fn(),
+  findActionScriptRunDetailForScript: vi.fn(),
+  findActionScriptRunScreenshotForRun: vi.fn(),
   createActionScriptRunForScript: vi.fn(),
   findActionScriptRunWithObjects: vi.fn(),
   findActionCleanupForCreateAction: vi.fn(),
@@ -92,6 +94,10 @@ const FIXTURE_ACTION_SCRIPT_DIRECTORY = path.join(
 const EXISTING_FAILURE_SCREENSHOT_NAME = "website-id-from-db/existing-run/failure.png";
 const EXISTING_FAILURE_SCREENSHOT_BYTES = readFileSync(
   path.join(FIXTURE_ACTION_SCRIPT_DIRECTORY, EXISTING_FAILURE_SCREENSHOT_NAME),
+);
+const EXISTING_STEP_SCREENSHOT_NAME = "website-id-from-db/existing-run/step-001.png";
+const EXISTING_STEP_SCREENSHOT_BYTES = readFileSync(
+  path.join(FIXTURE_ACTION_SCRIPT_DIRECTORY, EXISTING_STEP_SCREENSHOT_NAME),
 );
 /** That PNG as the refine route sends it to Claude. */
 const EXISTING_FAILURE_SCREENSHOT_BASE64 = EXISTING_FAILURE_SCREENSHOT_BYTES.toString("base64");
@@ -269,6 +275,25 @@ const SCRIPTS_PATH = "/api/websites/website-id-from-path/actions/action-id-from-
 const EDITS_PATH = `${SCRIPTS_PATH}/script-id-from-path/edits`;
 const RUNS_PATH = `${SCRIPTS_PATH}/script-id-from-path/runs`;
 const FAILURE_SCREENSHOT_PATH = `${RUNS_PATH}/run-id-from-path/failure-screenshot`;
+const RUN_PATH = `${RUNS_PATH}/run-id-from-path`;
+const STEP_SCREENSHOT_PATH = `${RUNS_PATH}/run-id-from-path/screenshots/screenshot-id-from-path`;
+
+/** One step screenshot row of `sampleRun`, taken after step 1. */
+const sampleStepScreenshot = {
+  id: "screenshot-id-from-db",
+  websiteId: foundWebsite.id,
+  actionId: foundAction.id,
+  actionScriptRunId: sampleRun.id,
+  position: 2,
+  moment: "step",
+  stepNumber: 1,
+  fileName: EXISTING_STEP_SCREENSHOT_NAME,
+  errorMessage: null,
+  pageUrl: "https://example.com/",
+  createdAt: "2026-01-03T00:00:00.000Z",
+  updatedAt: "2026-01-03T00:00:00.000Z",
+  deletedAt: null,
+};
 const REFINEMENTS_PATH = `${RUNS_PATH}/run-id-from-path/refinements`;
 
 /** A run folder is `<found website id>/<uuid>`. */
@@ -341,6 +366,7 @@ const passingRunResult = {
   confirmStepSucceeded: null,
   pageUrlAfterConfirm: null,
   finalPageUrl: "https://example.com/welcome",
+  stepScreenshots: [],
 };
 
 /** What a run with no parameter values changes: nothing. */
@@ -1238,6 +1264,7 @@ describe("Action script routes", () => {
           finalPageUrl: "https://example.com/welcome",
           confirmStepNumber: null,
           confirmStepSucceeded: null,
+          stepScreenshots: [],
         },
       );
       expect(mockActionParameterService.followUpRecordedRun).toHaveBeenCalledWith(
@@ -1657,6 +1684,157 @@ describe("Action script routes", () => {
       expect(res.status).toBe(404);
       expect(res.body).toEqual({ error: "Script not found" });
       expect(mockActionPlanRunnerService.runActionPlan).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("GET .../runs/:actionScriptRunId", () => {
+    it("returns 200 with the run and its step screenshots, looking it up under the found rows", async () => {
+      const runDetail = { ...sampleRun, createdObject: null, deletedObjects: [], screenshots: [sampleStepScreenshot] };
+      mockDbService.findActionScriptRunDetailForScript.mockResolvedValue(runDetail);
+
+      const res = await request(createActionScriptsApp()).get(RUN_PATH);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(runDetail);
+      expect(mockDbService.findActionScriptRunDetailForScript).toHaveBeenCalledWith(
+        foundWebsite.id,
+        foundAction.id,
+        foundScript.id,
+        "run-id-from-path",
+      );
+    });
+
+    it("returns 404 Script not found and looks up no run when the script does not exist", async () => {
+      mockDbService.findActionScriptForAction.mockResolvedValue(null);
+
+      const res = await request(createActionScriptsApp()).get(RUN_PATH);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Script not found" });
+      expect(mockDbService.findActionScriptRunDetailForScript).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 Script run not found when the run does not exist", async () => {
+      mockDbService.findActionScriptRunDetailForScript.mockResolvedValue(null);
+
+      const res = await request(createActionScriptsApp()).get(RUN_PATH);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Script run not found" });
+    });
+
+    it("returns 500 with the error when the run lookup fails", async () => {
+      mockDbService.findActionScriptRunDetailForScript.mockRejectedValue(new Error("connection refused"));
+
+      const res = await request(createActionScriptsApp()).get(RUN_PATH);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "connection refused" });
+    });
+  });
+
+  describe("GET .../runs/:actionScriptRunId/screenshots/:screenshotId", () => {
+    it("returns 200 with the PNG the row names, looking the screenshot up under the found run", async () => {
+      mockDbService.findActionScriptRunForScript.mockResolvedValue(sampleRun);
+      mockDbService.findActionScriptRunScreenshotForRun.mockResolvedValue(sampleStepScreenshot);
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("image/png");
+      expect(Buffer.compare(res.body as Buffer, EXISTING_STEP_SCREENSHOT_BYTES)).toBe(0);
+      expect(mockDbService.findActionScriptRunForScript).toHaveBeenCalledWith(
+        foundWebsite.id,
+        foundAction.id,
+        foundScript.id,
+        "run-id-from-path",
+      );
+      expect(mockDbService.findActionScriptRunScreenshotForRun).toHaveBeenCalledWith(
+        foundWebsite.id,
+        foundAction.id,
+        sampleRun.id,
+        "screenshot-id-from-path",
+      );
+    });
+
+    it("returns 404 Website not found and looks up no run when the website does not exist", async () => {
+      mockDbService.findWebsiteById.mockResolvedValue(null);
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Website not found" });
+      expect(mockDbService.findActionScriptRunForScript).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 Script run not found and looks up no screenshot when the run does not exist", async () => {
+      mockDbService.findActionScriptRunForScript.mockResolvedValue(null);
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Script run not found" });
+      expect(mockDbService.findActionScriptRunScreenshotForRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 Step screenshot not found when the run has no such screenshot", async () => {
+      mockDbService.findActionScriptRunForScript.mockResolvedValue(sampleRun);
+      mockDbService.findActionScriptRunScreenshotForRun.mockResolvedValue(null);
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Step screenshot not found" });
+    });
+
+    it("returns 404 when the screenshot could not be taken during the run (it has an error and no file)", async () => {
+      mockDbService.findActionScriptRunForScript.mockResolvedValue(sampleRun);
+      mockDbService.findActionScriptRunScreenshotForRun.mockResolvedValue({
+        ...sampleStepScreenshot,
+        fileName: null,
+        errorMessage: "Timeout 10000ms exceeded",
+      });
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "This step screenshot could not be taken during the run" });
+    });
+
+    it("returns 404 Step screenshot file not found when the file is gone from disk", async () => {
+      mockDbService.findActionScriptRunForScript.mockResolvedValue(sampleRun);
+      mockDbService.findActionScriptRunScreenshotForRun.mockResolvedValue({
+        ...sampleStepScreenshot,
+        fileName: "website-id-from-db/deleted-run/step-001.png",
+      });
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Step screenshot file not found" });
+    });
+
+    it("refuses a stored name that climbs out of the action script directory, serving no file", async () => {
+      mockDbService.findActionScriptRunForScript.mockResolvedValue(sampleRun);
+      mockDbService.findActionScriptRunScreenshotForRun.mockResolvedValue({
+        ...sampleStepScreenshot,
+        fileName: "../action-script-files/website-id-from-db/existing-run/step-001.png",
+      });
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "Forbidden" });
+    });
+
+    it("returns 500 with the error when the screenshot lookup fails", async () => {
+      mockDbService.findActionScriptRunForScript.mockResolvedValue(sampleRun);
+      mockDbService.findActionScriptRunScreenshotForRun.mockRejectedValue(new Error("connection refused"));
+
+      const res = await request(createActionScriptsApp()).get(STEP_SCREENSHOT_PATH);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "connection refused" });
     });
   });
 

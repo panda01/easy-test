@@ -50,6 +50,50 @@ export const PLAN_OUTPUT_CHARACTER_LIMIT = 200_000;
 /** The screenshot a failed run writes into its run folder. */
 export const FAILURE_SCREENSHOT_FILE_NAME = "failure.png";
 
+/** The step screenshot a run writes into its run folder right after it logs in. */
+export const LOGGED_IN_SCREENSHOT_FILE_NAME = "logged-in.png";
+
+/** The step screenshot a run writes into its run folder right after it opens the start URL. */
+export const START_PAGE_SCREENSHOT_FILE_NAME = "start-page.png";
+
+/**
+ * How long a step screenshot waits for the page's `load` event first, so it
+ * does not catch a half-loaded page. Running out is not an error: the
+ * screenshot is taken anyway.
+ */
+export const STEP_SCREENSHOT_SETTLE_TIMEOUT_MS = 2_000;
+
+/** When a step screenshot was taken: after the login, after the start URL opened, or after a plan step. */
+export type RunStepScreenshotMoment = "loggedIn" | "startPage" | "step";
+
+/**
+ * One step screenshot a run took (or tried to take). Exactly one of
+ * `fileName` and `errorMessage` is set: a screenshot that could not be taken
+ * never fails the run, it is recorded with why.
+ */
+export interface RunStepScreenshot {
+  /** When it was taken. */
+  moment: RunStepScreenshotMoment;
+  /** The 1-based plan step it follows, or null unless `moment` is `step`. */
+  stepNumber: number | null;
+  /** The PNG's name inside the run folder (e.g. `step-003.png`), or null when it could not be taken. */
+  fileName: string | null;
+  /** Why it could not be taken (first line, credential and secret values scrubbed), or null when it was. */
+  errorMessage: string | null;
+  /** The address the browser was on (scrubbed), or null when it could not be read. */
+  pageUrl: string | null;
+}
+
+/**
+ * Names the screenshot taken after a plan step, padded so the run folder
+ * lists them in step order.
+ * @param stepNumber - The step's 1-based number
+ * @returns The file name, e.g. `step-003.png`
+ */
+export function buildStepScreenshotFileName(stepNumber: number): string {
+  return `step-${String(stepNumber).padStart(3, "0")}.png`;
+}
+
 /** What credential values are replaced by in error messages and the log. */
 const SCRUBBED_SECRET = "••••••";
 
@@ -121,7 +165,7 @@ export interface ActionPlanRunRequest {
   timingSettings: ScreenshotTimingSettings;
   /** The origins credential values may be typed on (see `buildAllowedPlanOrigins`). */
   allowedOrigins: string[];
-  /** Absolute path of this run's own (new) folder; `failure.png` is written there. */
+  /** Absolute path of this run's own (new) folder; `failure.png` and the step screenshots are written there. */
   runDirectory: string;
   /** Absolute path of the folder `uploadFile` steps pick their files from. */
   uploadsDirectory: string;
@@ -159,6 +203,8 @@ export interface ActionPlanRunResult {
   pageUrlAfterConfirm: string | null;
   /** The address the browser was on when the run ended (scrubbed), or null when it could not be read. */
   finalPageUrl: string | null;
+  /** The step screenshots the run took (or tried to take), in the order it took them. */
+  stepScreenshots: RunStepScreenshot[];
 }
 
 /** What a run noticed along the way, beside passing or failing. */
@@ -169,6 +215,8 @@ interface RunObservations {
   confirmStepSucceeded: boolean | null;
   /** See `ActionPlanRunResult.pageUrlAfterConfirm`. */
   pageUrlAfterConfirm: string | null;
+  /** See `ActionPlanRunResult.stepScreenshots`. */
+  stepScreenshots: RunStepScreenshot[];
 }
 
 /**
@@ -727,15 +775,103 @@ async function runWalkedStep(
   }
 }
 
+/** Which step screenshot to take: when, and after which plan step. */
+interface StepScreenshotRequest {
+  /** When it is taken. */
+  moment: RunStepScreenshotMoment;
+  /** The 1-based plan step it follows, or null unless `moment` is `step`. */
+  stepNumber: number | null;
+}
+
+/**
+ * Names the PNG of a step screenshot inside the run folder.
+ * @param screenshotRequest - When it is taken, and after which step
+ * @returns `logged-in.png`, `start-page.png`, or `step-003.png`
+ */
+function nameStepScreenshotFile(screenshotRequest: StepScreenshotRequest): string {
+  if (screenshotRequest.moment === "loggedIn") return LOGGED_IN_SCREENSHOT_FILE_NAME;
+  if (screenshotRequest.moment === "startPage") return START_PAGE_SCREENSHOT_FILE_NAME;
+  return buildStepScreenshotFileName(screenshotRequest.stepNumber ?? 0);
+}
+
+/**
+ * Describes where a step screenshot was taken, for the log line of one that
+ * could not be taken.
+ * @param screenshotRequest - When it was taken, and after which step
+ * @returns E.g. "after the login", "after step 3"
+ */
+function describeStepScreenshotMoment(screenshotRequest: StepScreenshotRequest): string {
+  if (screenshotRequest.moment === "loggedIn") return "after the login";
+  if (screenshotRequest.moment === "startPage") return "after opening the start URL";
+  return `after step ${String(screenshotRequest.stepNumber ?? 0)}`;
+}
+
+/**
+ * Takes one step screenshot into the run folder, so the automatic navigation
+ * can be followed afterwards. First it waits up to
+ * `STEP_SCREENSHOT_SETTLE_TIMEOUT_MS` for the page's `load` event (running
+ * out is fine: the screenshot is taken anyway). Never rejects: a screenshot
+ * that cannot be taken must not fail the run, so it is recorded with WHY
+ * (the error's first line, credential and secret values scrubbed) and a
+ * "⚠ Screenshot ... could not be taken" line is logged.
+ * @param page - The run's page
+ * @param runDirectory - Absolute path of the run's folder
+ * @param screenshotRequest - When it is taken, and after which step
+ * @param context - What each step needs (its log)
+ * @param secrets - The credential and secret parameter values to scrub
+ * @param observations - What the run noticed (the screenshot is appended in place)
+ * @returns Resolves once the screenshot is recorded, taken or not
+ */
+async function captureStepScreenshot(
+  page: Page,
+  runDirectory: string,
+  screenshotRequest: StepScreenshotRequest,
+  context: PlanStepContext,
+  secrets: string[],
+  observations: RunObservations,
+): Promise<void> {
+  const fileName = nameStepScreenshotFile(screenshotRequest);
+  try {
+    await page.waitForLoadState("load", { timeout: STEP_SCREENSHOT_SETTLE_TIMEOUT_MS });
+  } catch {
+    // The page is still loading: take the screenshot of what it shows now.
+  }
+  try {
+    await page.screenshot({ path: path.join(runDirectory, fileName), timeout: PLAN_STEP_TIMEOUT_MS });
+    observations.stepScreenshots.push({
+      ...screenshotRequest,
+      fileName,
+      errorMessage: null,
+      pageUrl: readScrubbedPageUrl(page, secrets),
+    });
+  } catch (error: unknown) {
+    const errorMessage = scrubSecrets(summarizeError(error), secrets);
+    observations.stepScreenshots.push({
+      ...screenshotRequest,
+      fileName: null,
+      errorMessage,
+      pageUrl: readScrubbedPageUrl(page, secrets),
+    });
+    context.log(`⚠ Screenshot ${describeStepScreenshotMoment(screenshotRequest)} could not be taken: ${errorMessage}`);
+  }
+}
+
 /**
  * Logs in (when the run has a credential), opens the start URL, and runs
  * every step in order, stopping at the first one that fails. Steps a blank
  * optional parameter uses are skipped (and logged as skipped); the steps an
  * added field brings run right after the step they follow, and a failure in
  * one is reported at that step.
+ *
+ * A step screenshot is taken (`captureStepScreenshot`) after the login,
+ * after the start URL opened, and after each step number once that step -
+ * and the added-field steps after it - ran. A skipped step with no added
+ * steps gets none, and neither does the step that failed (its frame is the
+ * failure screenshot).
  * @param page - The run's page
  * @param request - The plan, login, folders, and parameter changes
  * @param context - What each step needs
+ * @param secrets - The credential and secret parameter values, scrubbed from step screenshot errors
  * @param observations - What the run noticed (changed in place)
  * @returns Null when everything ran; otherwise where it stopped and why
  */
@@ -743,9 +879,18 @@ async function walkPlan(
   page: Page,
   request: ActionPlanRunRequest,
   context: PlanStepContext,
+  secrets: string[],
   observations: RunObservations,
 ): Promise<PlanRunFailure | null> {
-  const { plan, login, parameterRun } = request;
+  const { plan, login, parameterRun, runDirectory } = request;
+  /**
+   * Takes one step screenshot of this run (see `captureStepScreenshot`).
+   * @param screenshotRequest - When it is taken, and after which step
+   * @returns Resolves once it is recorded
+   */
+  const takeStepScreenshot = (screenshotRequest: StepScreenshotRequest): Promise<void> =>
+    captureStepScreenshot(page, runDirectory, screenshotRequest, context, secrets, observations);
+
   if (login !== null) {
     context.log(`Log in as "${login.credentialName}"`);
     const loginAttempt = await logInWithCredential(page, login.details, request.timingSettings);
@@ -756,6 +901,7 @@ async function walkPlan(
       };
     }
     context.log("✔ Logged in");
+    await takeStepScreenshot({ moment: "loggedIn", stepNumber: null });
   }
 
   context.log(`Open ${plan.startUrl}`);
@@ -767,6 +913,7 @@ async function walkPlan(
       errorMessage: `Could not open the start URL: ${summarizeError(error)}`,
     };
   }
+  await takeStepScreenshot({ moment: "startPage", stepNumber: null });
 
   for (const [stepIndex, step] of plan.steps.entries()) {
     const stepNumber = stepIndex + 1;
@@ -792,6 +939,10 @@ async function walkPlan(
           errorMessage: `The added field after step ${stepNumber} could not be filled in: ${summarizeError(error)}`,
         };
       }
+    }
+    const somethingRanForThisStep = !stepIsSkipped || addedSteps.length > 0;
+    if (somethingRanForThisStep) {
+      await takeStepScreenshot({ moment: "step", stepNumber });
     }
   }
   return null;
@@ -896,6 +1047,10 @@ async function captureFailureEvidence(
  *    it writes `failure.png` into its run folder, then reads the failing
  *    page's address and takes its aria snapshot. A passing run captures none
  *    of it.
+ * 6. Along the way every run - passing or not - takes STEP screenshots into
+ *    its run folder: after the login, after the start URL opened, and after
+ *    each step that ran (see `walkPlan`). One that cannot be taken is
+ *    recorded with its error and logged; it never fails the run.
  *
  * Credential values - and secret parameter values - are only ever in
  * memory: they are scrubbed from every error message, the failing page's
@@ -906,7 +1061,7 @@ async function captureFailureEvidence(
  * read the fields around each parameter step, and check a Create action's
  * confirm step (see `walkPlan`).
  * @param request - The plan, login, timing settings, origins, folders, and parameter changes
- * @returns The outcome, the log, whether a failure screenshot was written, the failing page's address and aria snapshot, the field readings, the confirm check, and the final address
+ * @returns The outcome, the log, whether a failure screenshot was written, the failing page's address and aria snapshot, the field readings, the confirm check, the final address, and the step screenshots
  * @throws When the run folder cannot be created or the browser cannot be launched
  */
 export async function runActionPlan(request: ActionPlanRunRequest): Promise<ActionPlanRunResult> {
@@ -916,7 +1071,12 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
   const { login } = request;
   const credentialSecrets = login === null ? [] : [login.details.password, login.details.username];
   const secrets = [...credentialSecrets, ...request.parameterRun.secretValues];
-  const observations: RunObservations = { fieldReadings: [], confirmStepSucceeded: null, pageUrlAfterConfirm: null };
+  const observations: RunObservations = {
+    fieldReadings: [],
+    confirmStepSucceeded: null,
+    pageUrlAfterConfirm: null,
+    stepScreenshots: [],
+  };
   /**
    * Appends one line to the run log, with any credential value scrubbed.
    * @param line - The line
@@ -967,7 +1127,7 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
     const timeoutTimer = setTimeout(handleTimeLimit, PLAN_RUN_TIMEOUT_MS);
 
     try {
-      failure = await walkPlan(page, request, context, observations);
+      failure = await walkPlan(page, request, context, secrets, observations);
     } finally {
       clearTimeout(timeoutTimer);
     }
@@ -1017,5 +1177,6 @@ export async function runActionPlan(request: ActionPlanRunRequest): Promise<Acti
     pageUrlAfterConfirm:
       observations.pageUrlAfterConfirm === null ? null : scrubSecrets(observations.pageUrlAfterConfirm, secrets),
     finalPageUrl,
+    stepScreenshots: observations.stepScreenshots,
   };
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { userEvent } from "@testing-library/user-event";
 import ScreenshotRunDetails from "../../src/components/ScreenshotRunDetails";
 import { buildScreenshotRunRecord } from "./support/frontendTestHelpers";
 
@@ -17,6 +18,17 @@ describe("ScreenshotRunDetails", () => {
       "src",
       "/api/websites/website-1/screenshot-runs/run-1/screenshot",
     );
+  });
+
+  it("opens its screenshot full screen, on its own, when clicked", async () => {
+    const user = userEvent.setup();
+    const run = buildScreenshotRunRecord({ id: "run-1" });
+    render(<ScreenshotRunDetails websiteId="website-1" run={run} />);
+
+    await user.click(screen.getByRole("button", { name: /^View full screen: Screenshot of https:\/\/example\.com taken / }));
+
+    expect(screen.getByRole("dialog", { name: /^Screenshot of https:\/\/example\.com taken / })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Next screenshot" })).not.toBeInTheDocument();
   });
 
   it("says when and where the run was taken", () => {

@@ -1,4 +1,4 @@
-import { type ReactElement } from "react";
+import { type ReactElement, type ReactNode } from "react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import StatusTag from "./StatusTag";
@@ -25,6 +25,8 @@ export interface ActionPlanStepsProps {
   isCompact: boolean;
   /** Tags to show on steps, by 1-based step number - the parameters each step uses, and "Confirm" (see `buildStepParameterTags`); omit for none. */
   stepTags?: ReadonlyMap<number, string[]>;
+  /** Content to show under steps, by 1-based step number - the run page's step screenshots; omit for none. */
+  contentBelowStep?: ReadonlyMap<number, ReactNode>;
 }
 
 /** How a step is drawn against the highlighted run. */
@@ -80,12 +82,13 @@ function firstLineOf(errorMessage: string | null): string {
  * reached are dimmed. With no run, the steps are unmarked.
  *
  * A step a parameter writes into carries that parameter's name as a tag, and
- * a Create action's confirm step a "Confirm" tag (`stepTags`).
- * @param props - The plan, the run to mark it by, the step tags, and the layout
+ * a Create action's confirm step a "Confirm" tag (`stepTags`). The run page
+ * puts each step's screenshot under it (`contentBelowStep`).
+ * @param props - The plan, the run to mark it by, the step tags, the content under steps, and the layout
  * @returns The numbered step list
  */
 export default function ActionPlanSteps(props: ActionPlanStepsProps): ReactElement {
-  const { plan, highlightedRun, isCompact, stepTags } = props;
+  const { plan, highlightedRun, isCompact, stepTags, contentBelowStep } = props;
   return (
     <Box>
       <Typography sx={{ fontSize: 12.5, color: nocturneTokens.neutral[400], mb: 1, overflowWrap: "anywhere" }}>
@@ -147,6 +150,7 @@ export default function ActionPlanSteps(props: ActionPlanStepsProps): ReactEleme
                     Failed here — {firstLineOf(highlightedRun?.errorMessage ?? null)}
                   </Box>
                 )}
+                {contentBelowStep?.get(stepNumber)}
               </Box>
             </Box>
           );

@@ -2,6 +2,7 @@ import { type ReactElement } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
+import ExpandableScreenshot from "./ExpandableScreenshot";
 import { type ScreenshotRunRecord } from "../hooks/useScreenshotRuns";
 import { describeScreenshotRunOutcome, formatRunDuration } from "../utils/describeScreenshotRun";
 import { screenshotRunImageApiUrl } from "../utils/routePaths";
@@ -16,8 +17,9 @@ export interface ScreenshotRunDetailsProps {
 
 /**
  * One screenshot run in full: its outcome line ("Failed · HTTP 404 · 1.2 s")
- * with the failure reason, when and where it was taken, and its screenshot -
- * or a note that none was captured, because navigation never reached a page.
+ * with the failure reason, when and where it was taken, and its screenshot
+ * (click it to open it full screen) - or a note that none was captured,
+ * because navigation never reached a page.
  *
  * The outcome is a `role="status"` alert: it is a result to read, not an
  * error the user must act on.
@@ -45,20 +47,11 @@ export default function ScreenshotRunDetails(props: ScreenshotRunDetailsProps): 
       </Typography>
 
       {runHasScreenshot ? (
-        <Box
-          component="img"
+        <ExpandableScreenshot
           src={screenshotRunImageApiUrl(websiteId, run.id)}
           alt={`Screenshot of ${run.requestedUrl} taken ${takenAtText}`}
-          sx={{
-            display: "block",
-            width: "100%",
-            height: "auto",
-            aspectRatio: "16 / 9",
-            mt: 1,
-            border: 1,
-            borderColor: "divider",
-            borderRadius: 1,
-          }}
+          buttonSx={{ mt: 1, borderRadius: 1 }}
+          imageSx={{ aspectRatio: "16 / 9", border: 1, borderColor: "divider", borderRadius: 1 }}
         />
       ) : (
         <Typography color="text.secondary" sx={{ mt: 1 }}>

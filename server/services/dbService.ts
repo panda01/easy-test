@@ -7,6 +7,7 @@ import {
   type ScreenshotRun,
   type ActionScript,
   type ActionScriptRun,
+  type ActionScriptRunScreenshot,
   type ActionScriptRefinement,
   type CrawlRun,
   type CrawledPage,
@@ -52,6 +53,7 @@ export type {
   ScreenshotRun,
   ActionScript,
   ActionScriptRun,
+  ActionScriptRunScreenshot,
   ActionScriptRefinement,
   CrawlRun,
   CrawledPage,
@@ -321,6 +323,28 @@ export type ActionScriptWithPlan = Omit<ActionScriptRow, "plan" | "runs"> & {
   latestRun: LatestActionScriptRun | null;
 };
 
+/** When a step screenshot was taken (see the `ActionScriptRunScreenshot` model's doc comment). */
+export type ActionScriptRunScreenshotMoment = "loggedIn" | "startPage" | "step";
+
+/**
+ * One step screenshot a run took (or tried to take), as recorded with the
+ * run. Exactly one of `fileName` and `errorMessage` is set.
+ */
+export interface ActionScriptRunScreenshotInput {
+  /** The 1-based order the run took its screenshots in. */
+  position: number;
+  /** When it was taken. */
+  moment: ActionScriptRunScreenshotMoment;
+  /** The 1-based plan step it follows, or null unless `moment` is `step`. */
+  stepNumber: number | null;
+  /** The PNG's path relative to the action script directory, or null when it could not be taken. */
+  fileName: string | null;
+  /** Why it could not be taken (first line, scrubbed), or null when it was. */
+  errorMessage: string | null;
+  /** The address the browser was on (scrubbed), or null. */
+  pageUrl: string | null;
+}
+
 /**
  * The fields a caller supplies when recording one script run. Runs are
  * create-only, so there is no matching "update" input.
@@ -356,6 +380,8 @@ export interface ActionScriptRunInput {
   confirmStepNumber: number | null;
   /** Whether that step ran without an error showing; null when the run never reached it (or has none). */
   confirmStepSucceeded: boolean | null;
+  /** The step screenshots the run took (or tried to take), written with the run as its `screenshots` rows. */
+  stepScreenshots: ActionScriptRunScreenshotInput[];
 }
 
 /**
@@ -823,11 +849,12 @@ export async function updateWebsite(
 
 /**
  * Soft deletes an active website AND its active use cases, actions, screenshot
- * runs, action scripts, action script runs, action script refinements, crawl
- * runs, crawled pages, credentials, web objects, page patterns, action
- * parameters, created objects, and auto-refine jobs.
+ * runs, action scripts, action script runs, action script run screenshots,
+ * action script refinements, crawl runs, crawled pages, credentials, web
+ * objects, page patterns, action parameters, created objects, auto-refine
+ * jobs, and action cleanup links.
  *
- * All fifteen updates run in one transaction and share one `deletedAt`
+ * All seventeen updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later. A
  * running auto-refine job's next conditional write then matches no row, which
  * is what stops it.
@@ -873,6 +900,10 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.actionScriptRun.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionScriptRunScreenshot.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1159,12 +1190,14 @@ export async function updateActionForWebsite(
 
 /**
  * Soft deletes one active action AND its active scripts, script runs, script
- * refinements, parameters, and auto-refine jobs. Its created objects are
- * KEPT: they are still on the website, and the record says what to clean up.
+ * run screenshots, script refinements, parameters, auto-refine jobs, and
+ * cleanup links. Its created objects are KEPT: they are still on the
+ * website, and the record says what to clean up.
  *
- * All six updates run in one transaction and share one `deletedAt`
+ * All eight updates run in one transaction and share one `deletedAt`
  * timestamp, like `softDeleteWebsite`. When no active action matched, the
- * scripts, runs, refinements, parameters, and jobs are left untouched. A
+ * scripts, runs, screenshots, refinements, parameters, jobs, and links are
+ * left untouched. A
  * running auto-refine job's next conditional write then matches no row, which
  * is what stops it.
  * @param websiteId - The owning website's cuid
@@ -1201,6 +1234,10 @@ export async function softDeleteActionForWebsite(
       data: { deletedAt },
     });
     await transaction.actionScriptRun.updateMany({
+      where: { actionId, websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.actionScriptRunScreenshot.updateMany({
       where: { actionId, websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1604,6 +1641,73 @@ export type ActionScriptRunWithObjects = Prisma.ActionScriptRunGetPayload<{
 }>;
 
 /**
+ * What the run page's read brings along on top of
+ * `ACTION_SCRIPT_RUN_OBJECTS_INCLUDE`: the run's active step screenshots, in
+ * the order they were taken.
+ */
+const ACTION_SCRIPT_RUN_DETAIL_INCLUDE = {
+  ...ACTION_SCRIPT_RUN_OBJECTS_INCLUDE,
+  screenshots: {
+    where: { deletedAt: null },
+    orderBy: { position: "asc" },
+  },
+} as const;
+
+/**
+ * A script run as the run page reads it: `ActionScriptRunWithObjects` plus
+ * `screenshots` (its step screenshots, by `position`).
+ */
+export type ActionScriptRunDetail = Prisma.ActionScriptRunGetPayload<{
+  include: typeof ACTION_SCRIPT_RUN_DETAIL_INCLUDE;
+}>;
+
+/**
+ * Looks up one active script run for the run page, scoped to the website,
+ * action, and script that own it: the run, the object it created, the
+ * created objects it deleted, its cleanup links, and its active step
+ * screenshots in the order they were taken.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptId - The script's cuid
+ * @param actionScriptRunId - The run's cuid
+ * @returns The run, or null when it does not exist, was soft deleted, or belongs to another script
+ */
+export async function findActionScriptRunDetailForScript(
+  websiteId: string,
+  actionId: string,
+  actionScriptId: string,
+  actionScriptRunId: string,
+): Promise<ActionScriptRunDetail | null> {
+  const actionScriptRun = await prisma.actionScriptRun.findFirst({
+    where: { id: actionScriptRunId, websiteId, actionId, actionScriptId, deletedAt: null },
+    include: ACTION_SCRIPT_RUN_DETAIL_INCLUDE,
+  });
+  return actionScriptRun;
+}
+
+/**
+ * Looks up one active step screenshot of a run, scoped to the website,
+ * action, and run that own it - so a screenshot id from the URL can only
+ * reach a file the database names for that run.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The owning action's cuid
+ * @param actionScriptRunId - The run's cuid
+ * @param screenshotId - The screenshot's cuid
+ * @returns The screenshot row, or null when it does not exist, was soft deleted, or belongs to another run
+ */
+export async function findActionScriptRunScreenshotForRun(
+  websiteId: string,
+  actionId: string,
+  actionScriptRunId: string,
+  screenshotId: string,
+): Promise<ActionScriptRunScreenshot | null> {
+  const screenshot = await prisma.actionScriptRunScreenshot.findFirst({
+    where: { id: screenshotId, websiteId, actionId, actionScriptRunId, deletedAt: null },
+  });
+  return screenshot;
+}
+
+/**
  * Lists a script's active runs, newest first, each with the object it
  * created and the created objects it deleted.
  * @param websiteId - The owning website's cuid
@@ -1665,14 +1769,14 @@ export async function findActionScriptRunForScript(
 }
 
 /**
- * Records one script run. Runs are never edited after this; a failed or
- * timed-out run is recorded the same way as a passing one, with
- * `succeeded: false`.
+ * Records one script run, and its step screenshots as `screenshots` rows in
+ * the same write. Runs are never edited after this; a failed or timed-out
+ * run is recorded the same way as a passing one, with `succeeded: false`.
  * @param websiteId - The owning website's cuid
  * @param actionId - The owning action's cuid
  * @param actionScriptId - The script that was run
- * @param data - What the run produced
- * @returns The created row
+ * @param data - What the run produced, its step screenshots included
+ * @returns The created run row
  */
 export async function createActionScriptRunForScript(
   websiteId: string,
@@ -1680,8 +1784,18 @@ export async function createActionScriptRunForScript(
   actionScriptId: string,
   data: ActionScriptRunInput,
 ): Promise<ActionScriptRun> {
+  const { stepScreenshots, parameterValues, ...runColumns } = data;
   const created = await prisma.actionScriptRun.create({
-    data: { ...data, parameterValues: data.parameterValues.map((usedValue) => ({ ...usedValue })), websiteId, actionId, actionScriptId },
+    data: {
+      ...runColumns,
+      parameterValues: parameterValues.map((usedValue) => ({ ...usedValue })),
+      websiteId,
+      actionId,
+      actionScriptId,
+      screenshots: {
+        create: stepScreenshots.map((stepScreenshot) => ({ ...stepScreenshot, websiteId, actionId })),
+      },
+    },
   });
   return created;
 }

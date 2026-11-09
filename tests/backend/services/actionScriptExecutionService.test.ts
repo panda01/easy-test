@@ -70,6 +70,7 @@ import {
   CLEANUP_NO_DELETE_VERSION_MESSAGE,
   PLAN_NEEDS_A_CREDENTIAL_MESSAGE,
   UPLOADS_FOLDER_NAME,
+  buildStepScreenshotInputs,
   claimActionRun,
   claimRunRefinement,
   describeFailedRun,
@@ -209,6 +210,7 @@ const passingRunResult = {
   confirmStepSucceeded: null,
   pageUrlAfterConfirm: null,
   finalPageUrl: "https://example.com/welcome",
+  stepScreenshots: [],
 };
 
 const recordedRun: ActionScriptRun = {
@@ -395,6 +397,39 @@ describe("actionScriptExecutionService", () => {
     });
   });
 
+  describe("buildStepScreenshotInputs", () => {
+    it("numbers the screenshots 1, 2, 3 in the order taken and prefixes each file with the run folder", () => {
+      const inputs = buildStepScreenshotInputs("website-1/run-uuid", [
+        { moment: "loggedIn", stepNumber: null, fileName: "logged-in.png", errorMessage: null, pageUrl: "https://example.com/home" },
+        { moment: "step", stepNumber: 4, fileName: "step-004.png", errorMessage: null, pageUrl: null },
+      ]);
+
+      expect(inputs).toEqual([
+        {
+          position: 1,
+          moment: "loggedIn",
+          stepNumber: null,
+          fileName: "website-1/run-uuid/logged-in.png",
+          errorMessage: null,
+          pageUrl: "https://example.com/home",
+        },
+        { position: 2, moment: "step", stepNumber: 4, fileName: "website-1/run-uuid/step-004.png", errorMessage: null, pageUrl: null },
+      ]);
+    });
+
+    it("keeps a screenshot that could not be taken without a file, with its error", () => {
+      const [input] = buildStepScreenshotInputs("website-1/run-uuid", [
+        { moment: "step", stepNumber: 2, fileName: null, errorMessage: "Target closed", pageUrl: null },
+      ]);
+
+      expect(input).toEqual({ position: 1, moment: "step", stepNumber: 2, fileName: null, errorMessage: "Target closed", pageUrl: null });
+    });
+
+    it("records nothing for a run that took no screenshots", () => {
+      expect(buildStepScreenshotInputs("website-1/run-uuid", [])).toEqual([]);
+    });
+  });
+
   describe("performActionScriptRun", () => {
     it("runs the plan in a run folder under the website and returns the recorded run when the objects cannot be read", async () => {
       const run = await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
@@ -414,6 +449,45 @@ describe("actionScriptExecutionService", () => {
       );
       expect(mockActionParameterService.followUpRecordedRun).toHaveBeenCalledWith(
         expect.objectContaining({ websiteId: "website-1", actionScriptRunId: "run-1", runResult: passingRunResult }),
+      );
+    });
+
+    it("records the step screenshots with the run, numbered in order, each file under the run's own folder", async () => {
+      mockActionPlanRunnerService.runActionPlan.mockResolvedValue({
+        ...passingRunResult,
+        stepScreenshots: [
+          { moment: "startPage", stepNumber: null, fileName: "start-page.png", errorMessage: null, pageUrl: "https://example.com/" },
+          { moment: "step", stepNumber: 1, fileName: null, errorMessage: "Timeout 10000ms exceeded", pageUrl: null },
+        ],
+      });
+
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+
+      const runFolderName = path.relative(ACTION_SCRIPT_DIRECTORY, readRunRequest().runDirectory).split(path.sep).join("/");
+      expect(mockDbService.createActionScriptRunForScript).toHaveBeenCalledWith(
+        "website-1",
+        "action-1",
+        "script-1",
+        expect.objectContaining({
+          stepScreenshots: [
+            {
+              position: 1,
+              moment: "startPage",
+              stepNumber: null,
+              fileName: `${runFolderName}/start-page.png`,
+              errorMessage: null,
+              pageUrl: "https://example.com/",
+            },
+            {
+              position: 2,
+              moment: "step",
+              stepNumber: 1,
+              fileName: null,
+              errorMessage: "Timeout 10000ms exceeded",
+              pageUrl: null,
+            },
+          ],
+        }),
       );
     });
 

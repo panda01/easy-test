@@ -38,10 +38,11 @@ generator client {
 ///
 /// Rows are SOFT deleted: deleting sets `deletedAt` (and sets the same
 /// timestamp on the website's active use cases, actions, screenshot runs,
-/// action scripts, action script runs, action script refinements, crawl runs,
-/// crawled pages, credentials, web objects, page patterns, action parameters,
-/// action cleanups, and created objects) instead of removing the row. Every
-/// dbService query filters `deletedAt: null`.
+/// action scripts, action script runs, action script run screenshots, action
+/// script refinements, crawl runs, crawled pages, credentials, web objects,
+/// page patterns, action parameters, action cleanups, and created objects)
+/// instead of removing the row. Every dbService query filters
+/// `deletedAt: null`.
 ///
 /// Two per-website settings control WHEN the Playwright controller takes a
 /// screenshot, after the page's `load` event:
@@ -59,31 +60,32 @@ generator client {
 /// with a credential's own login URL, the website LEARNS it: that URL is
 /// saved here (`adoptWebsiteLoginUrl`), never overwriting one already set.
 model Website {
-  id                      String                   @id @default(cuid())
-  url                     String
-  name                    String
-  description             String?
-  networkIdleTimeoutMs    Int                      @default(5000)
-  screenshotMinimumWaitMs Int                      @default(1)
-  loginUrl                String?
-  createdAt               DateTime                 @default(now())
-  updatedAt               DateTime                 @updatedAt
-  deletedAt               DateTime?
-  useCases                UseCase[]
-  actions                 Action[]
-  screenshotRuns          ScreenshotRun[]
-  actionScripts           ActionScript[]
-  actionScriptRuns        ActionScriptRun[]
-  actionScriptRefinements ActionScriptRefinement[]
-  crawlRuns               CrawlRun[]
-  crawledPages            CrawledPage[]
-  credentials             Credential[]
-  webObjects              WebObject[]
-  pagePatterns            PagePattern[]
-  actionParameters        ActionParameter[]
-  createdObjects          CreatedObject[]
-  autoRefineJobs          AutoRefineJob[]
-  actionCleanups          ActionCleanup[]
+  id                         String                      @id @default(cuid())
+  url                        String
+  name                       String
+  description                String?
+  networkIdleTimeoutMs       Int                         @default(5000)
+  screenshotMinimumWaitMs    Int                         @default(1)
+  loginUrl                   String?
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  deletedAt                  DateTime?
+  useCases                   UseCase[]
+  actions                    Action[]
+  screenshotRuns             ScreenshotRun[]
+  actionScripts              ActionScript[]
+  actionScriptRuns           ActionScriptRun[]
+  actionScriptRunScreenshots ActionScriptRunScreenshot[]
+  actionScriptRefinements    ActionScriptRefinement[]
+  crawlRuns                  CrawlRun[]
+  crawledPages               CrawledPage[]
+  credentials                Credential[]
+  webObjects                 WebObject[]
+  pagePatterns               PagePattern[]
+  actionParameters           ActionParameter[]
+  createdObjects             CreatedObject[]
+  autoRefineJobs             AutoRefineJob[]
+  actionCleanups             ActionCleanup[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -109,9 +111,9 @@ model UseCase {
 
 /// A reusable step on a website, e.g. "Log in". Belongs to exactly one
 /// website. Soft deleted like `Website`; deleting an action also stamps the
-/// same `deletedAt` on its active scripts, script runs, script refinements,
-/// parameters, and auto-refine jobs. Its created objects are kept (they are
-/// still on the site).
+/// same `deletedAt` on its active scripts, script runs, script run
+/// screenshots, script refinements, parameters, and auto-refine jobs. Its
+/// created objects are kept (they are still on the site).
 ///
 /// `credentialId` is the credential the action runs AS, or null for a
 /// logged-out visitor. With one, every run first logs in with the crawler's
@@ -140,7 +142,7 @@ model UseCase {
 /// row); the Delete action sees the link from the other side
 /// (`cleanupsAsDelete`). Deleting either action soft deletes the link.
 model Action {
-  id                   String                   @id @default(cuid())
+  id                   String                      @id @default(cuid())
   websiteId            String
   credentialId         String?
   title                String
@@ -149,19 +151,20 @@ model Action {
   userObjectTypeKey    String?
   userNameParameterKey String?
   parametersSyncedAt   DateTime?
-  createdAt            DateTime                 @default(now())
-  updatedAt            DateTime                 @updatedAt
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
   deletedAt            DateTime?
-  website              Website                  @relation(fields: [websiteId], references: [id])
-  credential           Credential?              @relation(fields: [credentialId], references: [id])
+  website              Website                     @relation(fields: [websiteId], references: [id])
+  credential           Credential?                 @relation(fields: [credentialId], references: [id])
   scripts              ActionScript[]
   scriptRuns           ActionScriptRun[]
+  scriptRunScreenshots ActionScriptRunScreenshot[]
   scriptRefinements    ActionScriptRefinement[]
   parameters           ActionParameter[]
   createdObjects       CreatedObject[]
   autoRefineJobs       AutoRefineJob[]
-  cleanupsAsCreate     ActionCleanup[]          @relation("CleanupCreateAction")
-  cleanupsAsDelete     ActionCleanup[]          @relation("CleanupDeleteAction")
+  cleanupsAsCreate     ActionCleanup[]             @relation("CleanupCreateAction")
+  cleanupsAsDelete     ActionCleanup[]             @relation("CleanupDeleteAction")
 
   @@index([websiteId])
   @@index([credentialId])
@@ -320,6 +323,10 @@ model ActionScript {
 /// `<websiteId>/<uuid>/failure.png`, or null when none was written.
 /// `durationMs` runs from browser launch to browser close.
 ///
+/// `screenshots` are the STEP screenshots the run took along the way (see
+/// `ActionScriptRunScreenshot`), written in the same create as the run. Runs
+/// recorded before step screenshots existed have none.
+///
 /// `failingPageUrl` is the address the browser was on when the run failed,
 /// and `failingPageAriaSnapshot` Playwright's aria snapshot of that page's
 /// `<body>` (cut at the crawler's snapshot cap). Both have the credential's
@@ -357,7 +364,7 @@ model ActionScript {
 /// exception to runs being create-only: they are written once, right after
 /// the run row exists, because the cleanup needs the recorded object.
 model ActionScriptRun {
-  id                        String                   @id @default(cuid())
+  id                        String                      @id @default(cuid())
   websiteId                 String
   actionId                  String
   actionScriptId            String
@@ -372,29 +379,77 @@ model ActionScriptRun {
   failingPageUrl            String?
   failingPageAriaSnapshot   String?
   durationMs                Int
-  parameterValues           Json                     @default("[]")
+  parameterValues           Json                        @default("[]")
   finalPageUrl              String?
   confirmStepNumber         Int?
   confirmStepSucceeded      Boolean?
   cleanupOutcome            String?
-  cleanupActionScriptRunId  String?                  @unique
+  cleanupActionScriptRunId  String?                     @unique
   cleanupErrorMessage       String?
-  createdAt                 DateTime                 @default(now())
-  updatedAt                 DateTime                 @updatedAt
+  createdAt                 DateTime                    @default(now())
+  updatedAt                 DateTime                    @updatedAt
   deletedAt                 DateTime?
-  website                   Website                  @relation(fields: [websiteId], references: [id])
-  action                    Action                   @relation(fields: [actionId], references: [id])
-  actionScript              ActionScript             @relation(fields: [actionScriptId], references: [id])
+  website                   Website                     @relation(fields: [websiteId], references: [id])
+  action                    Action                      @relation(fields: [actionId], references: [id])
+  actionScript              ActionScript                @relation(fields: [actionScriptId], references: [id])
   refinements               ActionScriptRefinement[]
-  createdObject             CreatedObject?           @relation("CreatedObjectRun")
-  deletedObjects            CreatedObject[]          @relation("CreatedObjectDeletingRun")
-  cleanupRun                ActionScriptRun?         @relation("RunCleanup", fields: [cleanupActionScriptRunId], references: [id])
-  cleanedUpRun              ActionScriptRun?         @relation("RunCleanup")
+  screenshots               ActionScriptRunScreenshot[]
+  createdObject             CreatedObject?              @relation("CreatedObjectRun")
+  deletedObjects            CreatedObject[]             @relation("CreatedObjectDeletingRun")
+  cleanupRun                ActionScriptRun?            @relation("RunCleanup", fields: [cleanupActionScriptRunId], references: [id])
+  cleanedUpRun              ActionScriptRun?            @relation("RunCleanup")
 
   @@index([websiteId])
   @@index([actionId])
   @@index([actionScriptId])
   @@map("action_script_runs")
+}
+
+/// One STEP screenshot a run took, so a person can follow the automatic
+/// navigation afterwards. A run takes one after it logs in (when its action
+/// has a credential), one after it opens the start URL, and one after each
+/// plan step that ran (once that step's added-field steps ran too). Skipped
+/// steps get none, and the step a run FAILED at gets none either: its frame
+/// is the run's `failureScreenshotFileName`. Belongs to exactly one run (and,
+/// denormalized for the cascades, its action and website). Create-only:
+/// written in the same create as its run; soft deleted together with its
+/// action or website.
+///
+/// `position` is the 1-based order the screenshots were taken in. `moment`
+/// is when it was taken - `loggedIn`, `startPage`, or `step` - and
+/// `stepNumber` the 1-based plan step it follows (null unless `moment` is
+/// `step`).
+///
+/// `fileName` is RELATIVE to `ACTION_SCRIPT_DIR`, inside the run's own
+/// folder: `<websiteId>/<uuid>/logged-in.png`, `.../start-page.png`, or
+/// `.../step-003.png`. A screenshot that could not be taken never fails the
+/// run: its row has `fileName` null and `errorMessage` saying why (the first
+/// line of what Playwright threw, credential and secret values scrubbed out).
+/// Exactly one of the two is set. `pageUrl` is the address the browser was on
+/// (scrubbed), or null when it could not be read.
+model ActionScriptRunScreenshot {
+  id                String          @id @default(cuid())
+  websiteId         String
+  actionId          String
+  actionScriptRunId String
+  position          Int
+  moment            String
+  stepNumber        Int?
+  fileName          String?
+  errorMessage      String?
+  pageUrl           String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  deletedAt         DateTime?
+  website           Website         @relation(fields: [websiteId], references: [id])
+  action            Action          @relation(fields: [actionId], references: [id])
+  actionScriptRun   ActionScriptRun @relation(fields: [actionScriptRunId], references: [id])
+
+  @@unique([actionScriptRunId, position])
+  @@index([websiteId])
+  @@index([actionId])
+  @@index([actionScriptRunId])
+  @@map("action_script_run_screenshots")
 }
 
 /// One "Refine": Claude was shown a FAILED run of a version (its error, step

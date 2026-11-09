@@ -14,6 +14,7 @@ const {
   mockScreenshotRunDelegate,
   mockActionScriptDelegate,
   mockActionScriptRunDelegate,
+  mockActionScriptRunScreenshotDelegate,
   mockActionScriptRefinementDelegate,
   mockCrawlRunDelegate,
   mockCrawledPageDelegate,
@@ -33,7 +34,8 @@ const {
      * Builds a stand-in for one Prisma model delegate (`prisma.website`,
      * `prisma.useCase`, `prisma.action`, `prisma.screenshotRun`,
      * `prisma.actionScript`, `prisma.actionScriptRun`,
-     * `prisma.actionScriptRefinement`, `prisma.crawlRun`,
+     * `prisma.actionScriptRunScreenshot`, `prisma.actionScriptRefinement`,
+     * `prisma.crawlRun`,
      * `prisma.crawledPage`, `prisma.credential`, `prisma.webObject`,
      * `prisma.pagePattern`, `prisma.autoRefineJob`) carrying every method
      * dbService calls.
@@ -56,6 +58,7 @@ const {
     const screenshotRunDelegate = createMockModelDelegate();
     const actionScriptDelegate = createMockModelDelegate();
     const actionScriptRunDelegate = createMockModelDelegate();
+    const actionScriptRunScreenshotDelegate = createMockModelDelegate();
     const actionScriptRefinementDelegate = createMockModelDelegate();
     const crawlRunDelegate = createMockModelDelegate();
     const crawledPageDelegate = createMockModelDelegate();
@@ -75,6 +78,7 @@ const {
       screenshotRun: screenshotRunDelegate,
       actionScript: actionScriptDelegate,
       actionScriptRun: actionScriptRunDelegate,
+      actionScriptRunScreenshot: actionScriptRunScreenshotDelegate,
       actionScriptRefinement: actionScriptRefinementDelegate,
       crawlRun: crawlRunDelegate,
       crawledPage: crawledPageDelegate,
@@ -94,6 +98,7 @@ const {
       mockScreenshotRunDelegate: screenshotRunDelegate,
       mockActionScriptDelegate: actionScriptDelegate,
       mockActionScriptRunDelegate: actionScriptRunDelegate,
+      mockActionScriptRunScreenshotDelegate: actionScriptRunScreenshotDelegate,
       mockActionScriptRefinementDelegate: actionScriptRefinementDelegate,
       mockCrawlRunDelegate: crawlRunDelegate,
       mockCrawledPageDelegate: crawledPageDelegate,
@@ -131,6 +136,7 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     screenshotRun = mockScreenshotRunDelegate;
     actionScript = mockActionScriptDelegate;
     actionScriptRun = mockActionScriptRunDelegate;
+    actionScriptRunScreenshot = mockActionScriptRunScreenshotDelegate;
     actionScriptRefinement = mockActionScriptRefinementDelegate;
     crawlRun = mockCrawlRunDelegate;
     crawledPage = mockCrawledPageDelegate;
@@ -175,6 +181,8 @@ import {
   createRefinedActionScriptForAction,
   listActionScriptRunsForScript,
   findActionScriptRunForScript,
+  findActionScriptRunDetailForScript,
+  findActionScriptRunScreenshotForRun,
   createActionScriptRunForScript,
   listCrawlRunsForWebsite,
   findCrawlRunForWebsite,
@@ -975,13 +983,14 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script refinements, crawl runs, crawled pages, credentials, page patterns, web objects, and auto-refine jobs inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script run screenshots, action script refinements, crawl runs, crawled pages, credentials, page patterns, web objects, and auto-refine jobs inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 4 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 5 });
+      mockActionScriptRunScreenshotDelegate.updateMany.mockResolvedValue({ count: 12 });
       mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 30 });
@@ -1017,6 +1026,10 @@ describe("dbService", () => {
         data: { deletedAt: expect.any(Date) },
       });
       expect(mockActionScriptRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(mockActionScriptRunScreenshotDelegate.updateMany).toHaveBeenCalledWith({
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
@@ -1061,6 +1074,7 @@ describe("dbService", () => {
       mockScreenshotRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockActionScriptRunScreenshotDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCrawlRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockCrawledPageDelegate.updateMany.mockResolvedValue({ count: 0 });
@@ -1082,6 +1096,9 @@ describe("dbService", () => {
       const actionScriptRunDeletedAt = readDeletedAtWrittenBy(
         mockActionScriptRunDelegate.updateMany,
       );
+      const actionScriptRunScreenshotDeletedAt = readDeletedAtWrittenBy(
+        mockActionScriptRunScreenshotDelegate.updateMany,
+      );
       const actionScriptRefinementDeletedAt = readDeletedAtWrittenBy(
         mockActionScriptRefinementDelegate.updateMany,
       );
@@ -1098,6 +1115,7 @@ describe("dbService", () => {
       expect(screenshotRunDeletedAt).toBe(websiteDeletedAt);
       expect(actionScriptDeletedAt).toBe(websiteDeletedAt);
       expect(actionScriptRunDeletedAt).toBe(websiteDeletedAt);
+      expect(actionScriptRunScreenshotDeletedAt).toBe(websiteDeletedAt);
       expect(actionScriptRefinementDeletedAt).toBe(websiteDeletedAt);
       expect(crawlRunDeletedAt).toBe(websiteDeletedAt);
       expect(crawledPageDeletedAt).toBe(websiteDeletedAt);
@@ -1438,10 +1456,11 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteActionForWebsite stamps the active action and its scripts, script runs, script refinements, and cleanup links inside one transaction", async () => {
+    it("softDeleteActionForWebsite stamps the active action and its scripts, script runs, script run screenshots, script refinements, and cleanup links inside one transaction", async () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 3 });
+      mockActionScriptRunScreenshotDelegate.updateMany.mockResolvedValue({ count: 9 });
       mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionCleanupDelegate.updateMany.mockResolvedValue({ count: 1 });
 
@@ -1466,16 +1485,21 @@ describe("dbService", () => {
         where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockActionScriptRunScreenshotDelegate.updateMany).toHaveBeenCalledWith({
+        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) },
+      });
       expect(mockActionScriptRefinementDelegate.updateMany).toHaveBeenCalledWith({
         where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
     });
 
-    it("softDeleteActionForWebsite writes one shared deletedAt timestamp to the action, its scripts, their runs, and their refinements", async () => {
+    it("softDeleteActionForWebsite writes one shared deletedAt timestamp to the action, its scripts, their runs and run screenshots, and their refinements", async () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockActionScriptRunScreenshotDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 0 });
 
       await softDeleteActionForWebsite("cuid-1", "action-1");
@@ -1484,6 +1508,7 @@ describe("dbService", () => {
       expect(actionDeletedAt).toBeInstanceOf(Date);
       expect(readDeletedAtWrittenBy(mockActionScriptDelegate.updateMany)).toBe(actionDeletedAt);
       expect(readDeletedAtWrittenBy(mockActionScriptRunDelegate.updateMany)).toBe(actionDeletedAt);
+      expect(readDeletedAtWrittenBy(mockActionScriptRunScreenshotDelegate.updateMany)).toBe(actionDeletedAt);
       expect(readDeletedAtWrittenBy(mockActionScriptRefinementDelegate.updateMany)).toBe(
         actionDeletedAt,
       );
@@ -1495,6 +1520,7 @@ describe("dbService", () => {
       expect(await softDeleteActionForWebsite("cuid-1", "already-deleted")).toBe(false);
       expect(mockActionScriptDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockActionScriptRunScreenshotDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionCleanupDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRefinementDelegate.updateMany).not.toHaveBeenCalled();
     });
@@ -1941,12 +1967,30 @@ describe("dbService", () => {
         confirmStepNumber: 3,
         confirmStepSucceeded: true,
       };
+      const stepScreenshots = [
+        {
+          position: 1,
+          moment: "loggedIn" as const,
+          stepNumber: null,
+          fileName: "cuid-1/run-folder/logged-in.png",
+          errorMessage: null,
+          pageUrl: "https://example.com/home",
+        },
+        {
+          position: 2,
+          moment: "step" as const,
+          stepNumber: 1,
+          fileName: null,
+          errorMessage: "Timeout 10000ms exceeded",
+          pageUrl: null,
+        },
+      ];
 
       const created = await createActionScriptRunForScript(
         "cuid-1",
         "action-1",
         "action-script-1",
-        runInput,
+        { ...runInput, stepScreenshots },
       );
 
       expect(mockActionScriptRunDelegate.create).toHaveBeenCalledWith({
@@ -1955,9 +1999,77 @@ describe("dbService", () => {
           websiteId: "cuid-1",
           actionId: "action-1",
           actionScriptId: "action-script-1",
+          // The step screenshots go in the same write, each under the run's website and action.
+          screenshots: {
+            create: [
+              { ...stepScreenshots[0], websiteId: "cuid-1", actionId: "action-1" },
+              { ...stepScreenshots[1], websiteId: "cuid-1", actionId: "action-1" },
+            ],
+          },
         },
       });
       expect(created).toBe(sampleActionScriptRun);
+    });
+
+    it("findActionScriptRunDetailForScript scopes the lookup to every parent and brings the run's active step screenshots in the order they were taken", async () => {
+      const runDetail = { ...sampleActionScriptRun, screenshots: [] };
+      mockActionScriptRunDelegate.findFirst.mockResolvedValue(runDetail);
+
+      const found = await findActionScriptRunDetailForScript(
+        "cuid-1",
+        "action-1",
+        "action-script-1",
+        "action-script-run-1",
+      );
+
+      expect(mockActionScriptRunDelegate.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "action-script-run-1",
+          websiteId: "cuid-1",
+          actionId: "action-1",
+          actionScriptId: "action-script-1",
+          deletedAt: null,
+        },
+        include: {
+          ...ACTION_SCRIPT_RUN_OBJECTS_INCLUDE,
+          screenshots: { where: { deletedAt: null }, orderBy: { position: "asc" } },
+        },
+      });
+      expect(found).toBe(runDetail);
+    });
+
+    it("findActionScriptRunDetailForScript returns null when no active run of that script matches", async () => {
+      mockActionScriptRunDelegate.findFirst.mockResolvedValue(null);
+
+      expect(
+        await findActionScriptRunDetailForScript("cuid-1", "action-1", "action-script-1", "other-run"),
+      ).toBeNull();
+    });
+
+    it("findActionScriptRunScreenshotForRun scopes the lookup to the website, action, run, and active rows", async () => {
+      const screenshotRow = { id: "screenshot-1", fileName: "cuid-1/run-folder/step-001.png" };
+      mockActionScriptRunScreenshotDelegate.findFirst.mockResolvedValue(screenshotRow);
+
+      const found = await findActionScriptRunScreenshotForRun("cuid-1", "action-1", "action-script-run-1", "screenshot-1");
+
+      expect(mockActionScriptRunScreenshotDelegate.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "screenshot-1",
+          websiteId: "cuid-1",
+          actionId: "action-1",
+          actionScriptRunId: "action-script-run-1",
+          deletedAt: null,
+        },
+      });
+      expect(found).toBe(screenshotRow);
+    });
+
+    it("findActionScriptRunScreenshotForRun returns null when no active screenshot of that run matches", async () => {
+      mockActionScriptRunScreenshotDelegate.findFirst.mockResolvedValue(null);
+
+      expect(
+        await findActionScriptRunScreenshotForRun("cuid-1", "action-1", "action-script-run-1", "other-screenshot"),
+      ).toBeNull();
     });
   });
 

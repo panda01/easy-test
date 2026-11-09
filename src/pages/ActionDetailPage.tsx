@@ -42,6 +42,7 @@ import {
   listParametersToFix,
 } from "../utils/actionParameters";
 import { type ActionPlan } from "../utils/actionPlanSteps";
+import { findVersionNumberOfScriptId } from "../utils/findVersionNumberOfScriptId";
 import {
   WEBSITE_LIST_PATH,
   actionParameterApiUrl,
@@ -169,21 +170,6 @@ function chooseEffortForModel(model: ScriptModelOption, currentEffort: string | 
     return PREFERRED_EFFORT;
   }
   return model.effortLevels.at(-1) ?? null;
-}
-
-/**
- * Finds the version number of a listed version by its id - the version
- * another one was edited or refined from.
- * @param scripts - Every version, newest first
- * @param scriptId - The source version's id, or null when there is no source
- * @returns Its version number, or null when there is no source or it is no longer listed
- */
-function findVersionNumberOfScriptId(scripts: ActionScriptRecord[], scriptId: string | null): number | null {
-  const thereIsNoSourceVersion = scriptId === null;
-  if (thereIsNoSourceVersion) return null;
-  const sourceIndex = scripts.findIndex((listedScript) => listedScript.id === scriptId);
-  const sourceIsNoLongerListed = sourceIndex === -1;
-  return sourceIsNoLongerListed ? null : scripts.length - sourceIndex;
 }
 
 /**

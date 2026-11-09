@@ -263,6 +263,7 @@ function buildRunResult(overrides: Partial<ActionPlanRunResult> = {}): ActionPla
     confirmStepSucceeded: null,
     pageUrlAfterConfirm: null,
     finalPageUrl: null,
+    stepScreenshots: [],
     ...overrides,
   };
 }

@@ -16,6 +16,7 @@ export { default as CheckIcon } from "@mui/icons-material/Check";
 export { default as CheckCircleOutlineIcon } from "@mui/icons-material/CheckCircleOutline";
 export { default as ChevronLeftIcon } from "@mui/icons-material/ChevronLeft";
 export { default as ChevronRightIcon } from "@mui/icons-material/ChevronRight";
+export { default as CloseIcon } from "@mui/icons-material/Close";
 export { default as DeleteOutlineIcon } from "@mui/icons-material/DeleteOutline";
 export { default as DragIndicatorIcon } from "@mui/icons-material/DragIndicator";
 export { default as EditOutlinedIcon } from "@mui/icons-material/EditOutlined";

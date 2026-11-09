@@ -462,6 +462,15 @@ describe("CrawlRunPage", () => {
         name: `Login failure screenshot of the crawl started ${startedAtText}`,
       }),
     ).toHaveAttribute("src", `${RUN_API_URL}/login-failure-screenshot`);
+
+    await userEvent.setup().click(
+      within(screenshotSection).getByRole("button", {
+        name: `View full screen: Login failure screenshot of the crawl started ${startedAtText}`,
+      }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: `Login failure screenshot of the crawl started ${startedAtText}` }),
+    ).toBeInTheDocument();
   });
 });
 

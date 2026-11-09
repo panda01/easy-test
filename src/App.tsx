@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
 import AppHeader from "./components/AppHeader";
 import ActionDetailPage from "./pages/ActionDetailPage";
 import ActionScriptComparePage from "./pages/ActionScriptComparePage";
+import ActionScriptRunPage from "./pages/ActionScriptRunPage";
 import CrawlRunPage from "./pages/CrawlRunPage";
 import CredentialCreatePage from "./pages/CredentialCreatePage";
 import CredentialEditPage from "./pages/CredentialEditPage";
@@ -79,6 +80,10 @@ export default function App(): ReactElement {
         <Route
           path="/websites/:websiteId/actions/:itemId/scripts/compare"
           element={<ActionScriptComparePage key="action-script-compare" />}
+        />
+        <Route
+          path="/websites/:websiteId/actions/:itemId/scripts/:actionScriptId/runs/:actionScriptRunId"
+          element={<ActionScriptRunPage key="action-script-run" />}
         />
         <Route
           path="/websites/:websiteId/actions/:itemId/delete-action/new"

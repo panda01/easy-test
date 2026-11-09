@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   type ActionScriptRun,
+  type ActionScriptRunScreenshotInput,
   type ActionScriptRunWithObjects,
   type ActionScriptWithPlan,
   type ActionWithCredential,
@@ -32,6 +33,7 @@ import {
   FAILURE_SCREENSHOT_FILE_NAME,
   runActionPlan,
   type PlanRunLogin,
+  type RunStepScreenshot,
 } from "./actionPlanRunnerService.js";
 import { buildCrawlLoginDetails } from "./crawlerLoginService.js";
 import {
@@ -329,6 +331,30 @@ export function buildRunFolderName(websiteId: string): string {
 }
 
 /**
+ * Turns the step screenshots a run took into the rows recorded with it:
+ * numbered 1, 2, 3 ... in the order they were taken, with each file name
+ * made relative to the action script directory by prefixing the run's
+ * folder (the same way `failureScreenshotFileName` is built). A screenshot
+ * that could not be taken keeps `fileName` null and its error.
+ * @param runFolderName - The run's folder, relative to the action script directory (see `buildRunFolderName`)
+ * @param stepScreenshots - What the runner took, in order
+ * @returns The rows to record, in order
+ */
+export function buildStepScreenshotInputs(
+  runFolderName: string,
+  stepScreenshots: RunStepScreenshot[],
+): ActionScriptRunScreenshotInput[] {
+  return stepScreenshots.map((stepScreenshot, screenshotIndex) => ({
+    position: screenshotIndex + 1,
+    moment: stepScreenshot.moment,
+    stepNumber: stepScreenshot.stepNumber,
+    fileName: stepScreenshot.fileName === null ? null : `${runFolderName}/${stepScreenshot.fileName}`,
+    errorMessage: stepScreenshot.errorMessage,
+    pageUrl: stepScreenshot.pageUrl,
+  }));
+}
+
+/**
  * Runs one version with the given parameter values and records the run -
  * the work behind the "run a version" route and each run of an auto-refine
  * job, after the lookups and the one-run-per-action claim (`claimActionRun`).
@@ -445,6 +471,7 @@ export async function performActionScriptRun(
     finalPageUrl: run.finalPageUrl,
     confirmStepNumber: preparedRun.parameterRun.confirmStepNumber,
     confirmStepSucceeded: preparedRun.parameterRun.confirmStepNumber === null ? null : run.confirmStepSucceeded,
+    stepScreenshots: buildStepScreenshotInputs(runFolderName, run.stepScreenshots),
   });
   const followUpOutcome = await followUpRecordedRun({
     websiteId: website.id,

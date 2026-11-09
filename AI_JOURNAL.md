@@ -3,6 +3,112 @@
 Newest entry at the top.
 
 ---
+## 2026-11-09 10:55 EST — Step screenshots for every run, a run details page, and full-screen screenshots
+
+**Intent:**
+- The user wanted to see the automatic navigation a run does. For now that means **a screenshot after every step**, not a video. Every run now takes one after the login (when the action has a credential), one after the start URL opens, and one after each step that ran. Skipped steps get none, and the failed step's frame is the existing `failure.png`.
+- A **new page for one run**, `/websites/:websiteId/actions/:itemId/scripts/:actionScriptId/runs/:actionScriptRunId`, shows the run's details and its step screenshots. The run panel on the action page links to it through "Run details".
+- **Every screenshot in the app opens full screen** when clicked: the action page's failure screenshot, the Screenshots tab, the crawl's login failure screenshot, and the run page's step screenshots. On the run page the viewer is a slideshow of all the run's screenshots, paged with buttons or the ← / → keys.
+- This follows the approved plan v2 (`~/.plannotator/plans/step-screenshots-a-run-details-2026-11-09-approved.md`).
+
+### Decisions
+- **Made by the user:**
+  - Step screenshots go in a new table, `action_script_run_screenshots`, not a JSON column.
+  - Every run takes them: manual runs, cleanup Delete runs, and auto-refine runs.
+  - A screenshot that cannot be taken never fails the run, but the user gets a message saying why. That message is stored on the row (`errorMessage`, no file), logged as `⚠ Screenshot after step 3 could not be taken: <reason>`, and shown at that step on the run page.
+- **Made by me:**
+  - Screenshots capture the 1280×720 viewport.
+  - Each one waits up to 2 s for the page's `load` event first. Running out is not an error.
+  - A step's screenshot is taken once its added-field steps have also run. A skipped step whose added field ran still gets one.
+  - File names are `logged-in.png`, `start-page.png` and `step-003.png`, in the run's own folder.
+  - The run list does not carry screenshots. Only the new single-run route does.
+  - The screenshot route finds the row by id, scoped to its run, and sends the file the row names. A path never comes from the URL.
+  - The send callback moved into a shared `sendStoredImageFile`.
+  - The run page reuses `ActionPlanSteps` through a new `contentBelowStep` slot.
+  - `findVersionNumberOfScriptId` moved out of `ActionDetailPage` into `src/utils/`.
+  - The failure screenshot is unchanged and records no reason.
+  - Refine still sends only the failure screenshot.
+- **Found in verification and fixed:** the Next or Previous button turns disabled when it reaches the last or first screenshot while it has focus. Focus then fell out of the dialog, and the next Escape or arrow key was lost. The dialog then could not be closed with Escape. Now focus moves to the opposite paging button, and the arrow keys are handled by a window listener while the viewer is open.
+
+### Files changed
+
+**Database**
+- `server/prisma/schema.prisma` — new model `ActionScriptRunScreenshot` (`action_script_run_screenshots`): `position` (unique per run), `moment`, `stepNumber`, `fileName?`, `errorMessage?`, `pageUrl?`, plus `websiteId` / `actionId` for the cascades. New relations `Website.actionScriptRunScreenshots`, `Action.scriptRunScreenshots` and `ActionScriptRun.screenshots`, and updated soft-delete docs. Then `npx prisma db push` (only adds a table) and `npx prisma generate`.
+
+**Server**
+- `server/services/actionPlanRunnerService.ts`:
+  - New exports `LOGGED_IN_SCREENSHOT_FILE_NAME`, `START_PAGE_SCREENSHOT_FILE_NAME`, `STEP_SCREENSHOT_SETTLE_TIMEOUT_MS` (2000), `RunStepScreenshotMoment`, `RunStepScreenshot` and `buildStepScreenshotFileName`.
+  - New private `StepScreenshotRequest`, `nameStepScreenshotFile`, `describeStepScreenshotMoment` and `captureStepScreenshot`.
+  - `RunObservations.stepScreenshots` and `ActionPlanRunResult.stepScreenshots`.
+  - `walkPlan` takes `secrets` and takes the screenshots.
+  - `runActionPlan` passes `secrets` and returns the screenshots.
+- `server/services/actionScriptExecutionService.ts` — new export `buildStepScreenshotInputs(runFolderName, stepScreenshots)`. `performActionScriptRun` records `stepScreenshots` with the run.
+- `server/services/dbService.ts`:
+  - New `ActionScriptRunScreenshotMoment` and `ActionScriptRunScreenshotInput`, and `ActionScriptRunInput.stepScreenshots`.
+  - `createActionScriptRunForScript` writes the screenshots as a nested `screenshots.create`.
+  - New `ACTION_SCRIPT_RUN_DETAIL_INCLUDE`, `ActionScriptRunDetail`, `findActionScriptRunDetailForScript` and `findActionScriptRunScreenshotForRun`.
+  - `softDeleteWebsite` and `softDeleteActionForWebsite` also stamp `actionScriptRunScreenshot`, and their docs now list the cleanup links too.
+  - Re-exports the `ActionScriptRunScreenshot` type.
+- `server/controllers/actionScripts.ts` — new routes `GET .../runs/:actionScriptRunId` and `GET .../runs/:actionScriptRunId/screenshots/:screenshotId`, with JSDoc. The failure-screenshot route now uses `sendStoredImageFile`. New messages `STEP_SCREENSHOT_NOT_FOUND_MESSAGE`, `STEP_SCREENSHOT_WAS_NOT_TAKEN_MESSAGE` and `STEP_SCREENSHOT_FILE_NOT_FOUND_MESSAGE`. Dropped the `readSendErrorStatus` import.
+- `server/utils/sendStoredImageFile.ts` (new) — `sendStoredImageFile(res, relativeFileName, rootDirectory, fileNotFoundMessage)`.
+
+**Client**
+- `src/components/ScreenshotViewerDialog.tsx` (new) — `ViewableScreenshot`, `ScreenshotViewerDialogProps`, and the full-screen viewer, with paging that keeps focus inside it and the window arrow-key listener.
+- `src/components/ScreenshotThumbnailButton.tsx` (new) — `SingleSxStyle`, `ScreenshotThumbnailButtonProps`, and the clickable thumbnail.
+- `src/components/ExpandableScreenshot.tsx` (new) — a thumbnail with its own one-screenshot viewer.
+- `src/components/icons.tsx` — `CloseIcon`.
+- `src/components/ActionPlanSteps.tsx` — optional `contentBelowStep` prop.
+- `src/components/ActionScriptRunDetails.tsx` — "Run details" link (`actionScriptRunDetailPath`). The failure screenshot is now an `ExpandableScreenshot`.
+- `src/components/ScreenshotRunDetails.tsx`, `src/pages/CrawlRunPage.tsx` — their screenshots are now `ExpandableScreenshot`s.
+- `src/pages/ActionScriptRunPage.tsx` (new) — the run page, with `listRunFacts`, `RunFrameContent` and `groupFramesByStep`.
+- `src/pages/ActionDetailPage.tsx` — `findVersionNumberOfScriptId` is now imported from `src/utils/findVersionNumberOfScriptId.ts` (new).
+- `src/hooks/useActionScriptRun.ts` (new) — `ActionScriptRunScreenshotMoment`, `ActionScriptRunScreenshotRecord`, `ActionScriptRunDetailRecord` and `useActionScriptRun`.
+- `src/utils/buildRunScreenshotFrames.ts` (new) — `RunScreenshotFrameMoment`, `RunScreenshotFrame` and `buildRunScreenshotFrames(run, plan)`.
+- `src/utils/routePaths.ts` — `actionScriptRunDetailPath`, `actionDetailPathWithRun`, `actionScriptRunApiUrl` and `actionScriptRunScreenshotApiUrl`.
+- `src/App.tsx` — the run page route (`key="action-script-run"`).
+
+**Tests**
+- New:
+  - `tests/backend/utils/sendStoredImageFile.test.ts`
+  - `tests/frontend/ScreenshotViewerDialog.test.tsx`
+  - `tests/frontend/ExpandableScreenshot.test.tsx`
+  - `tests/frontend/ActionScriptRunPage.test.tsx`
+  - `tests/frontend/buildRunScreenshotFrames.test.tsx`
+  - `tests/frontend/findVersionNumberOfScriptId.test.tsx`
+  - `tests/frontend/useActionScriptRun.test.tsx`
+  - fixture `tests/backend/fixtures/action-script-files/website-id-from-db/existing-run/step-001.png`, a copy of `failure.png`
+- Updated:
+  - `tests/backend/services/actionPlanRunnerService.test.ts` — mock `waitForLoadState`. Assertions about the failure screenshot now look at the `failure.png` path only, because step screenshots call `page.screenshot` too. New describe "step screenshots".
+  - `tests/backend/services/actionScriptExecutionService.test.ts` — `buildStepScreenshotInputs` and the recorded rows.
+  - `tests/backend/services/dbService.test.ts` — the screenshot delegate, the nested create, the two finds, and both cascades.
+  - `tests/backend/api/actionScripts.test.ts` — both new routes.
+  - `tests/backend/server.test.ts` and `tests/backend/services/actionParameterService.test.ts` — the runner fixtures carry `stepScreenshots: []`.
+  - `tests/frontend/ActionScriptRunDetails.test.tsx` and `ActionScriptRunsSection.test.tsx` — now render inside `MemoryRouter`, because "Run details" is a router link. Also the link itself and the full-screen failure screenshot.
+  - `ScreenshotRunDetails.test.tsx` and `CrawlRunPage.test.tsx` — the screenshot opens full screen.
+  - `ActionPlanSteps.component.test.tsx` — `contentBelowStep`.
+  - `App.test.tsx` — the run route.
+  - `routePaths.test.tsx` — the new builders.
+  - `support/frontendTestHelpers.tsx` — `buildActionScriptRunScreenshotRecord` and `buildActionScriptRunDetailRecord`.
+- No test was removed or skipped.
+
+**Docs**
+- `server/prisma/README.md`, `server/services/README.md`, `server/controllers/README.md`, `server/utils/README.md`, `src/components/README.md`, `src/pages/README.md`, `src/hooks/README.md`.
+
+### Verification
+- `npm run tsc`, `npm run tsc:client` and `npm run lint` are clean.
+- `npm run test:coverage`: 147 files and 3147 tests passed. Coverage is 98.96% statements, 97.22% branches, 99.18% functions and 99.45% lines.
+- Manual check by the manual-verifier, using Playwright scripts against the dev server and `claude_tmp/fixture-site`, with hand-inserted plan versions and no Claude calls. All 9 items passed:
+  - A passing 3-step run wrote `start-page.png` and `step-001..003.png`. The run route returned positions 1–4, and each screenshot route answered 200 `image/png`.
+  - A run failing at step 2 had no `step-002.png`, plus `failure.png`, and its run page showed "Step 2 · failed here" under step 2.
+  - "Run details" opens the run page, and the breadcrumb leads back with `?script=&run=`.
+  - The viewer's previous/next buttons, ← / →, Escape and close button all worked. The Screenshots tab and a crawl login-failure screenshot open full screen on their own.
+  - An older run says "Step screenshots weren't captured for this run."
+  - A forced missed screenshot showed "Screenshot could not be taken: Timeout 10000ms exceeded", and the slideshow skipped it.
+  - No console errors.
+- I re-ran the lost-key sequence 5 times with no pauses after the fix: click Previous onto the first screenshot then press →, click Next onto the last then press ←, then Escape. All 5 passed with no console errors.
+- The throwaway websites were soft deleted, and the dev and fixture servers were stopped.
+
+---
 ## 2026-11-08 01:12 EST — Delete actions mirror their Create action's parameters instead of binding to an object
 
 **Intent:**

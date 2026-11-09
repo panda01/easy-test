@@ -46,12 +46,13 @@ function buildRunDetailsProps(
 }
 
 /**
- * Renders a failed, refinable run's details by default.
+ * Renders a failed, refinable run's details by default, inside a router (the
+ * "Run details" link needs one); `rerender` keeps the router.
  * @param overrides - Props to replace in the defaults
  * @returns The Testing Library render result
  */
 function renderRunDetails(overrides: Partial<ActionScriptRunDetailsProps> = {}): RenderResult {
-  return render(<ActionScriptRunDetails {...buildRunDetailsProps(overrides)} />);
+  return render(<ActionScriptRunDetails {...buildRunDetailsProps(overrides)} />, { wrapper: MemoryRouter });
 }
 
 describe("ActionScriptRunDetails", () => {
@@ -92,6 +93,28 @@ describe("ActionScriptRunDetails", () => {
       );
       expect(screen.getByText("http://localhost:3099/account")).toBeInTheDocument();
       expect(screen.queryByText("No failure screenshot was captured for this run.")).not.toBeInTheDocument();
+    });
+
+    it("opens the failure screenshot full screen, on its own, when clicked", async () => {
+      const user = userEvent.setup();
+      renderRunDetails({
+        run: { ...failedRun, failureScreenshotFileName: "website-1/run-folder/failure.png" },
+        versionCanBeRefined: false,
+      });
+
+      await user.click(screen.getByRole("button", { name: /^View full screen: Failure screenshot of the run at / }));
+
+      expect(screen.getByRole("dialog", { name: /^Failure screenshot of the run at / })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Previous screenshot" })).not.toBeInTheDocument();
+    });
+
+    it("links to the run's own page, where its step screenshots are", () => {
+      renderRunDetails({ run: buildActionScriptRunRecord(), versionCanBeRefined: false });
+
+      expect(screen.getByRole("link", { name: "Run details" })).toHaveAttribute(
+        "href",
+        "/websites/website-1/actions/item-1/scripts/script-1/runs/script-run-1",
+      );
     });
 
     it("explains a run that failed before the first step, such as a failed login", () => {

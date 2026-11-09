@@ -406,6 +406,7 @@ describe("server.ts", () => {
       failingPageUrl: null,
       failingPageAriaSnapshot: null,
       durationMs: 1200,
+      stepScreenshots: [],
     });
     mockDbService.createActionScriptRunForScript.mockResolvedValue({ id: "run-1" });
     mockDbService.findActionScriptRunWithObjects.mockResolvedValue({ id: "run-1", createdObject: null });

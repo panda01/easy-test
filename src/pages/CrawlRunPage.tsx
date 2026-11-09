@@ -7,6 +7,7 @@ import Typography from "@mui/material/Typography";
 import CrawledPageDetails from "../components/CrawledPageDetails";
 import CrawlProgressCard from "../components/CrawlProgressCard";
 import CrawlSiteMap, { type CrawlSiteMapView } from "../components/CrawlSiteMap";
+import ExpandableScreenshot from "../components/ExpandableScreenshot";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import PageContainer from "../components/PageContainer";
@@ -403,15 +404,11 @@ export default function CrawlRunPage(): ReactElement {
           <Typography sx={{ fontSize: 13, color: nocturneTokens.neutral[400], mb: 1 }}>
             What the browser showed when the login stopped.
           </Typography>
-          <Box
-            component="img"
+          <ExpandableScreenshot
             src={crawlRunLoginFailureScreenshotApiUrl(websiteId, crawlRunId)}
             alt={`Login failure screenshot of the crawl started ${startedAtText}`}
-            sx={{
-              display: "block",
-              width: "100%",
-              maxWidth: 960,
-              height: "auto",
+            buttonSx={{ maxWidth: 960 }}
+            imageSx={{
               borderRadius: `${String(nocturneTokens.radius.medium)}px`,
               boxShadow: nocturneTokens.shadow.small,
             }}

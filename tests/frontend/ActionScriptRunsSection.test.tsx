@@ -1,5 +1,6 @@
 import { type ReactElement, useState } from "react";
 import { describe, it, expect, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { render, screen, within, type RenderResult } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import ActionScriptRunsSection, {
@@ -69,12 +70,14 @@ function buildSectionProps(
 }
 
 /**
- * Renders the panel with a loaded two-run list by default.
+ * Renders the panel with a loaded two-run list by default, inside a router
+ * (the run details' "Run details" link needs one); `rerender` keeps the
+ * router.
  * @param overrides - Props to replace in the defaults
  * @returns The Testing Library render result
  */
 function renderSection(overrides: Partial<ActionScriptRunsSectionProps> = {}): RenderResult {
-  return render(<ActionScriptRunsSection {...buildSectionProps(overrides)} />);
+  return render(<ActionScriptRunsSection {...buildSectionProps(overrides)} />, { wrapper: MemoryRouter });
 }
 
 /**
@@ -101,12 +104,13 @@ function StatefulSection(props: ActionScriptRunsSectionProps): ReactElement {
 }
 
 /**
- * Renders the panel with its values held in state, for tests that type.
+ * Renders the panel with its values held in state, for tests that type,
+ * inside a router like `renderSection`.
  * @param overrides - Props to replace in the defaults
  * @returns The Testing Library render result
  */
 function renderStatefulSection(overrides: Partial<ActionScriptRunsSectionProps> = {}): RenderResult {
-  return render(<StatefulSection {...buildSectionProps(overrides)} />);
+  return render(<StatefulSection {...buildSectionProps(overrides)} />, { wrapper: MemoryRouter });
 }
 
 /**

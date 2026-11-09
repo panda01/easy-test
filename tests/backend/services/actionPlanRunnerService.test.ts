@@ -42,6 +42,7 @@ const {
     waitForEvent: vi.fn(),
     once: vi.fn(),
     waitForURL: vi.fn(),
+    waitForLoadState: vi.fn(),
     screenshot: vi.fn(),
   },
   mockLocator: {
@@ -80,14 +81,18 @@ vi.mock("../../../server/services/crawlerLoginService.js", () => ({
 
 import {
   FAILURE_SCREENSHOT_FILE_NAME,
+  LOGGED_IN_SCREENSHOT_FILE_NAME,
   NO_PARAMETER_RUN,
   PLAN_NAVIGATION_TIMEOUT_MS,
   PLAN_OUTPUT_CHARACTER_LIMIT,
   PLAN_RUN_SLOW_MO_MS,
   PLAN_RUN_TIMEOUT_MS,
   PLAN_STEP_TIMEOUT_MS,
+  START_PAGE_SCREENSHOT_FILE_NAME,
+  STEP_SCREENSHOT_SETTLE_TIMEOUT_MS,
   TYPING_DELAY_MS,
   alertReadsAsAnError,
+  buildStepScreenshotFileName,
   describePlanStep,
   describePlanTarget,
   runActionPlan,
@@ -230,6 +235,49 @@ function expectCalledInOrder(...mocks: Mock[]): void {
 }
 
 /**
+ * Lists the files `page.screenshot` was asked to write, in call order - step
+ * screenshots and the failure screenshot alike.
+ * @returns Each call's `path`
+ */
+function readScreenshotPaths(): string[] {
+  return mockPage.screenshot.mock.calls.map((call) => (call[0] as { path: string }).path);
+}
+
+/**
+ * Counts the calls that asked for the FAILURE screenshot (not a step one).
+ * @returns How many times `failure.png` was asked for
+ */
+function countFailureScreenshotCalls(): number {
+  return readScreenshotPaths().filter((screenshotPath) => screenshotPath === FAILURE_SCREENSHOT_PATH).length;
+}
+
+/**
+ * Reads when the failure screenshot was first asked for, so a test can
+ * check it came before what follows it.
+ * @returns Its invocation order, or undefined when it was never asked for
+ */
+function readFailureScreenshotCallOrder(): number | undefined {
+  const failureCallIndex = readScreenshotPaths().indexOf(FAILURE_SCREENSHOT_PATH);
+  return failureCallIndex === -1 ? undefined : mockPage.screenshot.mock.invocationCallOrder[failureCallIndex];
+}
+
+/**
+ * Builds the step screenshot a run reports for one moment, taken, on the
+ * fake page's address.
+ * @param moment - When it was taken
+ * @param stepNumber - The plan step it follows, or null
+ * @param fileName - The PNG's name inside the run folder
+ * @returns The reported step screenshot
+ */
+function buildTakenStepScreenshot(
+  moment: "loggedIn" | "startPage" | "step",
+  stepNumber: number | null,
+  fileName: string,
+): { moment: string; stepNumber: number | null; fileName: string; errorMessage: null; pageUrl: string } {
+  return { moment, stepNumber, fileName, errorMessage: null, pageUrl: FAILING_PAGE_URL };
+}
+
+/**
  * Counts every call made to the fake page and the fake locator.
  * @returns How many Playwright calls were made
  */
@@ -307,6 +355,7 @@ beforeEach(() => {
   mockPage.waitForEvent.mockResolvedValue(mockFileChooser);
   mockFileChooser.setFiles.mockResolvedValue(undefined);
   mockPage.waitForURL.mockResolvedValue(undefined);
+  mockPage.waitForLoadState.mockResolvedValue(undefined);
   mockPage.screenshot.mockResolvedValue(Buffer.from("png"));
 });
 
@@ -356,6 +405,14 @@ describe("runActionPlan", () => {
       confirmStepSucceeded: null,
       pageUrlAfterConfirm: null,
       finalPageUrl: FAILING_PAGE_URL,
+      stepScreenshots: [
+        buildTakenStepScreenshot("loggedIn", null, "logged-in.png"),
+        buildTakenStepScreenshot("startPage", null, "start-page.png"),
+        buildTakenStepScreenshot("step", 1, "step-001.png"),
+        buildTakenStepScreenshot("step", 2, "step-002.png"),
+        buildTakenStepScreenshot("step", 3, "step-003.png"),
+        buildTakenStepScreenshot("step", 4, "step-004.png"),
+      ],
     });
     expect(mockLocator.ariaSnapshot).not.toHaveBeenCalled();
     expect(mockLogInWithCredential).toHaveBeenCalledWith(mockPage, LOGIN.details, TIMING_SETTINGS);
@@ -374,7 +431,8 @@ describe("runActionPlan", () => {
       mockPage.keyboard.press,
       mockPage.getByText,
     );
-    expect(mockPage.screenshot).not.toHaveBeenCalled();
+    // Only step screenshots: a passing run takes no failure screenshot.
+    expect(countFailureScreenshotCalls()).toBe(0);
     expect(mockBrowser.close).toHaveBeenCalledTimes(1);
   });
 
@@ -609,9 +667,10 @@ describe("runActionPlan", () => {
         failingPageUrl: null,
         failingPageAriaSnapshot: null,
       });
-      expect(mockPage.screenshot).not.toHaveBeenCalled();
-      // The address is read once, as the run's final address - not as evidence.
-      expect(mockPage.url).toHaveBeenCalledTimes(1);
+      expect(countFailureScreenshotCalls()).toBe(0);
+      // The address is read once per step screenshot, and once as the run's
+      // final address - never as failure evidence.
+      expect(mockPage.url).toHaveBeenCalledTimes(result.stepScreenshots.length + 1);
       expect(result.finalPageUrl).toBe(FAILING_PAGE_URL);
       expect(mockPage.locator).not.toHaveBeenCalled();
       expect(mockLocator.ariaSnapshot).not.toHaveBeenCalled();
@@ -770,7 +829,8 @@ describe("runActionPlan", () => {
 
       await vi.advanceTimersByTimeAsync(PLAN_RUN_TIMEOUT_MS - 1);
       expect(runHasFinished).toBe(false);
-      expect(mockPage.screenshot).not.toHaveBeenCalled();
+      // Only the start page's step screenshot so far.
+      expect(readScreenshotPaths()).toEqual([path.join(RUN_DIRECTORY, START_PAGE_SCREENSHOT_FILE_NAME)]);
 
       await vi.advanceTimersByTimeAsync(1);
       const result = await run;
@@ -783,12 +843,14 @@ describe("runActionPlan", () => {
         failureScreenshotWasCaptured: true,
       });
       expect(readOutputLines(result.output).at(-1)).toBe(`✘ Stopped at step 1: ${TIME_LIMIT_MESSAGE}`);
-      expect(mockPage.screenshot).toHaveBeenCalledTimes(1);
+      expect(countFailureScreenshotCalls()).toBe(1);
       expect(mockPage.screenshot).toHaveBeenCalledWith({
         path: FAILURE_SCREENSHOT_PATH,
         timeout: PLAN_STEP_TIMEOUT_MS,
       });
-      expectCalledInOrder(mockPage.screenshot, mockBrowser.close);
+      expect(readFailureScreenshotCallOrder()).toBeLessThan(mockBrowser.close.mock.invocationCallOrder[0]);
+      // The step that never finished gets no step screenshot.
+      expect(result.stepScreenshots.map((stepScreenshot) => stepScreenshot.moment)).toEqual(["startPage"]);
     });
 
     it("captures the screenshot, the address, and the aria snapshot, in that order, before closing the browser", async () => {
@@ -807,7 +869,14 @@ describe("runActionPlan", () => {
         failingPageAriaSnapshot: FAILING_PAGE_SNAPSHOT,
       });
       expect(mockLocator.ariaSnapshot).toHaveBeenCalledTimes(1);
-      expectCalledInOrder(mockPage.screenshot, mockPage.url, mockLocator.ariaSnapshot, mockBrowser.close);
+      // The failure screenshot, then the address read right after it, then the snapshot, then the close.
+      const failureScreenshotCallOrder = readFailureScreenshotCallOrder() ?? Number.NaN;
+      const addressReadAfterTheFailureScreenshot = mockPage.url.mock.invocationCallOrder.find(
+        (callOrder) => callOrder > failureScreenshotCallOrder,
+      );
+      expect(addressReadAfterTheFailureScreenshot).toBeDefined();
+      expect(addressReadAfterTheFailureScreenshot).toBeLessThan(mockLocator.ariaSnapshot.mock.invocationCallOrder[0]);
+      expect(mockLocator.ariaSnapshot.mock.invocationCallOrder[0]).toBeLessThan(mockBrowser.close.mock.invocationCallOrder[0]);
     });
 
     it("reports no screenshot, without trying again, when the time-limit screenshot fails", async () => {
@@ -821,7 +890,7 @@ describe("runActionPlan", () => {
       const result = await run;
 
       expect(result).toMatchObject({ timedOut: true, failureScreenshotWasCaptured: false });
-      expect(mockPage.screenshot).toHaveBeenCalledTimes(1);
+      expect(countFailureScreenshotCalls()).toBe(1);
     });
 
     it("reports no step number when the time limit hit during the login", async () => {
@@ -1518,5 +1587,148 @@ describe("scrubSecrets", () => {
 
   it("returns the message unchanged when there are no secrets", () => {
     expect(scrubSecrets("plain message", [])).toBe("plain message");
+  });
+});
+
+describe("step screenshots", () => {
+  /** A logged-out plan of three clicks. */
+  const THREE_CLICK_PLAN = buildPlan([
+    buildStep("click", { target: { role: "link", name: "Shoes" } }),
+    buildStep("click", { target: { role: "link", name: "Boots" } }),
+    buildStep("click", { target: { role: "button", name: "Add to cart" } }),
+  ]);
+
+  it("names a step's screenshot by its step number, padded so the folder lists them in step order", () => {
+    expect(buildStepScreenshotFileName(3)).toBe("step-003.png");
+    expect(buildStepScreenshotFileName(42)).toBe("step-042.png");
+    expect(buildStepScreenshotFileName(100)).toBe("step-100.png");
+  });
+
+  it("takes one after the login, one after the start URL opened, and one after each step, into the run folder", async () => {
+    const result = await runActionPlan(buildRunRequest({ plan: THREE_CLICK_PLAN }));
+
+    expect(readScreenshotPaths()).toEqual([
+      path.join(RUN_DIRECTORY, LOGGED_IN_SCREENSHOT_FILE_NAME),
+      path.join(RUN_DIRECTORY, START_PAGE_SCREENSHOT_FILE_NAME),
+      path.join(RUN_DIRECTORY, "step-001.png"),
+      path.join(RUN_DIRECTORY, "step-002.png"),
+      path.join(RUN_DIRECTORY, "step-003.png"),
+    ]);
+    expect(mockPage.screenshot).toHaveBeenCalledWith({
+      path: path.join(RUN_DIRECTORY, "step-002.png"),
+      timeout: PLAN_STEP_TIMEOUT_MS,
+    });
+    expect(result.stepScreenshots.map(({ moment, stepNumber }) => [moment, stepNumber])).toEqual([
+      ["loggedIn", null],
+      ["startPage", null],
+      ["step", 1],
+      ["step", 2],
+      ["step", 3],
+    ]);
+    // The login screenshot comes after the login and before the start URL opens.
+    const [loggedInScreenshotCallOrder, startPageScreenshotCallOrder] = mockPage.screenshot.mock.invocationCallOrder;
+    expect(mockLogInWithCredential.mock.invocationCallOrder[0]).toBeLessThan(loggedInScreenshotCallOrder);
+    expect(loggedInScreenshotCallOrder).toBeLessThan(mockPage.goto.mock.invocationCallOrder[0]);
+    expect(mockPage.goto.mock.invocationCallOrder[0]).toBeLessThan(startPageScreenshotCallOrder);
+  });
+
+  it("waits up to the settle time for the page's load event before each one", async () => {
+    await runActionPlan(buildRunRequest({ plan: THREE_CLICK_PLAN, login: null }));
+
+    expect(mockPage.waitForLoadState).toHaveBeenCalledTimes(4);
+    expect(mockPage.waitForLoadState).toHaveBeenCalledWith("load", { timeout: STEP_SCREENSHOT_SETTLE_TIMEOUT_MS });
+    expect(STEP_SCREENSHOT_SETTLE_TIMEOUT_MS).toBe(2000);
+    expectCalledInOrder(mockPage.waitForLoadState, mockPage.screenshot);
+  });
+
+  it("still takes the screenshot, with no error, when the page is still loading after the settle time", async () => {
+    mockPage.waitForLoadState.mockRejectedValue(new MockTimeoutError("page.waitForLoadState: Timeout 2000ms exceeded."));
+
+    const result = await runActionPlan(buildRunRequest({ plan: THREE_CLICK_PLAN, login: null }));
+
+    expect(result.succeeded).toBe(true);
+    expect(readScreenshotPaths()).toHaveLength(4);
+    expect(result.stepScreenshots.every((stepScreenshot) => stepScreenshot.errorMessage === null)).toBe(true);
+    expect(result.output).not.toContain("⚠");
+  });
+
+  it("takes no login screenshot for a logged-out run", async () => {
+    const result = await runActionPlan(buildRunRequest({ plan: THREE_CLICK_PLAN, login: null }));
+
+    expect(result.stepScreenshots[0]).toEqual(buildTakenStepScreenshot("startPage", null, "start-page.png"));
+    expect(readScreenshotPaths()).not.toContain(path.join(RUN_DIRECTORY, LOGGED_IN_SCREENSHOT_FILE_NAME));
+  });
+
+  it("takes none for a skipped step, but one for a skipped step whose added field ran", async () => {
+    const addedField = {
+      afterStepNumber: 3,
+      step: buildStep("fill", { target: { label: "Note" }, value: "Gift" }),
+      parameterKey: "note",
+    };
+    const result = await runActionPlan(
+      buildRunRequest({
+        plan: THREE_CLICK_PLAN,
+        login: null,
+        parameterRun: { ...NO_PARAMETER_RUN, skippedStepNumbers: [2, 3], insertedSteps: [addedField] },
+      }),
+    );
+
+    expect(result.succeeded).toBe(true);
+    expect(result.stepScreenshots.map(({ stepNumber }) => stepNumber)).toEqual([null, 1, 3]);
+    expect(readScreenshotPaths()).not.toContain(path.join(RUN_DIRECTORY, "step-002.png"));
+  });
+
+  it("takes none for the step that failed: its frame is the failure screenshot", async () => {
+    mockLocator.click.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("locator.click: Timeout 10000ms exceeded."));
+
+    const result = await runActionPlan(buildRunRequest({ plan: THREE_CLICK_PLAN, login: null }));
+
+    expect(result).toMatchObject({ succeeded: false, failedStepNumber: 2, failureScreenshotWasCaptured: true });
+    expect(readScreenshotPaths()).toEqual([
+      path.join(RUN_DIRECTORY, START_PAGE_SCREENSHOT_FILE_NAME),
+      path.join(RUN_DIRECTORY, "step-001.png"),
+      FAILURE_SCREENSHOT_PATH,
+    ]);
+    expect(result.stepScreenshots.map(({ stepNumber }) => stepNumber)).toEqual([null, 1]);
+  });
+
+  it("records a screenshot that could not be taken with why, logs it, and still passes the run", async () => {
+    const stepTwoScreenshotPath = path.join(RUN_DIRECTORY, "step-002.png");
+    mockPage.screenshot.mockImplementation((options: { path: string }) =>
+      options.path === stepTwoScreenshotPath
+        ? Promise.reject(new Error(`page.screenshot: Timeout 10000ms exceeded typing ${PASSWORD}\nCall log: ...`))
+        : Promise.resolve(Buffer.from("png")),
+    );
+
+    const result = await runActionPlan(buildRunRequest({ plan: THREE_CLICK_PLAN }));
+
+    expect(result.succeeded).toBe(true);
+    expect(result.stepScreenshots[3]).toEqual({
+      moment: "step",
+      stepNumber: 2,
+      fileName: null,
+      errorMessage: "page.screenshot: Timeout 10000ms exceeded typing ••••••",
+      pageUrl: FAILING_PAGE_URL,
+    });
+    expect(result.stepScreenshots[4]).toEqual(buildTakenStepScreenshot("step", 3, "step-003.png"));
+    expect(readOutputLines(result.output)).toContain(
+      "⚠ Screenshot after step 2 could not be taken: page.screenshot: Timeout 10000ms exceeded typing ••••••",
+    );
+    expect(result.output).not.toContain(PASSWORD);
+  });
+
+  it("names the login and the start page in the log line of a screenshot that could not be taken", async () => {
+    mockPage.screenshot.mockRejectedValue(new Error("page.screenshot: Target page, context or browser has been closed"));
+
+    const result = await runActionPlan(buildRunRequest({ plan: buildPlan([]) }));
+
+    expect(result.succeeded).toBe(true);
+    expect(result.stepScreenshots.map(({ fileName }) => fileName)).toEqual([null, null]);
+    expect(readOutputLines(result.output)).toEqual(
+      expect.arrayContaining([
+        "⚠ Screenshot after the login could not be taken: page.screenshot: Target page, context or browser has been closed",
+        "⚠ Screenshot after opening the start URL could not be taken: page.screenshot: Target page, context or browser has been closed",
+      ]),
+    );
   });
 });

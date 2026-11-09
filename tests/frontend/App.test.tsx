@@ -3,6 +3,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import App from "../../src/App";
 import {
+  buildActionScriptRunDetailRecord,
   buildCrawledPageRecord,
   buildCrawledPageSummaryRecord,
   buildCrawlRunWithPagesRecord,
@@ -57,6 +58,10 @@ function stubEveryPageRequest(): FetchStub {
       status: 200,
       body: buildWebsiteItemRecord({ id: "action-1", title: "Submit credentials" }),
     },
+    "GET /api/websites/website-1/actions/action-1/scripts/script-1/runs/script-run-1": {
+      status: 200,
+      body: buildActionScriptRunDetailRecord({ actionId: "action-1" }),
+    },
   });
 }
 
@@ -99,6 +104,8 @@ describe("App routes", () => {
     { path: "/websites/website-1/actions/new", heading: "New action" },
     { path: "/websites/website-1/actions/action-1", heading: "Submit credentials" },
     { path: "/websites/website-1/actions/action-1/edit", heading: "Edit action" },
+    // The versions are not stubbed, so the run's version number is unknown.
+    { path: "/websites/website-1/actions/action-1/scripts/script-1/runs/script-run-1", heading: "Run" },
     { path: "/websites/website-1/crawl-runs/crawl-run-1", heading: "Crawl" },
     { path: "/websites/website-1/credentials/new", heading: "New credential" },
     { path: "/websites/website-1/credentials/credential-1/edit", heading: "Edit credential" },

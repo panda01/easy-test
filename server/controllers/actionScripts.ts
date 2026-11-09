@@ -8,6 +8,8 @@ import {
   createActionScriptForAction,
   listActionScriptRunsForScript,
   findActionScriptRunForScript,
+  findActionScriptRunDetailForScript,
+  findActionScriptRunScreenshotForRun,
   type ActionScriptWithPlan,
   type ActionWithCredential,
   type Website,
@@ -35,7 +37,7 @@ import {
   resolveEffortForModel,
 } from "../services/actionScriptExecutionService.js";
 import { describeError } from "../utils/describeError.js";
-import { readSendErrorStatus } from "../utils/readSendErrorStatus.js";
+import { sendStoredImageFile } from "../utils/sendStoredImageFile.js";
 import { extractActionSearchTerms, selectRelevantCrawledPages } from "../utils/selectRelevantCrawledPages.js";
 import { statusForScriptGenerationFailure } from "../utils/statusForScriptGenerationFailure.js";
 import {
@@ -49,6 +51,9 @@ import { findWebsiteAndAction, findWebsiteActionAndScript } from "./actionLookup
 const SCRIPT_RUN_NOT_FOUND_MESSAGE = "Script run not found";
 const RUN_HAS_NO_FAILURE_SCREENSHOT_MESSAGE = "This run did not capture a failure screenshot";
 const FAILURE_SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Failure screenshot file not found";
+const STEP_SCREENSHOT_NOT_FOUND_MESSAGE = "Step screenshot not found";
+const STEP_SCREENSHOT_WAS_NOT_TAKEN_MESSAGE = "This step screenshot could not be taken during the run";
+const STEP_SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Step screenshot file not found";
 
 /**
  * Converts one action into a plan with Claude and saves it as a new version
@@ -121,8 +126,9 @@ async function findDeleteActionWithoutAVersion(
 /**
  * Registers the action script routes: converting an action into a JSON step
  * plan with Claude, listing an action's plan versions, saving an edited plan
- * as a new version, running a plan, listing a version's runs, serving a
- * failed run's screenshot, and refining a failed run into a new version with
+ * as a new version, running a plan, listing a version's runs, reading one
+ * run with its step screenshots, serving a failed run's screenshot and a
+ * run's step screenshots, and refining a failed run into a new version with
  * Claude.
  *
  * Every path is nested under `/api/websites/:websiteId/actions/:actionId`, and
@@ -134,7 +140,7 @@ async function findDeleteActionWithoutAVersion(
  * `latestRun` - its newest run (`{ id, succeeded, createdAt }`), or null when
  * it has not been run. (The routes keep the name "scripts".)
  * @param app - The express application to attach the routes to
- * @param actionScriptDirectory - Absolute path run folders are written to, failure screenshots served from, and the `uploads` folder lives in
+ * @param actionScriptDirectory - Absolute path run folders are written to, failure and step screenshots served from, and the `uploads` folder lives in
  */
 export function registerActionScriptRoutes(app: Express, actionScriptDirectory: string): void {
   /**
@@ -343,6 +349,50 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
   );
 
   /**
+   * Returns one active run for the run page: the run with the object it
+   * created (`createdObject`, or null), the created objects it deleted
+   * (`deletedObjects`), its cleanup links (`cleanupRun`, `cleanedUpRun`),
+   * and its step screenshots (`screenshots`, active rows in the order they
+   * were taken; each image is served by the screenshot route below).
+   * @route GET /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs/:actionScriptRunId
+   * @param websiteId - Path parameter: the owning website's cuid
+   * @param actionId - Path parameter: the owning action's cuid
+   * @param actionScriptId - Path parameter: the script's cuid
+   * @param actionScriptRunId - Path parameter: the run's cuid
+   * @returns 200 with the run; 404 with `{ error }` when the website, action, script, or run does not exist or was deleted (or the run belongs to another script); 500 with `{ error }` when a query fails
+   */
+  app.get(
+    "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs/:actionScriptRunId",
+    async (req, res) => {
+      try {
+        const lookup = await findWebsiteActionAndScript(
+          req.params.websiteId,
+          req.params.actionId,
+          req.params.actionScriptId,
+        );
+        if (!lookup.allWereFound) {
+          res.status(404).json({ error: lookup.notFoundMessage });
+          return;
+        }
+        const { website, action, script } = lookup.found;
+        const run = await findActionScriptRunDetailForScript(
+          website.id,
+          action.id,
+          script.id,
+          req.params.actionScriptRunId,
+        );
+        if (run === null) {
+          res.status(404).json({ error: SCRIPT_RUN_NOT_FOUND_MESSAGE });
+          return;
+        }
+        res.json(run);
+      } catch (error: unknown) {
+        res.status(500).json({ error: describeError(error) });
+      }
+    },
+  );
+
+  /**
    * Runs a version's plan in a visible browser on this machine and records
    * the run.
    *
@@ -481,33 +531,70 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
           res.status(404).json({ error: RUN_HAS_NO_FAILURE_SCREENSHOT_MESSAGE });
           return;
         }
+        sendStoredImageFile(res, failureScreenshotFileName, actionScriptDirectory, FAILURE_SCREENSHOT_FILE_NOT_FOUND_MESSAGE);
+      } catch (error: unknown) {
+        res.status(500).json({ error: describeError(error) });
+      }
+    },
+  );
 
-        /**
-         * Answers the request when the file could not be sent. This callback
-         * owns every send outcome: it runs after this async handler has
-         * returned, so the surrounding try/catch never sees send errors.
-         * @param sendError - Undefined when the file was sent; otherwise why it could not be
-         */
-        const handleFailureScreenshotSent = (sendError?: Error): void => {
-          const fileWasSent = sendError === undefined;
-          if (fileWasSent) return;
-          // The client went away mid-stream: the headers are already out, and
-          // writing a JSON error now would throw ERR_HTTP_HEADERS_SENT.
-          const responseAlreadyStarted = res.headersSent;
-          if (responseAlreadyStarted) return;
-          const fileIsMissing = readSendErrorStatus(sendError) === 404;
-          if (fileIsMissing) {
-            res.status(404).json({ error: FAILURE_SCREENSHOT_FILE_NOT_FOUND_MESSAGE });
-            return;
-          }
-          res.status(500).json({ error: describeError(sendError) });
-        };
-
-        res.sendFile(
-          failureScreenshotFileName,
-          { root: actionScriptDirectory },
-          handleFailureScreenshotSent,
+  /**
+   * Serves one step screenshot of a run as a PNG - one of the screenshots
+   * the run took after logging in, opening the start URL, or a step.
+   *
+   * The screenshot is found by its row id, scoped to the run (and its
+   * action, script, and website), and the file sent is the one that row
+   * names - a path never comes from the URL. It is sent with `root` set to
+   * the action script directory (see `sendStoredImageFile`).
+   * @route GET /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs/:actionScriptRunId/screenshots/:screenshotId
+   * @param websiteId - Path parameter: the owning website's cuid
+   * @param actionId - Path parameter: the owning action's cuid
+   * @param actionScriptId - Path parameter: the script's cuid
+   * @param actionScriptRunId - Path parameter: the run's cuid
+   * @param screenshotId - Path parameter: the step screenshot's cuid
+   * @returns 200 with the `image/png` bytes; 404 with `{ error }` when the website, action, script, run, or screenshot does not exist or was deleted, the screenshot could not be taken during the run (it has no file), or the file is gone from disk; 500 with `{ error }` when a query fails or the file cannot be read
+   */
+  app.get(
+    "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs/:actionScriptRunId/screenshots/:screenshotId",
+    async (req, res) => {
+      try {
+        const lookup = await findWebsiteActionAndScript(
+          req.params.websiteId,
+          req.params.actionId,
+          req.params.actionScriptId,
         );
+        if (!lookup.allWereFound) {
+          res.status(404).json({ error: lookup.notFoundMessage });
+          return;
+        }
+        const { website, action, script } = lookup.found;
+        const run = await findActionScriptRunForScript(
+          website.id,
+          action.id,
+          script.id,
+          req.params.actionScriptRunId,
+        );
+        if (run === null) {
+          res.status(404).json({ error: SCRIPT_RUN_NOT_FOUND_MESSAGE });
+          return;
+        }
+        const screenshot = await findActionScriptRunScreenshotForRun(
+          website.id,
+          action.id,
+          run.id,
+          req.params.screenshotId,
+        );
+        if (screenshot === null) {
+          res.status(404).json({ error: STEP_SCREENSHOT_NOT_FOUND_MESSAGE });
+          return;
+        }
+        const { fileName } = screenshot;
+        const screenshotWasNotTaken = fileName === null;
+        if (screenshotWasNotTaken) {
+          res.status(404).json({ error: STEP_SCREENSHOT_WAS_NOT_TAKEN_MESSAGE });
+          return;
+        }
+        sendStoredImageFile(res, fileName, actionScriptDirectory, STEP_SCREENSHOT_FILE_NOT_FOUND_MESSAGE);
       } catch (error: unknown) {
         res.status(500).json({ error: describeError(error) });
       }

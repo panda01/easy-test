@@ -11,6 +11,10 @@ import {
 } from "react-router-dom";
 import { expect, vi, type Mock } from "vitest";
 import { type ActionScriptRunRecord } from "../../../src/hooks/useActionScriptRuns";
+import {
+  type ActionScriptRunDetailRecord,
+  type ActionScriptRunScreenshotRecord,
+} from "../../../src/hooks/useActionScriptRun";
 import { type AutoRefineJobRecord } from "../../../src/hooks/useAutoRefineJob";
 import { type CreatedObjectRecord } from "../../../src/hooks/useCreatedObjects";
 import {
@@ -700,6 +704,45 @@ export function buildActionScriptRunRecord(
     deletedAt: null,
     ...overrides,
   };
+}
+
+/**
+ * Builds one step screenshot of a run as the run route returns it: by
+ * default the screenshot script-run-1 took after step 1, with its file.
+ * @param overrides - Fields to replace in the default screenshot
+ * @returns A complete step screenshot record
+ */
+export function buildActionScriptRunScreenshotRecord(
+  overrides: Partial<ActionScriptRunScreenshotRecord> = {},
+): ActionScriptRunScreenshotRecord {
+  return {
+    id: "screenshot-1",
+    websiteId: "website-1",
+    actionId: "item-1",
+    actionScriptRunId: "script-run-1",
+    position: 1,
+    moment: "step",
+    stepNumber: 1,
+    fileName: "website-1/run-folder/step-001.png",
+    errorMessage: null,
+    pageUrl: "https://example.com/",
+    createdAt: "2026-04-03T03:04:05.000Z",
+    updatedAt: "2026-04-03T03:04:05.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a run as the run page reads it: by default
+ * `buildActionScriptRunRecord`'s passing run with no step screenshots.
+ * @param overrides - Fields to replace in the default run
+ * @returns A complete run detail record
+ */
+export function buildActionScriptRunDetailRecord(
+  overrides: Partial<ActionScriptRunDetailRecord> = {},
+): ActionScriptRunDetailRecord {
+  return { ...buildActionScriptRunRecord(), screenshots: [], ...overrides };
 }
 
 /**

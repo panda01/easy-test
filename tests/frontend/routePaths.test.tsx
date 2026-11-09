@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   SCRIPT_MODELS_API_URL,
+  actionDetailPathWithRun,
   actionScriptComparePath,
   actionScriptEditsApiUrl,
+  actionScriptRunApiUrl,
+  actionScriptRunDetailPath,
   actionScriptRunFailureScreenshotApiUrl,
+  actionScriptRunScreenshotApiUrl,
   actionScriptRunRefinementsApiUrl,
   actionScriptRunsApiUrl,
   actionScriptsApiUrl,
@@ -354,6 +358,43 @@ describe("routePaths: parameter and created object API urls", () => {
     );
     expect(createdObjectApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/created-objects/${ENCODED_UNSAFE_ID}`,
+    );
+  });
+});
+
+describe("action run page paths", () => {
+  it("builds a run's own page path under its action and version", () => {
+    expect(actionScriptRunDetailPath("website-1", "action-1", "script-1", "run-1")).toBe(
+      "/websites/website-1/actions/action-1/scripts/script-1/runs/run-1",
+    );
+  });
+
+  it("builds the action page path that selects one version and run", () => {
+    expect(actionDetailPathWithRun("website-1", "action-1", "script-1", "run-1")).toBe(
+      "/websites/website-1/actions/action-1?script=script-1&run=run-1",
+    );
+  });
+
+  it("builds the API urls of one run and of one of its step screenshots", () => {
+    expect(actionScriptRunApiUrl("website-1", "action-1", "script-1", "run-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/runs/run-1",
+    );
+    expect(actionScriptRunScreenshotApiUrl("website-1", "action-1", "script-1", "run-1", "shot-1")).toBe(
+      "/api/websites/website-1/actions/action-1/scripts/script-1/runs/run-1/screenshots/shot-1",
+    );
+  });
+
+  it("escapes every id so a malformed one cannot change the path's shape", () => {
+    const unsafeId = "a/b?c#d";
+    const escapedId = encodeURIComponent(unsafeId);
+    expect(actionScriptRunDetailPath(unsafeId, unsafeId, unsafeId, unsafeId)).toBe(
+      `/websites/${escapedId}/actions/${escapedId}/scripts/${escapedId}/runs/${escapedId}`,
+    );
+    expect(actionDetailPathWithRun(unsafeId, unsafeId, unsafeId, unsafeId)).toBe(
+      `/websites/${escapedId}/actions/${escapedId}?script=${escapedId}&run=${escapedId}`,
+    );
+    expect(actionScriptRunScreenshotApiUrl(unsafeId, unsafeId, unsafeId, unsafeId, unsafeId)).toBe(
+      `/api/websites/${escapedId}/actions/${escapedId}/scripts/${escapedId}/runs/${escapedId}/screenshots/${escapedId}`,
     );
   });
 });

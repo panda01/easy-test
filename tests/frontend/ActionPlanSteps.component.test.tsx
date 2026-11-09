@@ -64,6 +64,21 @@ describe("ActionPlanSteps", () => {
     ]);
   });
 
+  it("puts the given content under its step, and nothing under the others", () => {
+    render(
+      <ActionPlanSteps
+        plan={LOGIN_PLAN}
+        highlightedRun={null}
+        isCompact={false}
+        contentBelowStep={new Map([[3, <span key="shot">Screenshot of step 3</span>]])}
+      />,
+    );
+
+    const stepItems = getStepItems();
+    expect(within(stepItems[2]).getByText("Screenshot of step 3")).toBeInTheDocument();
+    expect(within(stepItems[0]).queryByText("Screenshot of step 3")).not.toBeInTheDocument();
+  });
+
   it("mutes each step's verb", () => {
     render(<ActionPlanSteps plan={LOGIN_PLAN} highlightedRun={null} isCompact={false} />);
 

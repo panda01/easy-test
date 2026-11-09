@@ -9,7 +9,7 @@ Route registrars. One file per API section.
 | `useCases.ts` | `GET`/`POST /api/websites/:websiteId/use-cases`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/use-cases/:useCaseId` |
 | `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId, userActionKind, userObjectTypeKey, userNameParameterKey }`; the credential must be one of the website's; each role choice null / left out means "detect"). The list answers each action with `newestScript: { id, versionNumber, actionTitle, actionDescription, credentialId, latestRun }` (or null when it has no versions) for its status, version, and "Out of date" tag, and every action (list and single) with its cleanup links `deleteAction` / `createActions` (read from the website's `ActionCleanup` rows in one query). A single action (GET, POST, PUT) also carries `objectRole`: its kind (`parameters` / `create` / `read` / `update` / `delete`) and object type, with the detections and how sure they are (see `../utils/scoreActionObjectRole.ts`). A PUT syncs the action's parameters. `POST .../actions/:actionId/delete-action/proposal` asks Claude for the Delete action that cleans up after a Create action (`{ title, description, modelId }`, nothing saved; 409 for a non-Create or already linked action); `POST .../actions/:actionId/delete-action` (body `{ title, description }`) creates it with `userActionKind: "delete"`, the Create action's credential and resolved type, links the two, and syncs it |
 | `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
-| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId/failure-screenshot`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run, or null). A run takes an optional body `{ parameterValues, cleanUpAfterwards }` (values by parameter key - see below; the flag defaults to true) and answers with the run plus `createdObject`, `deletedObjects`, `cleanupRun` (the Delete action's run that cleaned up after a Create run) and `cleanedUpRun`; a Create run whose cleanup failed or could not start (no Delete action, or no version of it) is recorded as failed, and refining such a run is refused (409) in favour of the Delete action's run. Convert also converts a Create action's linked Delete action when it has no version yet (answered as `deleteActionScript`, with `deleteActionConversionError` when that second call failed). Convert, edit, and refine sync the action's parameters afterwards, and refine puts the failed run's values back into the plan it sends |
+| `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId` (one run for the run page, with its `screenshots`), `GET .../runs/:actionScriptRunId/failure-screenshot`, `GET .../runs/:actionScriptRunId/screenshots/:screenshotId`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run, or null). A run takes an optional body `{ parameterValues, cleanUpAfterwards }` (values by parameter key - see below; the flag defaults to true) and answers with the run plus `createdObject`, `deletedObjects`, `cleanupRun` (the Delete action's run that cleaned up after a Create run) and `cleanedUpRun`; a Create run whose cleanup failed or could not start (no Delete action, or no version of it) is recorded as failed, and refining such a run is refused (409) in favour of the Delete action's run. Convert also converts a Create action's linked Delete action when it has no version yet (answered as `deleteActionScript`, with `deleteActionConversionError` when that second call failed). Convert, edit, and refine sync the action's parameters afterwards, and refine puts the failed run's values back into the plan it sends |
 | `autoRefineJobs.ts` | `POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/auto-refine-jobs` (body `{ parameterValues }`, optional; answers `201` at once with the running job), `GET /api/websites/:websiteId/actions/:actionId/auto-refine-jobs` (newest first), `GET .../auto-refine-jobs/:autoRefineJobId` (polled while the job runs), `POST .../auto-refine-jobs/:autoRefineJobId/stop`. The shared website / action / script lookups these routes and the action script routes both use live in `actionLookups.ts` |
 | `actionParameters.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/parameters` (a version's parameters view `{ role, parameters, objectChoices, confirmStepNumber, nameParameterKey, bindableTexts, warnings }`; POST adds one of the user's own - `{ addKind: "value", ... }` or `{ addKind: "field", ... }`), `PUT`/`DELETE /api/websites/:websiteId/actions/:actionId/parameters/:parameterKey` (change a parameter's `userLabel` / `userRequiredChoice`; remove one the user added) |
 | `createdObjects.ts` | `GET /api/websites/:websiteId/created-objects` (the record of objects Create runs made), `DELETE .../created-objects/:createdObjectId` (remove one from the record) |
@@ -171,8 +171,10 @@ running lives in `../services/actionPlanRunnerService.ts`.
     URL changed), or types a credential placeholder while the action runs
     logged out.
   Each run gets its own folder, `<website.id>/<random uuid>`, under the
-  action script directory; `failureScreenshotFileName` is stored relative to
-  it, and `credentialName` names who it logged in as. A failed run also
+  action script directory; `failureScreenshotFileName` and every step
+  screenshot's `fileName` (`start-page.png`, `logged-in.png`,
+  `step-003.png`) are stored relative to it, and `credentialName` names who
+  it logged in as. A failed run also
   stores `failingPageUrl` and `failingPageAriaSnapshot` - where the browser
   was, and what a screen reader saw there (both scrubbed of the credential's
   values, the snapshot capped), or null when they could not be read; every
@@ -180,11 +182,25 @@ running lives in `../services/actionPlanRunnerService.ts`.
   failures answer `500` (the password cannot be decrypted, the folder cannot
   be written, the browser cannot start, a query fails). The request lasts as
   long as the run, at most 5 minutes plus a few seconds to stop it.
-- **`GET .../failure-screenshot`** serves the PNG with the same
-  `res.sendFile(name, { root }, cb)` pattern as the screenshot route (the
-  shared `readSendErrorStatus` lives in `../utils/`): `404 "This run did not
-  capture a failure screenshot"`, `404 "Failure screenshot file not found"`,
-  `500` otherwise.
+- **`GET .../runs/:actionScriptRunId`** answers one active run for the run
+  page (`findActionScriptRunDetailForScript`): the run, `createdObject`,
+  `deletedObjects`, `cleanupRun`, `cleanedUpRun`, and `screenshots` - its
+  active step screenshots by `position`, each `{ id, position, moment,
+  stepNumber, fileName, errorMessage, pageUrl, ... }`; `404 "Script run not
+  found"` when it is missing, deleted, or belongs to another script. The run
+  list does NOT carry `screenshots`, so it stays light.
+- **`GET .../failure-screenshot`** serves the PNG through
+  `sendStoredImageFile` (`../utils/`: `res.sendFile(name, { root }, cb)`,
+  with the shared `readSendErrorStatus`): `404 "This run did not capture a
+  failure screenshot"`, `404 "Failure screenshot file not found"`, `500`
+  otherwise.
+- **`GET .../runs/:actionScriptRunId/screenshots/:screenshotId`** serves one
+  step screenshot's PNG the same way. The row is found by id, scoped to the
+  run (`findActionScriptRunScreenshotForRun`), and the file sent is the one
+  the row names - never a path from the URL: `404 "Step screenshot not
+  found"`, `404 "This step screenshot could not be taken during the run"`
+  (the row has an `errorMessage` and no file), `404 "Step screenshot file
+  not found"`, `500` otherwise.
 - **`POST .../runs/:actionScriptRunId/refinements` refines a failed run**
   into a new version with the model that wrote the run's version. The body
   is optional: `{ note }` (`validateActionPlanRefineInput`) - text, trimmed,
