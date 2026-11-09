@@ -1574,19 +1574,14 @@ describe("ActionDetailPage", () => {
       expect(nameField).not.toHaveAccessibleDescription("From the last successful run");
     });
 
-    it("changes a parameter, adds one, removes one, and picks what names the new object", async () => {
+    // The change / add / remove / name-picking flows below were once a single test. Doing all four
+    // against the fully rendered page ran right at vitest's 5000 ms limit in CI (with coverage on),
+    // so it timed out on some runs. Each flow now has its own test.
+
+    it("changes a parameter's label, then fetches the parameters again", async () => {
       const user = userEvent.setup();
       const fetchStub = stubCreateAction({
         [`PUT ${ACTION_API_URL}/parameters/projectName`]: { status: 200, body: {} },
-        [`POST ${parametersApiUrl("script-1")}`]: {
-          status: 201,
-          body: { ...createParametersView, parameters: [...createParametersView.parameters, notesParameter] },
-        },
-        [`DELETE ${ACTION_API_URL}/parameters/notes`]: { status: 204 },
-        [`PUT ${ACTION_API_URL}`]: {
-          status: 200,
-          body: buildWebsiteItemRecord({ userNameParameterKey: "projectName", objectRole: createRole }),
-        },
       });
       renderActionDetailPage();
       await user.click(await screen.findByRole("button", { name: "Parameters · 1" }));
@@ -1606,6 +1601,18 @@ describe("ActionDetailPage", () => {
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       });
       expect(countRequests(fetchStub, "GET", parametersApiUrl("script-1"))).toBe(2);
+    });
+
+    it("adds a parameter and shows the one the server sends back", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubCreateAction({
+        [`POST ${parametersApiUrl("script-1")}`]: {
+          status: 201,
+          body: { ...createParametersView, parameters: [...createParametersView.parameters, notesParameter] },
+        },
+      });
+      renderActionDetailPage();
+      await user.click(await screen.findByRole("button", { name: "Parameters · 1" }));
 
       await user.click(screen.getByRole("button", { name: "Add parameter" }));
       const addDialog = await screen.findByRole("dialog", { name: "Add a parameter" });
@@ -1613,11 +1620,38 @@ describe("ActionDetailPage", () => {
       await user.click(within(addDialog).getByRole("button", { name: "Add" }));
       expect(await screen.findByRole("button", { name: "Remove Notes" })).toBeInTheDocument();
       expect(countRequests(fetchStub, "POST", parametersApiUrl("script-1"))).toBe(1);
+    });
 
-      await user.click(screen.getByRole("button", { name: "Remove Notes" }));
+    it("removes a parameter the user added", async () => {
+      const user = userEvent.setup();
+      /** Version 1's parameters with the user's added Notes field already in them. */
+      const parametersViewWithNotes = {
+        ...createParametersView,
+        parameters: [...createParametersView.parameters, notesParameter],
+      };
+      const fetchStub = stubCreateAction({
+        [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: parametersViewWithNotes },
+        [`DELETE ${ACTION_API_URL}/parameters/notes`]: { status: 204 },
+      });
+      renderActionDetailPage();
+      await user.click(await screen.findByRole("button", { name: /^Parameters · / }));
+
+      await user.click(await screen.findByRole("button", { name: "Remove Notes" }));
       await waitFor(() => {
         expect(countRequests(fetchStub, "DELETE", `${ACTION_API_URL}/parameters/notes`)).toBe(1);
       });
+    });
+
+    it("picks which parameter names the new object", async () => {
+      const user = userEvent.setup();
+      const fetchStub = stubCreateAction({
+        [`PUT ${ACTION_API_URL}`]: {
+          status: 200,
+          body: buildWebsiteItemRecord({ userNameParameterKey: "projectName", objectRole: createRole }),
+        },
+      });
+      renderActionDetailPage();
+      await user.click(await screen.findByRole("button", { name: "Parameters · 1" }));
 
       await user.click(screen.getByRole("combobox", { name: "Names the new object" }));
       await user.click(await screen.findByRole("option", { name: "Project name" }));

@@ -3,6 +3,43 @@
 Newest entry at the top.
 
 ---
+## 2026-11-09 12:08 EST — Split the parameters test that kept timing out in CI
+
+**Intent:**
+- The user asked why CI run 42641801911 (commit 96010ad) failed. It failed because one frontend test ran past vitest's default 5000 ms `testTimeout`: `ActionDetailPage > parameters > changes a parameter, adds one, removes one, and picks what names the new object`.
+- That commit didn't touch the page or the test. The test has been at the limit since it was added in 90c2200. It took 5580 ms (failed) in run 40107722764, 4964 ms (passed) in 42445665095, 5139 ms (failed) in 42641801911, and 5676 ms (failed) in 42659641337.
+- The test was slow because it ran four separate UI flows against the fully rendered page. It is now four tests with the same assertions.
+- This follows the approved plan (`~/.plannotator/plans/fix-the-flaky-timeout-in-actio-2026-11-09-approved.md`).
+
+### Decisions
+- **Made by the user:** split the test instead of raising a timeout. No config was changed.
+- **Made by me:** the remove test now starts with the Notes parameter already in the GET parameters reply, so it no longer depends on the add flow running first. It finds the panel button by `/^Parameters · /`, because the count is 2 there.
+
+### Files changed
+- `tests/frontend/ActionDetailPage.test.tsx`, in `describe("parameters")`:
+  - **Removed:** the test "changes a parameter, adds one, removes one, and picks what names the new object".
+  - **Added:** four tests that replace it:
+    - "changes a parameter's label, then fetches the parameters again"
+    - "adds a parameter and shows the one the server sends back"
+    - "removes a parameter the user added", with a new local `parametersViewWithNotes`
+    - "picks which parameter names the new object"
+  - **Added:** a comment above the four tests explaining why they are separate.
+  - No other test was removed or skipped.
+
+### Verification
+- Timings for `npx vitest run --coverage tests/frontend/ActionDetailPage.test.tsx`, on this machine with coverage on:
+  - Before (compared via `git stash`, then restored): the original test took 1647 ms.
+  - After, the new tests took:
+    - change: 854 ms
+    - add: 1253 ms
+    - remove: 513 ms
+    - pick name: 486 ms
+  - CI has run the original test about 3.0–3.4× slower than this machine does. At that rate, the slowest new test (add) should take roughly 3.8–4.3 s in CI.
+- `npm run test:coverage`: 147 files and 3159 tests passed. Coverage is unchanged at 98.96% statements, 97.23% branches, 99.18% functions and 99.45% lines.
+- `npm run lint` and `npm run tsc:client` are clean.
+- Not fixed, because it is outside the plan: `parameters > starts a version whose runs all failed on its own values` failed 2 times in about 7 local runs of the file. It failed with `Unable to find … role "textbox" and name "Project name"`, once before this change and once after. It waits for the "Latest run" heading and then calls `getByRole` on a field that comes from a separate fetch.
+
+---
 ## 2026-11-09 11:31 EST — "Latest run" links to its run page, and required values start from the last successful run
 
 **Intent:**
