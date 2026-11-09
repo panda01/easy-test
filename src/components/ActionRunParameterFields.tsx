@@ -22,6 +22,8 @@ export interface ActionRunParameterFieldsProps {
   objectChoices: ObjectChoiceRecord[];
   /** The values the next run will use, by key. */
   values: ParameterValues;
+  /** The values required parameters inherited from the version's newest successful run, by key; omit for none. */
+  inheritedValues?: ParameterValues;
   /** Called with a parameter's key and its new value as the user types or picks. */
   onValueChange: (parameterKey: string, value: string) => void;
   /** True while a run is in flight (the fields are locked). */
@@ -52,22 +54,31 @@ function requiredValueIsBlank(parameter: VersionParameterRecord, value: string):
   return parameter.isRequired && value.trim() === "";
 }
 
+/** The note under a field that still holds the value it inherited. */
+export const INHERITED_VALUE_NOTE = "From the last successful run";
+
 /**
  * Says what a field is for, under it: a value's problem, "Required" once a
- * run was tried with it blank, an added field's step, or an object's choices.
+ * run was tried with it blank, that it still holds the value it inherited
+ * from the last successful run, an added field's step, or an object's
+ * choices.
  * @param parameter - The parameter
  * @param value - Its current value
  * @param blankRequiredValuesAreMarked - True once the user tried to run with a required value blank
+ * @param inheritedValue - The value it inherited from the last successful run, or undefined for none
  * @returns The helper text
  */
 function describeFieldHelp(
   parameter: VersionParameterRecord,
   value: string,
   blankRequiredValuesAreMarked: boolean,
+  inheritedValue: string | undefined,
 ): string {
   const valueProblem = findParameterValueProblem(value);
   if (valueProblem !== null) return valueProblem;
   if (blankRequiredValuesAreMarked && requiredValueIsBlank(parameter, value)) return "Required";
+  const fieldStillHoldsItsInheritedValue = inheritedValue !== undefined && value === inheritedValue;
+  if (fieldStillHoldsItsInheritedValue) return INHERITED_VALUE_NOTE;
   if (parameter.addedField !== null) {
     return `A field the steps don't fill - typed after step ${String(parameter.addedField.afterStepNumber)} when you give it a value`;
   }
@@ -78,7 +89,9 @@ function describeFieldHelp(
 
 /**
  * The run form's fields: one per parameter of the shown version, prefilled
- * with the version's own values (an added field starts empty), marked
+ * with the version's own values (an added field starts empty) - a required
+ * one with the value it inherited from the version's newest successful run,
+ * noted "From the last successful run" until it is changed - marked
  * required with the usual asterisk. A secret one is a password field. The
  * object of an Object action is a combo box of the known objects - the ones
  * Create actions made first, marked "created by a run of …", then the ones
@@ -86,11 +99,12 @@ function describeFieldHelp(
  * a rule shows its problem in red at once; a required value left blank shows
  * "Required" in red only once the user tried to run
  * (`blankRequiredValuesAreMarked`), and until it is filled in.
- * @param props - The parameters, the object choices, the values, the change callback, whether the fields are locked, and whether blank required values are marked
+ * @param props - The parameters, the object choices, the values and the inherited ones, the change callback, whether the fields are locked, and whether blank required values are marked
  * @returns The fields, or nothing when the version has no parameters
  */
 export default function ActionRunParameterFields(props: ActionRunParameterFieldsProps): ReactElement | null {
-  const { parameters, objectChoices, values, onValueChange, isDisabled, blankRequiredValuesAreMarked } = props;
+  const { parameters, objectChoices, values, inheritedValues, onValueChange, isDisabled, blankRequiredValuesAreMarked } =
+    props;
   const versionHasNoParameters = parameters.length === 0;
   if (versionHasNoParameters) return null;
 
@@ -102,7 +116,12 @@ export default function ActionRunParameterFields(props: ActionRunParameterFields
       <Stack spacing={1.5}>
         {parameters.map((parameter) => {
           const value = values[parameter.key] ?? parameter.defaultValue;
-          const helpText = describeFieldHelp(parameter, value, blankRequiredValuesAreMarked);
+          const helpText = describeFieldHelp(
+            parameter,
+            value,
+            blankRequiredValuesAreMarked,
+            inheritedValues?.[parameter.key],
+          );
           const blankRequiredValueIsMarked = blankRequiredValuesAreMarked && requiredValueIsBlank(parameter, value);
           const fieldShowsAnError = findParameterValueProblem(value) !== null || blankRequiredValueIsMarked;
           if (parameter.kind === "object") {

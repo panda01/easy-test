@@ -3,6 +3,72 @@
 Newest entry at the top.
 
 ---
+## 2026-11-09 11:31 EST — "Latest run" links to its run page, and required values start from the last successful run
+
+**Intent:**
+- The run panel's heading ("Latest run", or "Run" once an older run is picked) now links to that run's own page. The "Run details" link under the banner was removed, and the phone card got the same linked heading.
+- Every **required** parameter in the run form now starts on the value the **shown version's** newest successful run used, instead of the version's own literal. Typing replaces it. The field says "From the last successful run" while it still holds that value.
+- This follows the approved plan v4 (`~/.plannotator/plans/link-latest-run-to-its-run-pag-2026-11-09-approved.md`).
+
+### Decisions
+- **Made by the user:**
+  - The values come from the shown version's own newest successful run, not the action's across all versions. A version with no passing run starts on its own values.
+  - "Run details" is removed everywhere, and the phone card gets the linked heading too.
+- **Made by me:**
+  - "Successful" means `succeeded: true`.
+  - Only required, non-secret parameters that are not added fields inherit. A key that is missing or blank on that run is not inherited.
+  - The client does it alone: `runFormValues = { ...inherited, ...typed }`. Run and Auto-refine send the inherited values because they differ from the version's own, so the server is unchanged.
+  - Run and Auto-refine wait for the run list, so a run never starts on values the form was about to replace.
+  - The page's typed-value state now holds only typed values: the value handler and the cleanup checkbox handler both spread `typedRunFormValues`. An inherited value is therefore never frozen as if it had been typed.
+  - The heading links whichever run it names. It stays plain text before the first run. The `h2` labels the section on both layouts, replacing the phone card's `aria-label`.
+
+### Files changed
+- `src/utils/actionParameters.ts` — new `InheritableRunFields` and `buildInheritedRunValues(parameters, runs)`.
+- `src/pages/ActionDetailPage.tsx`:
+  - `typedRunFormValues` (was `runFormValues` from state) and new `inheritedRunFormValues`.
+  - `runFormValues` is now the merge of the two.
+  - `handleRunFormValueChange` and `handleRunFormCleanupChange` store typed values only.
+  - `autoRefineCanStart` also needs `!runsAreLoading`.
+  - The run panel gets `inheritedValues`.
+  - Imports `buildInheritedRunValues`.
+- `src/components/ActionScriptRunsSection.tsx`:
+  - New optional `inheritedValues` prop, passed to the fields.
+  - `runIsBlocked` includes `isLoading`.
+  - One `heading` on both layouts, whose text is a `Link` (RouterLink) to `actionScriptRunDetailPath(...)` when there is a run.
+  - `aria-labelledby` on both layouts, and the phone `aria-label` removed.
+  - JSDoc updated.
+- `src/components/ActionRunParameterFields.tsx` — new optional `inheritedValues` prop and `INHERITED_VALUE_NOTE`. `describeFieldHelp` takes the inherited value and returns the note while the field still holds it.
+- `src/components/ActionScriptRunDetails.tsx` — removed the "Run details" link, its JSDoc line, and the `actionScriptRunDetailPath` import.
+- Tests:
+  - `tests/frontend/actionParameters.test.tsx` — new describe `buildInheritedRunValues`.
+  - `tests/frontend/ActionScriptRunsSection.test.tsx` — the heading links on desktop, for an older run, plain before the first run, and on the phone card. Also the inherited note and that Run waits for the run list.
+  - `tests/frontend/ActionDetailPage.test.tsx`:
+    - The phone card's heading link.
+    - Run sends the inherited value, and a typed value replaces it.
+    - A version whose runs all failed starts on its own values.
+    - Auto-refine sends the inherited values, and waits for the run list.
+  - `tests/frontend/ActionScriptRunDetails.test.tsx` — the "Run details" case now checks the link is gone.
+  - No test was removed or skipped.
+- Docs: `src/components/README.md` (the `ActionScriptRunsSection`, `ActionRunParameterFields` and `ActionScriptRunDetails` rows), `src/pages/README.md` (`ActionScriptRunPage` row).
+
+### Verification
+- `npm run tsc`, `npm run tsc:client` and `npm run lint` are clean.
+- `npm run test:coverage`: 147 files and 3156 tests passed. Coverage is 98.96% statements, 97.23% branches, 99.18% functions and 99.45% lines.
+  - The machine was heavily loaded, with load averages of 40–60 from `mediaanalysisd` and Firefox. Two earlier full runs therefore had 13 and then 2 tests time out at 5 s, all in typing-heavy specs this change doesn't touch: CredentialForm, WebsiteForm, ActionPlanEditor, and the plan-edit save case.
+  - Each of those files passed on its own, and the third full run passed completely.
+- Manual check by the manual-verifier, using Playwright scripts against the dev server and the fixture site. It used a throwaway Parameters-kind action with the required `projectName` (default "Apollo 7"). All 10 items passed:
+  - Before any run: "Apollo 7", no note, and a plain heading.
+  - After a passing "Voyager" run, the field shows "Voyager" with the note, both right away and after a reload.
+  - Run again sent `{"parameterValues":{"projectName":"Voyager"}}`.
+  - A failed "Zeta" run, with the fixture stopped, left the source on "Voyager".
+  - Typing "Orion" hid the note, and going back to "Voyager" brought it back.
+  - A new version with no runs showed "Apollo 7".
+  - The heading links to the newest run, and to a picked older run as "Run". The phone card has the linked heading. No "Run details" anywhere.
+  - Auto-refine on a Claude-written version sent `{"projectName":"Voyager"}`, and its run passed with no refinement.
+  - No console errors.
+  - The throwaway website was soft deleted. The dev servers were already running and were left running. The fixture site was stopped.
+
+---
 ## 2026-11-09 10:55 EST — Step screenshots for every run, a run details page, and full-screen screenshots
 
 **Intent:**

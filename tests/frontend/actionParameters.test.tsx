@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildInheritedRunValues,
   buildInitialParameterValues,
   buildStepParameterTags,
   describeParameterRequirement,
@@ -37,6 +38,51 @@ const notesParameter = buildVersionParameterRecord({
 describe("client parameter helpers", () => {
   it("starts the run form on the version's values", () => {
     expect(buildInitialParameterValues([nameParameter, notesParameter])).toEqual({ projectName: "Apollo 7", notes: "" });
+  });
+
+  describe("buildInheritedRunValues", () => {
+    const secretParameter = buildVersionParameterRecord({ key: "password", label: "Password", isSecret: true, defaultValue: "" });
+    const optionalParameter = buildVersionParameterRecord({ key: "colour", label: "Colour", isRequired: false });
+    const requiredAddedField = buildVersionParameterRecord({
+      key: "notes",
+      label: "Notes",
+      isRequired: true,
+      addedField: { target: { label: "Notes" }, stepAction: "fill", afterStepNumber: 1 },
+    });
+    const passedRun = {
+      succeeded: true,
+      parameterValues: [
+        { key: "projectName", label: "Project name", value: "Voyager" },
+        { key: "colour", label: "Colour", value: "Blue" },
+        { key: "notes", label: "Notes", value: "Hello" },
+      ],
+    };
+
+    it("takes each required parameter's value from the newest successful run, skipping newer failed ones", () => {
+      const newerFailedRun = { succeeded: false, parameterValues: [{ key: "projectName", label: "Project name", value: "Zeta" }] };
+      const olderPassedRun = { succeeded: true, parameterValues: [{ key: "projectName", label: "Project name", value: "Gemini" }] };
+
+      expect(buildInheritedRunValues([nameParameter], [newerFailedRun, passedRun, olderPassedRun])).toEqual({
+        projectName: "Voyager",
+      });
+    });
+
+    it("leaves optional parameters, added fields, and secrets on the version's own values", () => {
+      expect(
+        buildInheritedRunValues([nameParameter, optionalParameter, requiredAddedField, secretParameter], [passedRun]),
+      ).toEqual({ projectName: "Voyager" });
+    });
+
+    it("inherits nothing when no run passed, or the run has no value or only a blank one for it", () => {
+      expect(buildInheritedRunValues([nameParameter], [])).toEqual({});
+      expect(buildInheritedRunValues([nameParameter], [{ succeeded: false, parameterValues: passedRun.parameterValues }])).toEqual({});
+      expect(buildInheritedRunValues([nameParameter], [{ succeeded: true, parameterValues: [] }])).toEqual({});
+      expect(
+        buildInheritedRunValues([nameParameter], [{ succeeded: true, parameterValues: [{ key: "projectName", label: "Project name", value: "  " }] }]),
+      ).toEqual({});
+      // A run recorded before parameters existed stored nothing readable.
+      expect(buildInheritedRunValues([nameParameter], [{ succeeded: true, parameterValues: null }])).toEqual({});
+    });
   });
 
   it("checks a value like the server does", () => {

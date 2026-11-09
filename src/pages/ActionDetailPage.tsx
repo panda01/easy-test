@@ -37,6 +37,7 @@ import {
   type ParameterChoicesRequestBody,
   type ParameterValues,
   type VersionParametersRecord,
+  buildInheritedRunValues,
   buildStepParameterTags,
   listChangedParameterValues,
   listParametersToFix,
@@ -511,9 +512,13 @@ export default function ActionDetailPage(): ReactElement {
     cleanUpAfterwards: true,
   });
   const runFormValuesAreForShownVersion = selectedScript !== null && runFormState.scriptId === selectedScript.id;
-  const runFormValues: ParameterValues = runFormValuesAreForShownVersion ? runFormState.values : {};
+  const typedRunFormValues: ParameterValues = runFormValuesAreForShownVersion ? runFormState.values : {};
   const runFormCleanUpAfterwards = runFormValuesAreForShownVersion ? runFormState.cleanUpAfterwards : true;
   const shownParameters = parametersView?.parameters ?? [];
+  // Required values start on what the version's newest successful run used;
+  // anything typed replaces them.
+  const inheritedRunFormValues = buildInheritedRunValues(shownParameters, runs);
+  const runFormValues: ParameterValues = { ...inheritedRunFormValues, ...typedRunFormValues };
   const changedRunFormValues = listChangedParameterValues(shownParameters, runFormValues);
   const runFormParametersToFix = listParametersToFix(shownParameters, runFormValues);
   const actionKind = (parametersView?.role ?? action?.objectRole ?? null)?.kind ?? null;
@@ -527,7 +532,7 @@ export default function ActionDetailPage(): ReactElement {
     if (selectedScript === null) return;
     setRunFormState({
       scriptId: selectedScript.id,
-      values: { ...runFormValues, [parameterKey]: value },
+      values: { ...typedRunFormValues, [parameterKey]: value },
       cleanUpAfterwards: runFormCleanUpAfterwards,
     });
   };
@@ -538,7 +543,7 @@ export default function ActionDetailPage(): ReactElement {
    */
   const handleRunFormCleanupChange = (cleanUpAfterwards: boolean): void => {
     if (selectedScript === null) return;
-    setRunFormState({ scriptId: selectedScript.id, values: runFormValues, cleanUpAfterwards });
+    setRunFormState({ scriptId: selectedScript.id, values: typedRunFormValues, cleanUpAfterwards });
   };
 
   const {
@@ -875,6 +880,8 @@ export default function ActionDetailPage(): ReactElement {
     : selectedScript !== null &&
       autoRefineBlockedReason === null &&
       parametersView !== null &&
+      // The run list decides the inherited values, so the job waits for it.
+      !runsAreLoading &&
       !anotherRequestIsInFlight;
 
   /**
@@ -1010,6 +1017,7 @@ export default function ActionDetailPage(): ReactElement {
           : null
       }
       values={runFormValues}
+      inheritedValues={inheritedRunFormValues}
       onValueChange={handleRunFormValueChange}
       isAutoRefining={autoRefineJobIsRunning}
       versionCanBeRefined={versionCanBeRefined}

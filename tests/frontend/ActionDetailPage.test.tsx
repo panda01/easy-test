@@ -1338,7 +1338,11 @@ describe("ActionDetailPage", () => {
       renderActionDetailPage();
 
       const runCard = await screen.findByRole("region", { name: "Latest run" });
-      expect(screen.queryByRole("heading", { name: "Latest run" })).not.toBeInTheDocument();
+      // The card is headed by a link to the shown run's own page, as on desktop.
+      expect(within(within(runCard).getByRole("heading", { name: "Latest run" })).getByRole("link")).toHaveAttribute(
+        "href",
+        "/websites/website-1/actions/item-1/scripts/script-1/runs/script-run-9",
+      );
       const outcome = await within(runCard).findByRole("status");
       expect(outcome).toHaveTextContent("Failed at step 2");
       expect(outcome).toHaveTextContent(/· 4\.3 s$/);
@@ -1512,6 +1516,62 @@ describe("ActionDetailPage", () => {
       await waitFor(() => {
         expect(countRequests(fetchStub, "GET", parametersApiUrl("script-1"))).toBe(2);
       });
+    });
+
+    it("starts the required values on the newest successful run's, runs with them, and lets a typed value replace one", async () => {
+      const user = userEvent.setup();
+      const passedRun = buildActionScriptRunRecord({
+        id: "run-passed",
+        parameterValues: [{ key: "projectName", label: "Project name", value: "Voyager" }],
+      });
+      const fetchStub = stubCreateAction({
+        [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [passedRun] },
+        [`POST ${runsApiUrl("script-1")}`]: { status: 201, body: buildActionScriptRunRecord({ id: "run-new" }) },
+      });
+      renderActionDetailPage();
+
+      const nameField = await screen.findByRole("textbox", { name: "Project name" });
+      await waitFor(() => {
+        expect(nameField).toHaveValue("Voyager");
+      });
+      expect(nameField).toHaveAccessibleDescription("From the last successful run");
+      await user.click(screen.getByRole("button", { name: "Run again" }));
+      await waitFor(() => {
+        expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ parameterValues: { projectName: "Voyager" }, cleanUpAfterwards: true }),
+        });
+      });
+
+      await user.clear(nameField);
+      await user.type(nameField, "Orion");
+      expect(nameField).not.toHaveAccessibleDescription("From the last successful run");
+      await user.click(screen.getByRole("button", { name: "Run again" }));
+      await waitFor(() => {
+        expect(fetchStub).toHaveBeenCalledWith(runsApiUrl("script-1"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ parameterValues: { projectName: "Orion" }, cleanUpAfterwards: true }),
+        });
+      });
+    });
+
+    it("starts a version whose runs all failed on its own values", async () => {
+      const failedRun = buildActionScriptRunRecord({
+        id: "run-failed",
+        succeeded: false,
+        failedStepNumber: 1,
+        errorMessage: "Timeout",
+        parameterValues: [{ key: "projectName", label: "Project name", value: "Zeta" }],
+      });
+      stubCreateAction({ [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [failedRun] } });
+      renderActionDetailPage();
+
+      expect(await screen.findByRole("heading", { name: "Latest run" })).toBeInTheDocument();
+      const nameField = screen.getByRole("textbox", { name: "Project name" });
+      expect(nameField).toHaveValue("Apollo 7");
+      expect(nameField).not.toHaveAccessibleDescription("From the last successful run");
     });
 
     it("changes a parameter, adds one, removes one, and picks what names the new object", async () => {
@@ -1858,6 +1918,45 @@ describe("ActionDetailPage", () => {
 
       expect(screen.getByRole("button", { name: "Auto-refine Version 2" })).toBeDisabled();
       expect(screen.getByText("Saved from the step editor, so Claude cannot refine it")).toBeInTheDocument();
+    });
+
+    it("sends the values inherited from the newest successful run when the job starts", async () => {
+      const passedRun = buildActionScriptRunRecord({
+        id: "run-passed",
+        parameterValues: [{ key: "projectName", label: "Project name", value: "Voyager" }],
+      });
+      const fetchStub = stubLoadedAction([olderScript], {
+        [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [passedRun] },
+        [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: parametersOfOlderScript },
+        [`POST ${autoRefineStartUrl("script-1")}`]: { status: 409, body: { error: "stop here" } },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      expect(screen.getByRole("textbox", { name: "Project name" })).toHaveValue("Voyager");
+      fireEvent.click(screen.getByRole("button", { name: "Auto-refine Version 1" }));
+      await advanceClock(0);
+
+      expect(fetchStub).toHaveBeenCalledWith(autoRefineStartUrl("script-1"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parameterValues: { projectName: "Voyager" } }),
+      });
+    });
+
+    it("keeps Auto-refine off while the version's runs are still loading", async () => {
+      const runsResponse = createDeferred<Response>();
+      stubLoadedAction([olderScript], {
+        [`GET ${runsApiUrl("script-1")}`]: () => runsResponse.promise,
+        [`GET ${parametersApiUrl("script-1")}`]: { status: 200, body: parametersOfOlderScript },
+      });
+      renderActionDetailPage();
+      await advanceClock(0);
+
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeDisabled();
+      runsResponse.resolve(buildJsonResponse(200, []));
+      await advanceClock(0);
+      expect(screen.getByRole("button", { name: "Auto-refine Version 1" })).toBeEnabled();
     });
 
     it("keeps Auto-refine off while a required value is blank, and shows the server's reason when the start fails", async () => {

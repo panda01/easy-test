@@ -352,6 +352,42 @@ export function readUsedParameterValues(storedValues: unknown): UsedParameterVal
   );
 }
 
+/** The parts of a recorded run the run form inherits values from. */
+export interface InheritableRunFields {
+  /** True when the run passed (for a Create run, its cleanup too). */
+  succeeded: boolean;
+  /** The values it used, as stored on the run (read with `readUsedParameterValues`). */
+  parameterValues: unknown;
+}
+
+/**
+ * Works out the values the run form starts with, on top of the version's
+ * own: every REQUIRED parameter takes the value the version's newest
+ * successful run used for it. Optional parameters, added fields, and secrets
+ * (never stored on a run) keep the version's own value, and so does a
+ * parameter that run has no value for, or only a blank one.
+ * @param parameters - The version's parameters
+ * @param runs - The version's runs, newest first
+ * @returns The inherited values, by key; empty when the version has no successful run
+ */
+export function buildInheritedRunValues(
+  parameters: VersionParameterRecord[],
+  runs: readonly InheritableRunFields[],
+): ParameterValues {
+  const newestSuccessfulRun = runs.find((run) => run.succeeded);
+  if (newestSuccessfulRun === undefined) return {};
+  const usedValuesByKey = new Map(
+    readUsedParameterValues(newestSuccessfulRun.parameterValues).map((usedValue) => [usedValue.key, usedValue.value]),
+  );
+  const inheritedEntries = parameters.flatMap((parameter) => {
+    const parameterCanInherit = parameter.isRequired && !parameter.isSecret && parameter.addedField === null;
+    const usedValue = usedValuesByKey.get(parameter.key);
+    const runHasAValueForIt = usedValue !== undefined && usedValue.trim() !== "";
+    return parameterCanInherit && runHasAValueForIt ? [[parameter.key, usedValue] as const] : [];
+  });
+  return Object.fromEntries(inheritedEntries);
+}
+
 /** The user's changes to a parameter, as the "change a parameter" request sends them. */
 export interface ParameterChoicesRequestBody {
   /** The user's name, or null for the worked-out one. */

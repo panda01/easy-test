@@ -108,13 +108,11 @@ describe("ActionScriptRunDetails", () => {
       expect(screen.queryByRole("button", { name: "Previous screenshot" })).not.toBeInTheDocument();
     });
 
-    it("links to the run's own page, where its step screenshots are", () => {
+    it("leaves the link to the run's own page to the run panel's heading", () => {
       renderRunDetails({ run: buildActionScriptRunRecord(), versionCanBeRefined: false });
 
-      expect(screen.getByRole("link", { name: "Run details" })).toHaveAttribute(
-        "href",
-        "/websites/website-1/actions/item-1/scripts/script-1/runs/script-run-1",
-      );
+      expect(screen.queryByRole("link", { name: "Run details" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link")).not.toBeInTheDocument();
     });
 
     it("explains a run that failed before the first step, such as a failed login", () => {

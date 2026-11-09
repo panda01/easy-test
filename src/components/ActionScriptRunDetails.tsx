@@ -17,11 +17,7 @@ import { readUsedParameterValues } from "../utils/actionParameters";
 import { describeActionScriptRunOutcome, runFailedOnlyInItsCleanup } from "../utils/describeActionScriptRun";
 import { formatRunDuration } from "../utils/describeScreenshotRun";
 import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeTime";
-import {
-  actionScriptRunDetailPath,
-  actionScriptRunFailureScreenshotApiUrl,
-  websiteItemDetailPath,
-} from "../utils/routePaths";
+import { actionScriptRunFailureScreenshotApiUrl, websiteItemDetailPath } from "../utils/routePaths";
 import { ACTION_KIND } from "../utils/websiteItemKinds";
 
 /** The longest note the server accepts with a refine request (its `MAX_REFINE_NOTE_LENGTH`). */
@@ -120,7 +116,6 @@ function noteToSend(noteText: string): string | null {
  * One plan run in full, as the mockup's run panel draws it:
  * - a status banner: how it went ("Failed at step 9"), then its error, how
  *   long it took, and (on desktop) when it ran;
- * - a "Run details" link to the run's own page (its step screenshots);
  * - the failure screenshot, when it saved one (click it to open it full
  *   screen), and the page it failed on;
  * - what the run did to the record of created objects ("Created Apollo 7",
@@ -252,13 +247,6 @@ export default function ActionScriptRunDetails(props: ActionScriptRunDetailsProp
           <span title={ranAtText}>{bannerDetails.join(" · ")}</span>
         </Box>
       </Alert>
-      <Link
-        component={RouterLink}
-        to={actionScriptRunDetailPath(websiteId, run.actionId, run.actionScriptId, run.id)}
-        sx={{ fontSize: 13, alignSelf: "flex-start" }}
-      >
-        Run details
-      </Link>
 
       {objectChangeLines.length > 0 && (
         <Box aria-label="Created objects" sx={{ fontSize: 13, color: nocturneTokens.neutral[300] }}>

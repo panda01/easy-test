@@ -1,10 +1,12 @@
 import { type ReactElement, useState } from "react";
+import { Link as RouterLink } from "react-router-dom";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Checkbox from "@mui/material/Checkbox";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import LinearProgress from "@mui/material/LinearProgress";
+import Link from "@mui/material/Link";
 import Typography from "@mui/material/Typography";
 import ActionRunParameterFields from "./ActionRunParameterFields";
 import ActionScriptRunDetails from "./ActionScriptRunDetails";
@@ -19,6 +21,7 @@ import {
   listChangedParameterValues,
   listParametersToFix,
 } from "../utils/actionParameters";
+import { actionScriptRunDetailPath } from "../utils/routePaths";
 
 const HEADING_ID = "action-script-runs-section-heading";
 const HISTORY_HEADING_ID = "action-script-run-history-heading";
@@ -57,8 +60,10 @@ export interface ActionScriptRunsSectionProps {
   onRunClick: (parameterValues: ParameterValues, cleanUpAfterwards: boolean) => void;
   /** The "Clean up afterwards" control of a Create action (see `CleanupControlProps`), or null for every other kind. */
   cleanupControl: CleanupControlProps | null;
-  /** The values typed or picked for the next run, by parameter key (the page owns them, so Auto-refine can send them too). */
+  /** The values for the next run, by parameter key - the inherited ones with the typed ones on top (the page owns them, so Auto-refine can send them too). */
   values: ParameterValues;
+  /** The values the required parameters inherited from the version's newest successful run, by key (see `buildInheritedRunValues`); omit for none. */
+  inheritedValues?: ParameterValues;
   /** Called with a parameter's key and its new value as the user types or picks. */
   onValueChange: (parameterKey: string, value: string) => void;
   /** True while an auto-refine job of this action is running: Run, Refine, and the values are locked meanwhile. */
@@ -89,20 +94,25 @@ export interface ActionScriptRunsSectionProps {
  *   credential, and works through the steps; a run is stopped after 5
  *   minutes), the shown run in full (see `ActionScriptRunDetails`), and
  *   "Runs of version N" to pick another run from;
- * - phone (the card above the steps): the shown run with "Run again" and
- *   "Refine" side by side.
+ * - phone (the card above the steps): the same heading on its own line, then
+ *   the shown run with "Run again" and "Refine" side by side.
  *
  * The heading says "Latest run" while the newest run is shown, and "Run"
- * once the user picks an older one. The details are keyed by the run's id,
- * so the note and whether a refine was tried start over for each run.
+ * once the user picks an older one; while there is a run, its text links to
+ * that run's own page (its details and step screenshots). The details are
+ * keyed by the run's id, so the note and whether a refine was tried start
+ * over for each run.
  *
  * Above the run's details sit the run's values (see
- * `ActionRunParameterFields`): prefilled with the version's own, and sent -
- * only the ones the user changed - with "Run". The values themselves are the
+ * `ActionRunParameterFields`): prefilled with the version's own - except
+ * required ones, which start on what the version's newest successful run
+ * used (`inheritedValues`) - and sent, only the ones that differ from the
+ * version's own, with "Run". The values themselves are the
  * page's (`values` / `onValueChange`), because the versions column's
  * Auto-refine sends the same values; this panel only works out which
- * parameters still need fixing. Run is disabled until the parameters have
- * loaded and while an auto-refine job runs (`isAutoRefining`, which locks
+ * parameters still need fixing. Run is disabled until the parameters and the
+ * run list have loaded (the run list decides the inherited values) and while
+ * an auto-refine job runs (`isAutoRefining`, which locks
  * Refine and the values too). It stays enabled while a required value is
  * blank or a value breaks a rule: clicking it then starts no run, but marks
  * the blank required fields "Required" (see `ActionRunParameterFields`) so
@@ -125,6 +135,7 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     onRunClick,
     cleanupControl,
     values,
+    inheritedValues,
     onValueChange,
     isAutoRefining,
     versionCanBeRefined,
@@ -139,7 +150,7 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
   const parameters = parametersView?.parameters ?? [];
   const parametersToFix = listParametersToFix(parameters, values);
   const parametersAreLoading = parametersView === null && parametersErrorMessage === null;
-  const runIsBlocked = isRunning || isAutoRefining || parametersAreLoading;
+  const runIsBlocked = isRunning || isAutoRefining || parametersAreLoading || isLoading;
   const valuesAreLocked = isRunning || isAutoRefining;
   // Set once Run is clicked with a required value blank, so those fields show "Required".
   const [blankRequiredValuesAreMarked, setBlankRequiredValuesAreMarked] = useState(false);
@@ -196,11 +207,27 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
     </>
   );
 
+  const headingText = newestRunIsShown || selectedRun === null ? "Latest run" : "Run";
+  const heading = (
+    <Typography id={HEADING_ID} variant="h5" component="h2" sx={{ m: 0, mr: "auto" }}>
+      {selectedRun === null ? (
+        headingText
+      ) : (
+        <Link
+          component={RouterLink}
+          to={actionScriptRunDetailPath(websiteId, selectedRun.actionId, selectedRun.actionScriptId, selectedRun.id)}
+          underline="hover"
+        >
+          {headingText}
+        </Link>
+      )}
+    </Typography>
+  );
+
   return (
     <Box
       component="section"
-      aria-labelledby={isPhoneLayout ? undefined : HEADING_ID}
-      aria-label={isPhoneLayout ? "Latest run" : undefined}
+      aria-labelledby={HEADING_ID}
       sx={{
         backgroundColor: nocturneTokens.surface,
         borderRadius: `${String(nocturneTokens.radius.large)}px`,
@@ -211,11 +238,11 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
         minWidth: 0,
       }}
     >
-      {!isPhoneLayout && (
+      {isPhoneLayout ? (
+        heading
+      ) : (
         <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <Typography id={HEADING_ID} variant="h5" component="h2" sx={{ m: 0, mr: "auto" }}>
-            {newestRunIsShown || selectedRun === null ? "Latest run" : "Run"}
-          </Typography>
+          {heading}
           {runButton}
         </Box>
       )}
@@ -225,6 +252,7 @@ export default function ActionScriptRunsSection(props: ActionScriptRunsSectionPr
           parameters={parameters}
           objectChoices={parametersView.objectChoices}
           values={values}
+          inheritedValues={inheritedValues}
           onValueChange={onValueChange}
           isDisabled={valuesAreLocked}
           blankRequiredValuesAreMarked={blankRequiredValuesAreMarked}

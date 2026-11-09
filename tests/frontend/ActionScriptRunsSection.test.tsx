@@ -128,7 +128,12 @@ describe("ActionScriptRunsSection", () => {
       renderSection();
 
       expect(screen.getByRole("region", { name: "Latest run" })).toBeInTheDocument();
-      expect(screen.getByRole("heading", { name: "Latest run" })).toBeInTheDocument();
+      const heading = screen.getByRole("heading", { name: "Latest run" });
+      // The heading's text opens the shown run's own page.
+      expect(within(heading).getByRole("link", { name: "Latest run" })).toHaveAttribute(
+        "href",
+        "/websites/website-1/actions/item-1/scripts/script-1/runs/run-2",
+      );
       expect(readBannerOutcome()).toBe("Failed at step 2");
       expect(screen.getByRole("heading", { name: "Runs of version 2" })).toBeInTheDocument();
       const runButtons = within(screen.getByRole("list", { name: "Runs of version 2" })).getAllByRole("button");
@@ -144,7 +149,10 @@ describe("ActionScriptRunsSection", () => {
       const onSelectRun = vi.fn();
       renderSection({ selectedRun: olderRun, onSelectRun });
 
-      expect(screen.getByRole("heading", { name: "Run" })).toBeInTheDocument();
+      expect(within(screen.getByRole("heading", { name: "Run" })).getByRole("link", { name: "Run" })).toHaveAttribute(
+        "href",
+        "/websites/website-1/actions/item-1/scripts/script-1/runs/run-1",
+      );
       expect(readBannerOutcome()).toBe("Passed");
       const runButtons = within(screen.getByRole("list", { name: "Runs of version 2" })).getAllByRole("button");
       expect(runButtons[1]).toHaveAttribute("aria-current", "true");
@@ -168,7 +176,8 @@ describe("ActionScriptRunsSection", () => {
     it("says Run before the first run, and shows progress and a disabled Running… while running", () => {
       const { rerender } = renderSection({ runs: [], selectedRun: null });
       expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
-      expect(screen.getByRole("heading", { name: "Latest run" })).toBeInTheDocument();
+      // Nothing to link to before the first run.
+      expect(within(screen.getByRole("heading", { name: "Latest run" })).queryByRole("link")).not.toBeInTheDocument();
 
       rerender(<ActionScriptRunsSection {...buildSectionProps({ runs: [], selectedRun: null, isRunning: true })} />);
       expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
@@ -203,7 +212,7 @@ describe("ActionScriptRunsSection", () => {
   });
 
   describe("on a phone", () => {
-    it("is the Latest run card, with Run again beside Refine and no run list", () => {
+    it("is the Latest run card, headed by a link to the run, with Run again beside Refine and no run list", () => {
       renderSection({
         isPhoneLayout: true,
         runs: [newerFailedRun],
@@ -212,7 +221,11 @@ describe("ActionScriptRunsSection", () => {
       });
 
       expect(screen.getByRole("region", { name: "Latest run" })).toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Latest run" })).not.toBeInTheDocument();
+      expect(within(screen.getByRole("heading", { name: "Latest run" })).getByRole("link")).toHaveAttribute(
+        "href",
+        "/websites/website-1/actions/item-1/scripts/script-1/runs/run-4",
+      );
+      expect(screen.queryByRole("link", { name: "Run details" })).not.toBeInTheDocument();
       const runAgain = screen.getByRole("button", { name: "Run again" });
       expect(runAgain).toHaveClass("MuiButton-colorSecondary");
       expect(within(runAgain).queryByTestId("PlayArrowIcon")).not.toBeInTheDocument();
@@ -349,6 +362,34 @@ describe("ActionScriptRunsSection", () => {
       await user.click(screen.getByRole("button", { name: "Run again" }));
 
       expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" }, true);
+    });
+
+    it("notes a value inherited from the last successful run until it is changed, and runs with it", async () => {
+      const user = userEvent.setup();
+      const onRunClick = vi.fn();
+      renderStatefulSection({
+        parametersView: createParametersView,
+        values: { projectName: "Voyager" },
+        inheritedValues: { projectName: "Voyager" },
+        onRunClick,
+      });
+
+      const nameField = screen.getByRole("textbox", { name: "Project name" });
+      expect(nameField).toHaveValue("Voyager");
+      expect(nameField).toHaveAccessibleDescription("From the last successful run");
+      await user.click(screen.getByRole("button", { name: "Run again" }));
+      expect(onRunClick).toHaveBeenCalledWith({ projectName: "Voyager" }, true);
+
+      await user.type(nameField, " 2");
+      expect(nameField).not.toHaveAccessibleDescription("From the last successful run");
+      await user.type(nameField, "{Backspace}{Backspace}");
+      expect(nameField).toHaveAccessibleDescription("From the last successful run");
+    });
+
+    it("holds Run while the run list loads, since it decides the inherited values", () => {
+      renderSection({ parametersView: createParametersView, isLoading: true, runs: [], selectedRun: null });
+
+      expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
     });
 
     it("reports each typed value to the page by its parameter key", async () => {
