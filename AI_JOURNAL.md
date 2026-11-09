@@ -3,6 +3,37 @@
 Newest entry at the top.
 
 ---
+## 2026-11-08 01:12 EST — Delete actions mirror their Create action's parameters instead of binding to an object
+
+**Intent:**
+- The user asked why Delete actions showed no parameters. A Delete action only got the `object` parameter, which binds to a *known instance* of its object type; a Delete plan types nothing, its type is often undetected, and the moment the cleanup deletes "Apollo 7" the name stops being an instance, so the parameter vanished and the cleanup run had to guess whether to pass `{ object: name }`. The user's direction: "delete shouldn't bind to an object, it should always be parameter bound just like a create action".
+- Now a Delete action carries the **same parameters as its linked Create action** (new source `create`, "From its create action"): same key, label and default literal, bound wherever that literal appears in the Delete plan. The cleanup run passes the Create run's used values **by key**, and a manual Delete run shows the same text fields a Create run shows.
+- This follows the approved plan v9 (`~/.plannotator/plans/delete-actions-mirror-their-cr-2026-11-08-approved.md`).
+
+### Decisions
+- **Made by the user:** only Delete changes; Read and Update keep the `object` parameter bound to a known instance.
+- **Made by me:** a new parameter source `create` beside `steps` / `page` / `you`, written by the sync from the Create action's text, non-secret, typed parameters (`matchText` = the Create's default literal, `matchFields` = value / targetName / targetText / url), required by default, renamable and optional-able but not removable; the Delete action's rows follow the Create action one way (every Create sync also syncs its linked Delete actions); several Create actions linked to one Delete action contribute the union, first Create first; `kindActsOnAnExistingObject` is Read and Update only, `kindNeedsAnObjectType` is Create and Update only (a Delete action's type stays optional); cleanup values are the Create run's used values filtered to the Delete version's keys (`pickCleanupValues`) in both the execution service and the auto-refine Delete loop; a manual Delete run marks the newest choosable created object whose name matches any used value, across every type when the action has none; two new Delete warnings ("Nothing in this version's steps uses "Apollo 7" (Project name, from its create action)" and the not-linked one).
+
+### Files changed
+- `server/utils/scoreActionObjectRole.ts` — `kindNeedsAnObjectType` → create | update; `kindActsOnAnExistingObject` → read | update (JSDoc explains Delete mirrors its Create action).
+- `server/utils/actionParameters.ts` — `PARAMETER_SOURCES` / `PARAMETER_FOUND_BY` gain `"create"`; `resolveVersionParameters` rule 1 binds rows with a `matchText` whose source is `you` **or** `create` (`rowBindsALiteral`).
+- `server/utils/detectActionParameters.ts` — new `MirroredParameter` type and `MIRRORED_PARAMETER_FIELDS`; `ParameterDetectionInput.mirroredParameters`; `DetectedParameter` gains `source: "create"`, `matchText`, `matchFields`; `detectActionParameters` emits one `create` row per mirrored parameter (skipping reserved keys and keys a steps row took) after the object rows; the object row is Read / Update only.
+- `server/services/dbService.ts` — `buildDetectedParameterColumns` writes `matchText` / `matchFields`; `listChoosableCreatedObjects(websiteId, objectTypeKey | null)` (null = every type); new `listActionCleanupsForDeleteAction(websiteId, deleteActionId)`.
+- `server/services/actionParameterService.ts` — new exported `readMirroredParameters(websiteId, deleteAction, webObjects)`; `syncActionParameters` passes `mirroredParameters` for a Delete action and, for a Create action, calls the new `syncLinkedDeleteActionQuietly`; `loadVersionParameters` adds the two Delete warnings and keeps the object choices / warning for Read and Update; `markDeletedObject` matches a manual run's used values against the choosable created objects (by id for cleanup runs). Removed the `OBJECT_PARAMETER_KEY` import.
+- `server/services/actionScriptExecutionService.ts` — new exported `CleanupRunInputs` type and `pickCleanupValues(usedValues, deleteParameters)`; `attemptCleanup` / `cleanUpAfterCreateRun` take the Create run's used values and run the Delete version with them filtered by key (no `object` key).
+- `server/services/autoRefineService.ts` — `LeftoverCreatedObject` gains `usedValues` (read from the Create run's stored `parameterValues` by `readLeftoverCreatedObject`); the Delete-only run loads the Delete version's view and passes `pickCleanupValues(...)`.
+- `server/prisma/schema.prisma` — `ActionParameter` doc comment for the `create` source and its `matchText` / `matchFields` (no column changes, no `db push` needed).
+- `src/utils/actionParameters.ts` — `source` / `foundBy` accept `"create"`; `describeParameterSource` → "From its create action".
+- `src/utils/actionObjectRole.ts` — `ACTION_KIND_HELP.delete` describes the shared parameters.
+- Tests: `tests/backend/utils/scoreActionObjectRole.test.ts`, `actionParameters.test.ts`, `detectActionParameters.test.ts` (mirrored rows, Delete gets no object row), `tests/backend/services/dbService.test.ts`, `actionParameterService.test.ts` (new describe "mirrored parameters of a Delete action": `readMirroredParameters`, Delete sync writes `create` rows, Create sync cascades, quiet logging, both warnings, marking by used value), `actionScriptExecutionService.test.ts` (cleanup passes `{ projectName: "Apollo 7" }`, `pickCleanupValues`), `autoRefineService.test.ts` (Delete-only run gets the values by key), `tests/frontend/ActionScriptParameters.test.tsx` ("From its create action", no Remove), `actionParameters.test.tsx`, `TitleDescriptionForm.test.tsx`.
+- Docs: `server/utils/README.md`, `server/services/README.md`, `server/prisma/README.md`, `server/controllers/README.md`, `src/components/README.md`.
+
+### Verification
+- `npm run tsc`, `npm run tsc:client`, `npm run lint` clean; `npm run test:coverage`: 140 files / 3067 tests passed, 98.92% statements / 97.23% branches / 99.22% functions / 99.45% lines.
+- Manual (Playwright against the dev server and the `claude_tmp/fixture-site` site, real Claude calls): the Delete action's Parameters section shows "Name · From its create action · Required (a step types it) · used in steps 3, 4, 10 · Apollo 7" with Change and no Remove, no object parameter and no object warning; its run panel is a text field. A Create run with "Voyager2" passed and its cleanup run's values were `name = Voyager2`; the fixture and the Objects record show it deleted by the Delete run (Claude's first Delete plan used a native-dialog step for the in-page dialog, one Auto-refine fixed it, as in the previous cycle). A Create run with cleanup off left "Gemini"; a manual Delete run typed "Gemini" and marked it deleted. Editing the Create plan's literal to "Apollo 8" made the Delete page show "Parameters · 0" with the new warning, and reverting restored it. A Read action still gets the "Project" object Autocomplete when its literal is a known instance. `DELETE .../parameters/name` → 409; `PUT` with a label and `optional` → 200 and shown. Dev log clean. Verify website soft-deleted, servers stopped.
+- Not changed: the manual Delete run's request still sends `cleanUpAfterwards: true` (the client default); the server only cleans up after a Create action, so it has no effect.
+
+---
 
 ## 2026-11-07 18:02 EST — CRUD action kinds, a linked Delete action for every Create action, and cleanup runs
 

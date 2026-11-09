@@ -75,6 +75,7 @@ describe("client parameter helpers", () => {
   it("names where a parameter came from", () => {
     expect(describeParameterSource(buildVersionParameterRecord({ kind: "object" }))).toBe("The object");
     expect(describeParameterSource(buildVersionParameterRecord({ source: "you" }))).toBe("Added by you");
+    expect(describeParameterSource(buildVersionParameterRecord({ source: "create" }))).toBe("From its create action");
     expect(describeParameterSource(notesParameter)).toBe("On the page");
     expect(describeParameterSource(nameParameter)).toBe("In the steps");
   });

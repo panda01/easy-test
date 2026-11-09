@@ -48,10 +48,11 @@ import {
   type ActionPlan,
 } from "../utils/actionPlanSchema.js";
 import {
-  OBJECT_PARAMETER_KEY,
   applyParameterValues,
   expandAppliedPlan,
   readUsedParameterValues,
+  type UsedParameterValue,
+  type VersionParameter,
 } from "../utils/actionParameters.js";
 import {
   CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE,
@@ -458,7 +459,10 @@ export async function performActionScriptRun(
   });
   const runCleansUpAfterItself = !options.isCleanupRun && parametersView.role.kind === "create";
   if (runCleansUpAfterItself) {
-    await cleanUpAfterCreateRun(actionScriptDirectory, found, created, followUpOutcome, options.cleanUpAfterwards);
+    await cleanUpAfterCreateRun(actionScriptDirectory, found, created, followUpOutcome, {
+      cleanUpAfterwards: options.cleanUpAfterwards,
+      usedValues: preparedRun.applied.usedValues,
+    });
   }
   const createdWithObjects = await findActionScriptRunWithObjects(website.id, created.id);
   return createdWithObjects ?? created;
@@ -474,26 +478,54 @@ interface CleanupAttempt {
   errorMessage: string | null;
 }
 
+/** What a cleanup needs from the Create run it follows, beyond the recorded object. */
+export interface CleanupRunInputs {
+  /** False when the user turned cleanup off for this run. */
+  cleanUpAfterwards: boolean;
+  /** The values the Create run used (secrets left out); the Delete run gets the ones its version mirrors, by key. */
+  usedValues: UsedParameterValue[];
+}
+
+/**
+ * Picks the values a cleanup run (or a Delete-only run of auto-refine) sends:
+ * the Create run's used values whose keys the Delete version has - its
+ * mirrored parameters share the Create action's keys - so a Create run that
+ * typed "Voyager" cleans up "Voyager". Other keys are dropped, because a run
+ * refuses a key its version does not know.
+ * @param usedValues - The Create run's used values
+ * @param deleteParameters - The Delete version's parameters
+ * @returns The values to run the Delete version with, by key
+ */
+export function pickCleanupValues(
+  usedValues: UsedParameterValue[],
+  deleteParameters: Pick<VersionParameter, "key">[],
+): Record<string, string> {
+  const deleteKeys = new Set(deleteParameters.map((parameter) => parameter.key));
+  return Object.fromEntries(
+    usedValues.filter((usedValue) => deleteKeys.has(usedValue.key)).map((usedValue) => [usedValue.key, usedValue.value]),
+  );
+}
+
 /**
  * Tries the cleanup of a Create run: finds the linked Delete action and its
  * newest version, claims the Delete action, and runs that version on the
- * created object (its name as the `object` value when the version has that
- * parameter, its id for the delete mark). Every reason not to run is an
- * outcome, never a throw.
+ * created object - with the Create run's values for the parameters the
+ * Delete version mirrors (`pickCleanupValues`), and the object's id for the
+ * delete mark. Every reason not to run is an outcome, never a throw.
  * @param actionScriptDirectory - Absolute path of the action script directory
  * @param found - The website, Create action, and version that just ran
  * @param followUpOutcome - The object the Create run recorded, if any
- * @param cleanUpAfterwards - False when the user turned cleanup off for this run
+ * @param inputs - Whether cleanup is on for this run, and the values the Create run used
  * @returns How the attempt ended
  */
 async function attemptCleanup(
   actionScriptDirectory: string,
   found: WebsiteActionAndScript,
   followUpOutcome: RunFollowUpOutcome,
-  cleanUpAfterwards: boolean,
+  inputs: CleanupRunInputs,
 ): Promise<CleanupAttempt> {
   const { website, action } = found;
-  if (!cleanUpAfterwards) {
+  if (!inputs.cleanUpAfterwards) {
     return { outcome: "off", cleanupRun: null, errorMessage: null };
   }
   const link = await findActionCleanupForCreateAction(website.id, action.id);
@@ -518,14 +550,11 @@ async function attemptCleanup(
     return { outcome: "failed", cleanupRun: null, errorMessage: CLEANUP_DELETE_ACTION_BUSY_MESSAGE };
   }
   try {
-    // The Delete version only has an `object` parameter when its steps name
-    // an instance of a resolved object type; without one (no type detected
-    // yet) it runs with its own literal names rather than being refused.
+    // The Delete version mirrors the Create action's parameters (same keys),
+    // so the Create run's values go in by key; a key the version does not
+    // have is dropped rather than refused.
     const deleteView = await loadVersionParameters(website.id, deleteAction, deleteScript);
-    const deleteVersionNamesItsObject = deleteView.parameters.some((parameter) => parameter.key === OBJECT_PARAMETER_KEY);
-    const cleanupValues: Record<string, string> = deleteVersionNamesItsObject
-      ? { [OBJECT_PARAMETER_KEY]: createdObjectName }
-      : {};
+    const cleanupValues = pickCleanupValues(inputs.usedValues, deleteView.parameters);
     const cleanupRun = await performActionScriptRun(
       actionScriptDirectory,
       { website, action: deleteAction, script: deleteScript },
@@ -558,7 +587,7 @@ async function attemptCleanup(
  * @param found - The website, Create action, and version that just ran
  * @param createdRun - The Create run as recorded
  * @param followUpOutcome - The object the run recorded, if any
- * @param cleanUpAfterwards - False when the user turned cleanup off for this run
+ * @param inputs - Whether cleanup is on for this run, and the values the Create run used
  * @returns Resolves once the outcome is written (or found to match no row)
  */
 export async function cleanUpAfterCreateRun(
@@ -566,10 +595,10 @@ export async function cleanUpAfterCreateRun(
   found: WebsiteActionAndScript,
   createdRun: ActionScriptRun,
   followUpOutcome: RunFollowUpOutcome,
-  cleanUpAfterwards: boolean,
+  inputs: CleanupRunInputs,
 ): Promise<void> {
   try {
-    const attempt = await attemptCleanup(actionScriptDirectory, found, followUpOutcome, cleanUpAfterwards);
+    const attempt = await attemptCleanup(actionScriptDirectory, found, followUpOutcome, inputs);
     const cleanupCountsAsAFailure = attempt.outcome === "failed" || attempt.outcome === "missing";
     const ownStepsPassed = createdRun.succeeded;
     const errorMessage =

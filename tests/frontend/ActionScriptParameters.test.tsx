@@ -270,3 +270,28 @@ describe("ActionScriptParameters", () => {
     expect(screen.queryByRole("button", { name: "Add parameter" })).not.toBeInTheDocument();
   });
 });
+
+describe("ActionScriptParameters: a Delete action's mirrored parameters", () => {
+  it("tags a mirrored parameter as coming from its create action, with Change but no Remove", () => {
+    const deleteView = buildVersionParametersRecord({
+      role: buildActionObjectRoleRecord({ kind: "delete", objectTypeName: "Project" }),
+      parameters: [
+        buildVersionParameterRecord({
+          source: "create",
+          foundBy: ["create"],
+          uses: [
+            { stepNumber: 1, field: "targetName" },
+            { stepNumber: 3, field: "targetName" },
+          ],
+        }),
+      ],
+    });
+    renderParameters({ view: deleteView });
+
+    expect(screen.getByRole("heading", { name: "Project name" })).toBeInTheDocument();
+    expect(screen.getByText("From its create action")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change Project name" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Names the new object" })).not.toBeInTheDocument();
+  });
+});

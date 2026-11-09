@@ -3117,6 +3117,8 @@ describe("dbService", () => {
       crawlIsRequired: true,
       runIsRequired: undefined,
       objectTypeKey: null,
+      matchText: null,
+      matchFields: [],
     };
 
     const READ_TIMES = { crawlReadAt: new Date("2026-03-03T00:00:00.000Z"), runReadAt: new Date("2026-03-04T00:00:00.000Z") };

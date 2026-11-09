@@ -1,9 +1,11 @@
 import {
   createCreatedObject,
+  findActionCleanupForCreateAction,
   findActionForWebsite,
   findActionParameterSyncInputs,
   findLatestCrawlPagesMatching,
   findNewestActionPlan,
+  listActionCleanupsForDeleteAction,
   listActionIdsForWebsite,
   listActionParametersForAction,
   listChoosableCreatedObjects,
@@ -21,7 +23,6 @@ import {
 } from "./dbService.js";
 import type { ActionPlanRunResult, PlanParameterRun } from "./actionPlanRunnerService.js";
 import {
-  OBJECT_PARAMETER_KEY,
   applyParameterValues,
   chooseNameParameterKey,
   findConfirmStepNumber,
@@ -36,7 +37,7 @@ import {
   type VersionParameter,
 } from "../utils/actionParameters.js";
 import type { ActionPlan } from "../utils/actionPlanSchema.js";
-import { detectActionParameters, type RunFieldReading } from "../utils/detectActionParameters.js";
+import { detectActionParameters, type MirroredParameter, type RunFieldReading } from "../utils/detectActionParameters.js";
 import { urlMatchesPatternKey } from "../utils/detectPagePatterns.js";
 import { normalizeFieldName } from "../utils/formFields.js";
 import { readAriaSnapshotOutline } from "../utils/readAriaSnapshotFields.js";
@@ -219,6 +220,7 @@ export async function syncActionParameters(
   const crawl = await findLatestCrawlPagesMatching(websiteId, action.credentialId, (pageUrl) =>
     visitedIdentities.has(pageUrl),
   );
+  const mirroredParameters = role.kind === "delete" ? await readMirroredParameters(websiteId, action, webObjects) : [];
   const detectedRows = detectActionParameters({
     versionPlans: syncInputs.versions.map((version) => version.plan),
     pages: crawl.pages,
@@ -226,11 +228,78 @@ export async function syncActionParameters(
     runReadings: runReadings === undefined ? null : { plan: runReadings.plan, readings: runReadings.readings },
     role,
     reservedKeys: syncInputs.reservedKeys,
+    mirroredParameters,
   });
   await saveSyncedActionParameters(websiteId, action.id, detectedRows, {
     crawlReadAt: crawl.crawledAt,
     runReadAt: runReadings?.readAt ?? null,
   });
+  // A Delete action's parameters follow its Create action's: one way, never back.
+  if (role.kind === "create") {
+    await syncLinkedDeleteActionQuietly(websiteId, action);
+  }
+}
+
+/**
+ * Lists the parameters a Delete action mirrors: for each Create action it
+ * cleans up after (`ActionCleanup`), that action's text parameters typed by a
+ * step - not secret, not an added field - as resolved from its newest
+ * version, each with the literal that version types. Several Create actions
+ * contribute in link order; the first to use a key keeps it.
+ * @param websiteId - The owning website's cuid
+ * @param deleteAction - The Delete action
+ * @param webObjects - The website's web objects (for the Create actions' roles)
+ * @returns The parameters to mirror, empty when the action cleans up after nothing
+ */
+export async function readMirroredParameters(
+  websiteId: string,
+  deleteAction: ActionWithCredential,
+  webObjects: WebObjectWithPatterns[],
+): Promise<MirroredParameter[]> {
+  const links = await listActionCleanupsForDeleteAction(websiteId, deleteAction.id);
+  const mirrored: MirroredParameter[] = [];
+  for (const link of links) {
+    const createAction = await findActionForWebsite(websiteId, link.createActionId);
+    if (createAction === null) continue;
+    const createPlan = await findNewestActionPlan(websiteId, createAction.id);
+    if (createPlan === null) continue;
+    const createRows = await listActionParametersForAction(websiteId, createAction.id);
+    const createRole = resolveActionObjectRole(createAction, toObjectTypeCandidates(webObjects), readPlanUrls(createPlan));
+    const objectContext = buildObjectContext(createRole.objectTypeKey, webObjects);
+    const createParameters = resolveVersionParameters(createPlan, createRows, createRole.kind, {
+      ...objectContext,
+      instances: [],
+    });
+    for (const parameter of createParameters) {
+      const isATypedText = parameter.kind === "text" && !parameter.isSecret && parameter.addedField === null;
+      const keyIsNew = !mirrored.some((candidate) => candidate.key === parameter.key);
+      if (isATypedText && keyIsNew && parameter.defaultValue.trim() !== "") {
+        mirrored.push({ key: parameter.key, label: parameter.label, matchText: parameter.defaultValue });
+      }
+    }
+  }
+  return mirrored;
+}
+
+/**
+ * Syncs the Delete action linked to a Create action, so its mirrored
+ * parameters follow the Create action's. Never rejects: a failure is logged.
+ * @param websiteId - The owning website's cuid
+ * @param createAction - The Create action whose parameters were just synced
+ * @returns Resolves once the Delete action is synced or the failure logged
+ */
+async function syncLinkedDeleteActionQuietly(websiteId: string, createAction: ActionWithCredential): Promise<void> {
+  try {
+    const link = await findActionCleanupForCreateAction(websiteId, createAction.id);
+    if (link === null) return;
+    const deleteAction = await findActionForWebsite(websiteId, link.deleteActionId);
+    if (deleteAction === null) return;
+    await syncActionParameters(websiteId, deleteAction);
+  } catch (syncError: unknown) {
+    console.error(
+      `[parameters] the delete action of ${createAction.id} could not sync its mirrored parameters: ${describeError(syncError)}`,
+    );
+  }
 }
 
 /**
@@ -446,6 +515,22 @@ export async function loadVersionParameters(
       `Nothing in this version's steps names a ${role.objectTypeName ?? "object"} - add it as "A value in the steps"`,
     );
   }
+  const actionDeletes = role.kind === "delete";
+  if (actionDeletes) {
+    const mirroredRows = rows.filter((row) => row.source === "create" && row.matchText !== null);
+    const boundKeys = new Set(parameters.map((parameter) => parameter.key));
+    for (const mirroredRow of mirroredRows.filter((row) => !boundKeys.has(row.key))) {
+      warnings.push(
+        `Nothing in this version's steps uses "${mirroredRow.matchText ?? ""}" (${mirroredRow.userLabel ?? mirroredRow.label}, from its create action)`,
+      );
+    }
+    const actionMirrorsNothing = mirroredRows.length === 0 && parameters.length === 0;
+    if (actionMirrorsNothing) {
+      warnings.push(
+        'Not linked to a create action, so there are no parameters to mirror - add one as "A value in the steps"',
+      );
+    }
+  }
   if (actionCreates && confirmStepNumber === null) {
     warnings.push("No confirm step found, so created objects can't be recorded");
   }
@@ -557,8 +642,11 @@ async function recordCreatedObject(followUp: RunFollowUp): Promise<CreatedObject
 /**
  * Marks the created object a passed run of a Delete action ran on as deleted
  * on the site. A cleanup run names the object by id
- * (`markDeletedCreatedObjectId`); any other run's object value is matched to
- * the created objects by name.
+ * (`markDeletedCreatedObjectId`); any other run's values - the mirrored
+ * parameters a Delete action shares with its Create action, or ones the user
+ * added - are matched by name against the created objects still on the site
+ * (of the action's type, or of every type when it has none); the newest
+ * match is marked.
  * @param followUp - The run and what it ran with
  * @returns Resolves once marked (or nothing was to be)
  */
@@ -572,15 +660,14 @@ async function markDeletedObject(followUp: RunFollowUp): Promise<void> {
     await markCreatedObjectDeletedByRun(followUp.websiteId, cleanupObjectId, followUp.actionScriptRunId);
     return;
   }
-  const objectTypeKey = view.role.objectTypeKey;
-  if (objectTypeKey === null) return;
-  const chosenName = applied.usedValues.find((usedValue) => usedValue.key === OBJECT_PARAMETER_KEY)?.value ?? "";
-  const chosenChoice = view.objectChoices.find(
-    (choice) => choice.source === "created" && normalizeFieldName(choice.name) === normalizeFieldName(chosenName),
+  const typedNames = new Set(
+    applied.usedValues.map((usedValue) => normalizeFieldName(usedValue.value)).filter((name) => name !== ""),
   );
-  const createdObjectId = chosenChoice?.createdObjectId ?? null;
-  if (createdObjectId === null) return;
-  await markCreatedObjectDeletedByRun(followUp.websiteId, createdObjectId, followUp.actionScriptRunId);
+  if (typedNames.size === 0) return;
+  const candidates = await listChoosableCreatedObjects(followUp.websiteId, view.role.objectTypeKey);
+  const matchedObject = candidates.find((createdObject) => typedNames.has(normalizeFieldName(createdObject.name)));
+  if (matchedObject === undefined) return;
+  await markCreatedObjectDeletedByRun(followUp.websiteId, matchedObject.id, followUp.actionScriptRunId);
 }
 
 /**

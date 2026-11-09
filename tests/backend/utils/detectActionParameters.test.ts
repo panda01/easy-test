@@ -22,6 +22,7 @@ function buildInput(overrides: Partial<ParameterDetectionInput> = {}): Parameter
     runReadings: null,
     role: { kind: "parameters", objectTypeKey: null, objectTypeName: null },
     reservedKeys: [],
+    mirroredParameters: [],
     ...overrides,
   };
 }
@@ -141,6 +142,8 @@ describe("detectActionParameters", () => {
       crawlIsRequired: null,
       runIsRequired: undefined,
       objectTypeKey: null,
+      matchText: null,
+      matchFields: [],
     });
     expect(rows[1]).toMatchObject({
       foundBy: ["snapshot"],
@@ -280,8 +283,8 @@ describe("detectActionParameters", () => {
     ]);
   });
 
-  it("adds the object row for a Read, Update, or Delete action with a type - named by the type - and for no other", () => {
-    const objectRole = { kind: "delete" as const, objectTypeKey: "/projects/{project}", objectTypeName: "Project" };
+  it("adds the object row for a Read or Update action with a type - named by the type - and for no other", () => {
+    const objectRole = { kind: "update" as const, objectTypeKey: "/projects/{project}", objectTypeName: "Project" };
 
     const rows = detectActionParameters(buildInput({ versionPlans: [PROJECT_PLAN], role: objectRole }));
 
@@ -293,10 +296,60 @@ describe("detectActionParameters", () => {
       fieldTarget: null,
       stepAction: null,
       objectTypeKey: "/projects/{project}",
+      matchText: null,
+      matchFields: [],
     });
+    expect(detectActionParameters(buildInput({ role: { ...objectRole, kind: "read" } }))[0].key).toBe("object");
     expect(detectActionParameters(buildInput({ role: { ...objectRole, objectTypeName: null } }))[0].label).toBe("Object");
     expect(detectActionParameters(buildInput({ role: { ...objectRole, objectTypeKey: null } }))).toEqual([]);
     expect(detectActionParameters(buildInput({ role: { ...objectRole, kind: "create" } }))).toEqual([]);
+    // A Delete action mirrors its Create action's parameters instead of binding an object.
+    expect(detectActionParameters(buildInput({ role: { ...objectRole, kind: "delete" } }))).toEqual([]);
+  });
+
+  it("mirrors a Delete action's Create parameters as create rows bound by their literal, skipping taken keys", () => {
+    const deleteRole = { kind: "delete" as const, objectTypeKey: "/projects/{project}", objectTypeName: "Project" };
+    const mirroredParameters = [
+      { key: "projectName", label: "Project name", matchText: "Apollo 7" },
+      { key: "code", label: "Code", matchText: "AP7" },
+      { key: "projectName", label: "Project name (again)", matchText: "Other" },
+      { key: "notes", label: "Notes", matchText: "n" },
+    ];
+
+    const rows = detectActionParameters(buildInput({ role: deleteRole, mirroredParameters, reservedKeys: ["notes"] }));
+
+    expect(rows.map((row) => row.key)).toEqual(["projectName", "code"]);
+    expect(rows[0]).toEqual({
+      key: "projectName",
+      kind: "text",
+      source: "create",
+      foundBy: ["create"],
+      isSecret: false,
+      label: "Project name",
+      fieldTarget: null,
+      fieldRole: null,
+      inputType: null,
+      placeholder: null,
+      stepAction: null,
+      pageUrl: null,
+      containerName: null,
+      besideKeys: [],
+      fillAfterKey: null,
+      crawlIsRequired: null,
+      runIsRequired: undefined,
+      objectTypeKey: null,
+      matchText: "Apollo 7",
+      matchFields: ["value", "targetName", "targetText", "url"],
+    });
+
+    // A Delete plan that types a literal keeps its own steps row; the mirror with that key is skipped.
+    const rowsWithAStep = detectActionParameters(
+      buildInput({ versionPlans: [PROJECT_PLAN], role: deleteRole, mirroredParameters: [mirroredParameters[0]] }),
+    );
+    expect(rowsWithAStep.map((row) => [row.key, row.source])).toEqual([
+      ["projectName", "steps"],
+      ["size", "steps"],
+    ]);
   });
 
   it("finds nothing for a plan that types no literal", () => {

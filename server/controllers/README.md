@@ -389,7 +389,14 @@ shown or run.
   use it; an added field with a value adds a step.
 - **After a run** (`followUpRecordedRun`): the parameters learn from the
   fields the runner read; a Create run whose confirm step showed no error
-  records a `CreatedObject`; a passed deleting Object run marks the created
-  object it ran on as deleted.
+  records a `CreatedObject`; a passed Delete run marks a created object
+  deleted - the one it cleaned up (by id), or the newest one whose name is
+  among the values the run used.
+- **Delete actions:** a Delete action has no `object` parameter. It mirrors
+  its linked Create action's text parameters (`source: "create"` - same key,
+  label and default literal, bound wherever the literal appears in its
+  steps), synced whenever the Create action syncs; `DELETE .../parameters/:key`
+  on one answers `409` like any detected row. A cleanup run gets the Create
+  run's values by key.
 - **After a crawl:** created objects are checked against the type's list page,
   and every action's parameters are synced.

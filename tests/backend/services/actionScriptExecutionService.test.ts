@@ -76,6 +76,7 @@ import {
   isActionScriptRequestProblem,
   performActionScriptRun,
   performRefinement,
+  pickCleanupValues,
   releaseActionRun,
   releaseRunRefinement,
   runFailedOnlyInItsCleanup,
@@ -525,39 +526,41 @@ describe("actionScriptExecutionService", () => {
   });
 
   describe("cleanup after a Create run", () => {
-    /** The parameters view of a Create action that makes Projects. */
+    /** A text parameter bound to step 1's button name (the fixture plan has no fill step), default "Sign in". */
+    const projectNameParameter = {
+      id: "parameter-project-name",
+      key: "projectName",
+      label: "Project name",
+      detectedLabel: "Project name",
+      userLabel: null,
+      kind: "text",
+      source: "steps",
+      foundBy: ["plan"],
+      isSecret: false,
+      isRequired: true,
+      requiredReason: "default",
+      userRequiredChoice: null,
+      defaultValue: "Sign in",
+      uses: [{ stepNumber: 1, field: "targetName" }],
+      addedField: null,
+      objectTypeKey: null,
+      containerName: null,
+    };
+    /** The parameters view of a Create action that makes Projects, named by `projectName`. */
     const createView = {
       ...EMPTY_PARAMETERS_VIEW,
       role: { kind: "create", objectTypeKey: "/projects/{project}", objectTypeName: "Project" },
+      parameters: [projectNameParameter],
+      nameParameterKey: "projectName",
     };
     /** The linked Delete action and its newest version. */
     const deleteAction: ActionWithCredential = { ...action, id: "action-delete", title: "Delete the project" };
     const deleteScript: ActionScriptWithPlan = { ...script, id: "script-delete", actionId: "action-delete" };
-    /** The Delete version's parameters view: its one `object` parameter names the project to delete. */
+    /** The Delete version's parameters view: it mirrors the Create action's `projectName`, bound to step 1's button name. */
     const deleteView = {
       ...EMPTY_PARAMETERS_VIEW,
       role: { kind: "delete", objectTypeKey: "/projects/{project}", objectTypeName: "Project" },
-      parameters: [
-        {
-          id: "parameter-object",
-          key: "object",
-          label: "Project",
-          detectedLabel: "Project",
-          userLabel: null,
-          kind: "object",
-          source: "steps",
-          foundBy: ["plan"],
-          isSecret: false,
-          isRequired: true,
-          requiredReason: "object",
-          userRequiredChoice: null,
-          defaultValue: "Sign in",
-          uses: [{ stepNumber: 1, field: "targetName" }],
-          addedField: null,
-          objectTypeKey: "/projects/{project}",
-          containerName: null,
-        },
-      ],
+      parameters: [{ ...projectNameParameter, id: "parameter-mirrored", source: "create", foundBy: ["create"] }],
     };
     const link = {
       id: "cleanup-1",
@@ -646,23 +649,23 @@ describe("actionScriptExecutionService", () => {
       expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(1);
     });
 
-    it("runs the delete action's newest version on the created object as a cleanup run, marks the object by id, and records passed", async () => {
+    it("runs the delete action's newest version as a cleanup run with the Create run's values for the parameters it mirrors, marks the object by id, and records passed", async () => {
       mockActionParameterService.loadVersionParameters
         .mockResolvedValueOnce(createView)
         .mockResolvedValueOnce(deleteView)
         .mockResolvedValueOnce(deleteView);
       mockDbService.createActionScriptRunForScript.mockResolvedValueOnce(passingRun).mockResolvedValueOnce(passingDeleteRun);
 
-      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, { projectName: "Apollo 7" });
 
       expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(2);
-      // The Delete version's step names the created object.
+      // The Delete version's mirrored parameter gets the value the Create run typed.
       expect(readRunRequest(1).plan.steps[0]).toMatchObject({ target: { role: "button", name: "Apollo 7" } });
       expect(mockDbService.createActionScriptRunForScript).toHaveBeenLastCalledWith(
         "website-1",
         "action-delete",
         "script-delete",
-        expect.objectContaining({ parameterValues: [{ key: "object", label: "Project", value: "Apollo 7" }] }),
+        expect.objectContaining({ parameterValues: [{ key: "projectName", label: "Project name", value: "Apollo 7" }] }),
       );
       expect(mockActionParameterService.followUpRecordedRun).toHaveBeenLastCalledWith(
         expect.objectContaining({ action: deleteAction, actionScriptRunId: "run-delete-1", markDeletedCreatedObjectId: "created-1" }),
@@ -719,22 +722,35 @@ describe("actionScriptExecutionService", () => {
     });
 
     it("records failed with the problem, running nothing, when the cleanup run cannot start", async () => {
-      // The Delete version names its object, but the run's values are refused by the plan rules.
-      const deleteViewWhoseValueIsRefused = {
-        ...deleteView,
-        parameters: [{ ...deleteView.parameters[0], uses: [{ stepNumber: 0, field: "url" }], defaultValue: "https://example.com/p/x" }],
+      // The Create run left its optional name blank, so the Delete version's mirrored (required) value is blank too.
+      const createViewWithOptionalName = {
+        ...createView,
+        parameters: [{ ...projectNameParameter, isRequired: false, requiredReason: "you", userRequiredChoice: "optional" }],
       };
       mockActionParameterService.loadVersionParameters
-        .mockResolvedValueOnce(createView)
-        .mockResolvedValueOnce(deleteViewWhoseValueIsRefused)
-        .mockResolvedValueOnce(deleteViewWhoseValueIsRefused);
+        .mockResolvedValueOnce(createViewWithOptionalName)
+        .mockResolvedValueOnce(deleteView)
+        .mockResolvedValueOnce(deleteView);
 
-      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, {});
+      await performActionScriptRun(ACTION_SCRIPT_DIRECTORY, { website, action, script }, { projectName: "" });
 
       expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(1);
       const recordedCleanup = readRecordedCleanup() as { cleanupErrorMessage: string };
       expect(recordedCleanup).toMatchObject({ cleanupOutcome: "failed", cleanupActionScriptRunId: null, succeeded: false });
-      expect(recordedCleanup.cleanupErrorMessage).toContain("has no known address");
+      expect(recordedCleanup.cleanupErrorMessage).toContain('"Project name" is required');
+    });
+
+    it("pickCleanupValues keeps only the Create run's values whose keys the Delete version has", () => {
+      expect(
+        pickCleanupValues(
+          [
+            { key: "projectName", label: "Project name", value: "Voyager" },
+            { key: "size", label: "Size", value: "Large" },
+          ],
+          [{ key: "projectName" }],
+        ),
+      ).toEqual({ projectName: "Voyager" });
+      expect(pickCleanupValues([{ key: "projectName", label: "Project name", value: "Voyager" }], [])).toEqual({});
     });
 
     it("records failed with the busy message when the delete action is already running", async () => {

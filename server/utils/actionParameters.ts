@@ -17,14 +17,20 @@ export const PARAMETER_KINDS = ["text", "option", "object"] as const;
 /** One parameter kind (see `PARAMETER_KINDS`). */
 export type ParameterKind = (typeof PARAMETER_KINDS)[number];
 
-/** Where a parameter came from: a step types into it, the page has it beside such a field, or the user added it. */
-export const PARAMETER_SOURCES = ["steps", "page", "you"] as const;
+/**
+ * Where a parameter came from: a step types into it (`steps`), the page has
+ * it beside such a field (`page`), the user added it (`you`), or - on a
+ * Delete action - it mirrors a parameter of the Create action it cleans up
+ * after (`create`): same key and label, bound to that parameter's literal
+ * wherever the Delete plan uses it.
+ */
+export const PARAMETER_SOURCES = ["steps", "page", "you", "create"] as const;
 
 /** One parameter source (see `PARAMETER_SOURCES`). */
 export type ParameterSource = (typeof PARAMETER_SOURCES)[number];
 
-/** Where a parameter was seen. */
-export const PARAMETER_FOUND_BY = ["plan", "snapshot", "crawl", "run", "you"] as const;
+/** Where a parameter was seen (`create`: on the Create action it mirrors). */
+export const PARAMETER_FOUND_BY = ["plan", "snapshot", "crawl", "run", "you", "create"] as const;
 
 /** One place a parameter was seen (see `PARAMETER_FOUND_BY`). */
 export type ParameterFoundBy = (typeof PARAMETER_FOUND_BY)[number];
@@ -650,7 +656,11 @@ export function resolveVersionParameters(
     return freeUses;
   };
 
-  for (const row of rows.filter((candidate) => candidate.source === "you" && candidate.matchText !== null)) {
+  // A literal bound by its text: a value the user picked in the steps, or a
+  // Delete action's mirror of its Create action's parameter.
+  const rowBindsALiteral = (candidate: ActionParameterRecord): boolean =>
+    (candidate.source === "you" || candidate.source === "create") && candidate.matchText !== null;
+  for (const row of rows.filter(rowBindsALiteral)) {
     const uses = claimUses(findTextUses(plan, row.matchText ?? "", row.matchFields));
     if (uses.length > 0) parameters.push(toVersionParameter(row, { uses, defaultValue: row.matchText ?? "", addedField: null }));
   }

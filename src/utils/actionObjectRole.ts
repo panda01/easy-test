@@ -23,7 +23,7 @@ export const ACTION_KIND_HELP: Record<ActionKindRecord, string> = {
   create: "The action makes a new object, which each run records and its delete action cleans up.",
   read: "The action opens or checks an existing object without changing it.",
   update: "The action changes an existing object, which every run must name.",
-  delete: "The action deletes an existing object, which every run must name; a passed run marks it deleted.",
+  delete: "The action deletes the object its create action makes; it shares that action's parameters, and a passed run marks the object deleted.",
 };
 
 /**

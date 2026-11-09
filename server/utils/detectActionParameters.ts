@@ -10,6 +10,7 @@ import {
   type ParameterFoundBy,
   type ParameterKind,
   type ParameterStepAction,
+  type ParameterUseField,
 } from "./actionParameters.js";
 import {
   interpretRequiredReading,
@@ -56,7 +57,26 @@ export interface ParameterDetectionInput {
   role: { kind: ActionKind; objectTypeKey: string | null; objectTypeName: string | null };
   /** Keys taken by the user's own rows, which detection must not use. */
   reservedKeys: string[];
+  /** For a Delete action: the parameters of the Create action(s) it cleans up after, to mirror; empty otherwise. */
+  mirroredParameters: MirroredParameter[];
 }
+
+/**
+ * One parameter of a Create action, as a Delete action mirrors it: the same
+ * key and label, bound in the Delete plan to the literal the Create plan
+ * types for it.
+ */
+export interface MirroredParameter {
+  /** The Create parameter's key, reused as is. */
+  key: string;
+  /** The Create parameter's shown label. */
+  label: string;
+  /** The literal the Create action's newest version types for it - what the Delete plan is expected to use. */
+  matchText: string;
+}
+
+/** Every field a mirrored parameter's literal may appear in. */
+export const MIRRORED_PARAMETER_FIELDS: ParameterUseField[] = ["value", "targetName", "targetText", "url"];
 
 /** One row detection says the action should have. */
 export interface DetectedParameter {
@@ -64,8 +84,8 @@ export interface DetectedParameter {
   key: string;
   /** Its kind. */
   kind: ParameterKind;
-  /** `steps` (a step types into it) or `page` (it sits beside such a field). */
-  source: "steps" | "page";
+  /** `steps` (a step types into it), `page` (it sits beside such a field), or `create` (it mirrors the Create action's). */
+  source: "steps" | "page" | "create";
   /** Where it was seen. */
   foundBy: ParameterFoundBy[];
   /** True for a password-like field. */
@@ -96,6 +116,10 @@ export interface DetectedParameter {
   runIsRequired: boolean | null | undefined;
   /** The object type, for the object row. */
   objectTypeKey: string | null;
+  /** For a `create` row: the literal it binds by; null for every other row. */
+  matchText: string | null;
+  /** For a `create` row: where that literal may appear; empty for every other row. */
+  matchFields: ParameterUseField[];
 }
 
 /**
@@ -255,6 +279,8 @@ function draftStepsRows(input: ParameterDetectionInput, takenKeys: Set<string>):
           crawlIsRequired: null,
           runIsRequired: undefined,
           objectTypeKey: null,
+          matchText: null,
+          matchFields: [],
         },
       });
     }
@@ -289,7 +315,10 @@ function findDraftField(draft: StepsRowDraft, read: FieldRead): number {
  * Detects an action's parameters with no LLM - the rows the action should
  * have, apart from the user's own:
  * - a `steps` row per field the versions type into (see `draftStepsRows`);
- * - for an Object action with an object type, the `object` row;
+ * - for a Read or Update action with an object type, the `object` row;
+ * - for a Delete action, a `create` row per parameter of the Create action it
+ *   cleans up after (`input.mirroredParameters`), bound by that parameter's
+ *   literal - unless the key is the user's or a `steps` row's;
  * - a `page` row per other text or select field in the same form or dialog
  *   as a `steps` row's field, from every read of the pages: the aria
  *   snapshots (no re-crawl needed), the crawler's form fields, and the
@@ -298,8 +327,8 @@ function findDraftField(draft: StepsRowDraft, read: FieldRead): number {
  * Each row gets the required readings of the reads that found its field
  * (see `interpretRequiredReading`), its page, its container, and whether it
  * is secret (a password input, or a password-like name).
- * @param input - The versions, pages, snapshots, readings, role, and reserved keys
- * @returns The detected rows: `steps` rows, the object row, then `page` rows
+ * @param input - The versions, pages, snapshots, readings, role, reserved keys, and the parameters to mirror
+ * @returns The detected rows: `steps` rows, the object row, `create` rows, then `page` rows
  */
 export function detectActionParameters(input: ParameterDetectionInput): DetectedParameter[] {
   const takenKeys = new Set([...input.reservedKeys, OBJECT_PARAMETER_KEY]);
@@ -372,6 +401,8 @@ export function detectActionParameters(input: ParameterDetectionInput): Detected
         crawlIsRequired: null,
         runIsRequired: undefined,
         objectTypeKey: null,
+        matchText: null,
+        matchFields: [],
       };
       addFoundBy(row, read.foundBy);
       row.inputType ??= field.inputType;
@@ -409,8 +440,41 @@ export function detectActionParameters(input: ParameterDetectionInput): Detected
             crawlIsRequired: null,
             runIsRequired: undefined,
             objectTypeKey: role.objectTypeKey,
+            matchText: null,
+            matchFields: [],
           },
         ]
       : [];
-  return [...stepDrafts.map((draft) => draft.row), ...objectRows, ...pageRowsByKey.values()];
+  // A Delete action mirrors its Create action's parameters: one `create` row
+  // per mirrored parameter whose key is free (not the user's, not a step's).
+  const stepKeys = new Set(stepDrafts.map((draft) => draft.row.key));
+  const mirroredRows: DetectedParameter[] = [];
+  for (const mirrored of input.mirroredParameters) {
+    const keyIsTaken = input.reservedKeys.includes(mirrored.key) || stepKeys.has(mirrored.key);
+    const keyIsAlreadyMirrored = mirroredRows.some((row) => row.key === mirrored.key);
+    if (keyIsTaken || keyIsAlreadyMirrored) continue;
+    mirroredRows.push({
+      key: mirrored.key,
+      kind: "text",
+      source: "create",
+      foundBy: ["create"],
+      isSecret: false,
+      label: mirrored.label,
+      fieldTarget: null,
+      fieldRole: null,
+      inputType: null,
+      placeholder: null,
+      stepAction: null,
+      pageUrl: null,
+      containerName: null,
+      besideKeys: [],
+      fillAfterKey: null,
+      crawlIsRequired: null,
+      runIsRequired: undefined,
+      objectTypeKey: null,
+      matchText: mirrored.matchText,
+      matchFields: [...MIRRORED_PARAMETER_FIELDS],
+    });
+  }
+  return [...stepDrafts.map((draft) => draft.row), ...objectRows, ...mirroredRows, ...pageRowsByKey.values()];
 }

@@ -37,6 +37,11 @@ const { mockDbService, mockExecutionService, mockActionParameterService } = vi.h
     performActionScriptRun: vi.fn(),
     performRefinement: vi.fn(),
     runFailedOnlyInItsCleanup: vi.fn(),
+    /** The real pure helper: the Create run's values whose keys the Delete version has. */
+    pickCleanupValues: (usedValues: { key: string; value: string }[], deleteParameters: { key: string }[]) => {
+      const deleteKeys = new Set(deleteParameters.map((parameter) => parameter.key));
+      return Object.fromEntries(usedValues.filter((usedValue) => deleteKeys.has(usedValue.key)).map((usedValue) => [usedValue.key, usedValue.value]));
+    },
   },
   /** The parameters view is replaced: its own spec covers the detection and the object choices. */
   mockActionParameterService: { loadVersionParameters: vi.fn() },
@@ -588,6 +593,7 @@ describe("startAutoRefineJob: the Delete side", () => {
       cleanupOutcome,
       cleanupActionScriptRunId: cleanupRunId,
       cleanupErrorMessage,
+      parameterValues: [{ key: "projectName", label: "Project name", value: "Apollo 7" }],
       createdObject: { id: "created-1", name: "Apollo 7", url: null, objectTypeName: "Project" },
     };
   }
@@ -631,7 +637,7 @@ describe("startAutoRefineJob: the Delete side", () => {
     vi.restoreAllMocks();
   });
 
-  it("refines the delete action from its failed cleanup run, runs that version alone on the leftover object, then runs the Create action again", async () => {
+  it("refines the delete action from its failed cleanup run, runs that version alone with the Create run's values for its mirrored parameters, then runs the Create action again", async () => {
     mockExecutionService.performActionScriptRun
       .mockResolvedValueOnce(buildCreateRunWithCleanupProblem("run-1", "failed", "delete-run-1"))
       .mockResolvedValueOnce(buildDeleteRun("delete-run-2", true, "delete-script-2"))
@@ -659,7 +665,7 @@ describe("startAutoRefineJob: the Delete side", () => {
       2,
       ACTION_SCRIPT_DIRECTORY,
       { website, action: deleteAction, script: deleteVersion2 },
-      { object: "Apollo 7" },
+      { projectName: "Apollo 7" },
       CLEANUP_RUN_OPTIONS,
     );
     expect(mockDbService.appendAutoRefineJobCleanupRun).toHaveBeenCalledWith("website-1", "action-1", "job-1", "delete-run-2");

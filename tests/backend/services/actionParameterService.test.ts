@@ -17,8 +17,10 @@ import type { FormField } from "../../../server/utils/formFields.js";
 const { mockDbService } = vi.hoisted(() => ({
   mockDbService: {
     createCreatedObject: vi.fn(),
+    findActionCleanupForCreateAction: vi.fn(),
     findActionForWebsite: vi.fn(),
     findActionParameterSyncInputs: vi.fn(),
+    listActionCleanupsForDeleteAction: vi.fn(),
     findLatestCrawlPagesMatching: vi.fn(),
     findNewestActionPlan: vi.fn(),
     listActionIdsForWebsite: vi.fn(),
@@ -35,6 +37,7 @@ const { mockDbService } = vi.hoisted(() => ({
 
 vi.mock("../../../server/services/dbService.js", () => mockDbService);
 
+import type { DetectedParameter } from "../../../server/utils/detectActionParameters.js";
 import {
   checkCreatedObjectsAfterCrawl,
   ensureActionParametersSynced,
@@ -42,6 +45,7 @@ import {
   loadActionRole,
   loadObjectChoices,
   loadVersionParameters,
+  readMirroredParameters,
   prepareParameterRun,
   readPlanUrls,
   syncActionParameters,
@@ -288,6 +292,10 @@ beforeEach(() => {
   mockDbService.listWebObjectsForWebsite.mockResolvedValue([PROJECT_OBJECT]);
   mockDbService.findLatestCrawlPagesMatching.mockResolvedValue({ crawlRunId: null, crawledAt: null, pages: [] });
   mockDbService.findNewestActionPlan.mockResolvedValue(null);
+  // No action is linked to another unless a test says so.
+  mockDbService.findActionCleanupForCreateAction.mockResolvedValue(null);
+  mockDbService.listActionCleanupsForDeleteAction.mockResolvedValue([]);
+  mockDbService.listChoosableCreatedObjects.mockResolvedValue([]);
   mockDbService.listActionParametersForAction.mockResolvedValue([]);
   mockDbService.listChoosableCreatedObjects.mockResolvedValue([]);
   mockDbService.listCreatedObjectsToCheck.mockResolvedValue([]);
@@ -715,20 +723,18 @@ describe("followUpRecordedRun", () => {
     expect(mockDbService.createCreatedObject).not.toHaveBeenCalled();
   });
 
-  it("marks the created object a passed deleting run ran on, matched by name", async () => {
-    const view = await loadView("Delete a project");
-    const deleteView: VersionParametersView = {
-      ...view,
-      objectChoices: [
-        { ...buildCrawledChoice("Apollo 7", "https://example.com/projects/a7"), source: "created", createdObjectId: "created-1" },
-        buildCrawledChoice("Mercury", "https://example.com/projects/m"),
-      ],
-    };
+  it("marks the created object a passed Delete run ran on, matched by any value it typed", async () => {
+    const deleteView = await loadView("Delete a project");
     expect(deleteView.role).toMatchObject({ kind: "delete" });
+    mockDbService.listChoosableCreatedObjects.mockResolvedValue([
+      buildCreatedObject({ id: "created-2", name: "Mercury" }),
+      buildCreatedObject({ id: "created-1", name: "Apollo 7" }),
+    ]);
 
     await followUpRecordedRun(
-      buildFollowUp(deleteView, buildApplied([{ key: "object", label: "Project", value: "apollo 7" }]), buildRunResult()),
+      buildFollowUp(deleteView, buildApplied([{ key: "projectName", label: "Project name", value: "apollo 7" }]), buildRunResult()),
     );
+    expect(mockDbService.listChoosableCreatedObjects).toHaveBeenCalledWith(WEBSITE_ID, "/projects/{project}");
     expect(mockDbService.markCreatedObjectDeletedByRun).toHaveBeenCalledWith(WEBSITE_ID, "created-1", "run-9");
 
     // A cleanup run names its object by id instead of by the typed name.
@@ -747,12 +753,13 @@ describe("followUpRecordedRun", () => {
 
     mockDbService.markCreatedObjectDeletedByRun.mockClear();
     await followUpRecordedRun(
-      buildFollowUp(deleteView, buildApplied([{ key: "object", label: "Project", value: "Mercury" }]), buildRunResult()),
+      buildFollowUp(deleteView, buildApplied([{ key: "projectName", label: "Project name", value: "Gemini" }]), buildRunResult()),
     );
+    await followUpRecordedRun(buildFollowUp(deleteView, buildApplied([]), buildRunResult()));
     await followUpRecordedRun(
       buildFollowUp(
         deleteView,
-        buildApplied([{ key: "object", label: "Project", value: "Apollo 7" }]),
+        buildApplied([{ key: "projectName", label: "Project name", value: "Apollo 7" }]),
         buildRunResult({ succeeded: false }),
       ),
     );
@@ -813,5 +820,142 @@ describe("checkCreatedObjectsAfterCrawl", () => {
     expect(console.error).toHaveBeenCalledWith(
       "[parameters] website website-1 could not check its created objects after crawl crawl-2: database down",
     );
+  });
+});
+
+describe("mirrored parameters of a Delete action", () => {
+  /** The Create action a Delete action cleans up after, with its one text parameter typed by step 1. */
+  const createAction = buildAction({ id: "action-create", title: "Create a project" });
+  const deleteAction = buildAction({ id: "action-delete", title: "Delete the project" });
+  const link = {
+    id: "cleanup-1",
+    createActionId: "action-create",
+    deleteActionId: "action-delete",
+    createAction: { id: "action-create", title: "Create a project" },
+    deleteAction: { id: "action-delete", title: "Delete the project" },
+  };
+
+  beforeEach(() => {
+    mockDbService.findActionForWebsite.mockImplementation((_websiteId: string, actionId: string) =>
+      Promise.resolve(actionId === "action-create" ? createAction : actionId === "action-delete" ? deleteAction : null),
+    );
+  });
+
+  it("readMirroredParameters lists the Create action's typed text parameters with the literal its newest plan types", async () => {
+    mockDbService.listActionCleanupsForDeleteAction.mockResolvedValue([link]);
+    mockDbService.findNewestActionPlan.mockResolvedValue(CREATE_PLAN);
+    mockDbService.listActionParametersForAction.mockResolvedValue([
+      buildRow(),
+      buildRow({ id: "parameter-secret", key: "password", label: "Password", isSecret: true, fieldTarget: { label: "Password" } }),
+      buildRow({ id: "parameter-page", key: "notes", label: "Notes", source: "page", fieldTarget: { label: "Notes" } }),
+    ]);
+
+    const mirrored = await readMirroredParameters(WEBSITE_ID, deleteAction, [PROJECT_OBJECT]);
+
+    expect(mirrored).toEqual([{ key: "projectName", label: "Project name", matchText: "Apollo 7" }]);
+    expect(mockDbService.listActionCleanupsForDeleteAction).toHaveBeenCalledWith(WEBSITE_ID, "action-delete");
+    expect(mockDbService.findNewestActionPlan).toHaveBeenCalledWith(WEBSITE_ID, "action-create");
+  });
+
+  it("readMirroredParameters answers nothing for an unlinked Delete action, or a Create action with no version", async () => {
+    expect(await readMirroredParameters(WEBSITE_ID, deleteAction, [PROJECT_OBJECT])).toEqual([]);
+
+    mockDbService.listActionCleanupsForDeleteAction.mockResolvedValue([link]);
+    mockDbService.findNewestActionPlan.mockResolvedValue(null);
+    expect(await readMirroredParameters(WEBSITE_ID, deleteAction, [PROJECT_OBJECT])).toEqual([]);
+  });
+
+  it("the Delete action's sync writes a create row per mirrored parameter, bound by its literal", async () => {
+    mockDbService.listActionCleanupsForDeleteAction.mockResolvedValue([link]);
+    mockDbService.findNewestActionPlan.mockResolvedValue(CREATE_PLAN);
+    mockDbService.listActionParametersForAction.mockResolvedValue([buildRow()]);
+    mockDbService.saveSyncedActionParameters.mockResolvedValue(true);
+
+    await syncActionParameters(WEBSITE_ID, deleteAction);
+
+    expect(mockDbService.saveSyncedActionParameters).toHaveBeenCalledTimes(1);
+    const [, , detectedRows] = mockDbService.saveSyncedActionParameters.mock.calls[0] as [string, string, DetectedParameter[]];
+    expect(detectedRows).toEqual([
+      expect.objectContaining({
+        key: "projectName",
+        kind: "text",
+        source: "create",
+        foundBy: ["create"],
+        label: "Project name",
+        matchText: "Apollo 7",
+        matchFields: ["value", "targetName", "targetText", "url"],
+      }),
+    ]);
+  });
+
+  it("the Create action's sync then syncs its linked Delete action, never the other way round", async () => {
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue(link);
+    mockDbService.saveSyncedActionParameters.mockResolvedValue(true);
+
+    await syncActionParameters(WEBSITE_ID, createAction);
+
+    expect(mockDbService.saveSyncedActionParameters).toHaveBeenCalledTimes(2);
+    expect(mockDbService.saveSyncedActionParameters).toHaveBeenNthCalledWith(1, WEBSITE_ID, "action-create", expect.anything(), expect.anything());
+    expect(mockDbService.saveSyncedActionParameters).toHaveBeenNthCalledWith(2, WEBSITE_ID, "action-delete", expect.anything(), expect.anything());
+    expect(mockDbService.findActionCleanupForCreateAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Create action's sync logs, instead of failing, when the Delete action's sync breaks", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mockDbService.findActionCleanupForCreateAction.mockResolvedValue(link);
+    mockDbService.saveSyncedActionParameters.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error("locked"));
+
+    await expect(syncActionParameters(WEBSITE_ID, createAction)).resolves.toBeUndefined();
+    expect(console.error).toHaveBeenCalledWith(
+      "[parameters] the delete action of action-create could not sync its mirrored parameters: locked",
+    );
+  });
+
+  it("a Delete version binds its mirrored parameter to the literal, with no object parameter, and warns when the literal is missing", async () => {
+    const mirroredRow = buildRow({
+      id: "parameter-mirrored",
+      source: "create",
+      foundBy: ["create"],
+      fieldTarget: null,
+      stepAction: null,
+      matchText: "Apollo 7",
+      matchFields: ["value", "targetName", "targetText", "url"],
+    });
+    mockDbService.listActionParametersForAction.mockResolvedValue([mirroredRow, OBJECT_ROW]);
+    const deletePlan: ActionPlan = {
+      name: "Delete the project",
+      startUrl: "https://example.com/projects",
+      steps: [
+        { action: "click", target: { role: "link", name: "Apollo 7" }, value: null },
+        { action: "click", target: { role: "button", name: "Delete project" }, value: null },
+        { action: "expectHidden", target: { role: "link", name: "Apollo 7" }, value: null },
+      ],
+    };
+
+    const view = await loadVersionParameters(WEBSITE_ID, deleteAction, { plan: deletePlan });
+
+    expect(view.role.kind).toBe("delete");
+    expect(view.objectChoices).toEqual([]);
+    expect(view.parameters.map((parameter) => [parameter.key, parameter.source, parameter.defaultValue, parameter.isRequired])).toEqual([
+      ["projectName", "create", "Apollo 7", true],
+    ]);
+    expect(view.parameters[0].uses).toEqual([
+      { stepNumber: 1, field: "targetName" },
+      { stepNumber: 3, field: "targetName" },
+    ]);
+    expect(view.warnings).toEqual([]);
+
+    const planWithoutTheName: ActionPlan = { ...deletePlan, steps: [deletePlan.steps[1]] };
+    const unboundView = await loadVersionParameters(WEBSITE_ID, deleteAction, { plan: planWithoutTheName });
+    expect(unboundView.parameters).toEqual([]);
+    expect(unboundView.warnings).toEqual([
+      'Nothing in this version\'s steps uses "Apollo 7" (Project name, from its create action)',
+    ]);
+
+    mockDbService.listActionParametersForAction.mockResolvedValue([]);
+    const unlinkedView = await loadVersionParameters(WEBSITE_ID, deleteAction, { plan: deletePlan });
+    expect(unlinkedView.warnings).toEqual([
+      'Not linked to a create action, so there are no parameters to mirror - add one as "A value in the steps"',
+    ]);
   });
 });

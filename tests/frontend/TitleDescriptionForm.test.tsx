@@ -322,7 +322,7 @@ describe("TitleDescriptionForm", () => {
       ]);
       await user.click(screen.getByRole("option", { name: "Delete" }));
       expect(
-        screen.getByText("The action deletes an existing object, which every run must name; a passed run marks it deleted."),
+        screen.getByText("The action deletes the object its create action makes; it shares that action's parameters, and a passed run marks the object deleted."),
       ).toBeInTheDocument();
       await pickOption(user, /^Object type/, "Project");
       await user.click(getSubmitButton());

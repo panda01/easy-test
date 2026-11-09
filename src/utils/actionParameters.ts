@@ -113,8 +113,8 @@ export interface VersionParameterRecord {
   userLabel: string | null;
   /** Typed text, a picked option, or the object. */
   kind: "text" | "option" | "object";
-  /** A step types into it, the page has it beside such a field, or the user added it. */
-  source: "steps" | "page" | "you";
+  /** A step types into it, the page has it beside such a field, the user added it, or (on a Delete action) it mirrors the Create action's parameter. */
+  source: "steps" | "page" | "you" | "create";
   /** Where it was seen. */
   foundBy: string[];
   /** True for a password-like field. */
@@ -276,11 +276,12 @@ export function describeParameterRequirement(parameter: VersionParameterRecord):
 /**
  * Describes where a parameter came from, for its tag.
  * @param parameter - The parameter
- * @returns "In the steps", "On the page", "Added by you", or "The object"
+ * @returns "In the steps", "On the page", "Added by you", "From its create action", or "The object"
  */
 export function describeParameterSource(parameter: VersionParameterRecord): string {
   if (parameter.kind === "object") return "The object";
   if (parameter.source === "you") return "Added by you";
+  if (parameter.source === "create") return "From its create action";
   return parameter.source === "page" ? "On the page" : "In the steps";
 }
 

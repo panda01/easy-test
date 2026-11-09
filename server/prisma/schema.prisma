@@ -864,10 +864,14 @@ model Credential {
 /// - `kind`: `text` (typed), `option` (picked from a select), or `object`
 ///   (which existing object to act on - always required).
 /// - `source`: `steps` (a step of a version types into it), `page` (the page
-///   has it beside such a field, but no step fills it), or `you` (added by
-///   the user).
+///   has it beside such a field, but no step fills it), `you` (added by the
+///   user), or `create` (on a Delete action: it mirrors a parameter of the
+///   Create action it cleans up after - same key and label - and binds to
+///   that parameter's literal wherever the Delete plan uses it; the sync
+///   writes and refreshes these, and the user cannot remove them).
 /// - `foundBy`: where it was seen - `plan`, `snapshot` (an aria snapshot),
-///   `crawl` (the crawler's form fields), `run` (the runner's readings), `you`.
+///   `crawl` (the crawler's form fields), `run` (the runner's readings), `you`,
+///   `create` (the Create action it mirrors).
 /// - `isSecret`: a password-like field; its value is masked, scrubbed from
 ///   logs, and never stored on a run.
 /// Its name: `label` (worked out), `userLabel` (the user's, or null).
@@ -883,9 +887,10 @@ model Credential {
 /// each null when unknown - then the default (a field a step types into is
 /// required, any other optional).
 /// The object: `objectTypeKey` (a web object's `instancePatternKey`).
-/// A value the user picked in the steps: `matchText` (the literal) and
-/// `matchFields` (where it may appear: `value`, `targetName`, `targetText`,
-/// `url`).
+/// A value bound by its literal - one the user picked in the steps (`you`),
+/// or a Delete action's mirror of its Create action's parameter (`create`):
+/// `matchText` (the literal) and `matchFields` (where it may appear:
+/// `value`, `targetName`, `targetText`, `url`).
 model ActionParameter {
   id                 String    @id @default(cuid())
   websiteId          String

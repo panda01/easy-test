@@ -586,23 +586,25 @@ export function kindTakesAnObjectType(kind: ActionKind): boolean {
 
 /**
  * Says whether a kind must have an object type to do its job: Create (to
- * record what it made), Update and Delete (to know what they act on). A Read
- * action may have none.
+ * record what it made) and Update (to know what it acts on). A Read action
+ * may have none, and a Delete action takes its parameters from the Create
+ * action it cleans up after, so its type is optional too.
  * @param kind - The kind
- * @returns True for `create`, `update`, and `delete`
+ * @returns True for `create` and `update`
  */
 export function kindNeedsAnObjectType(kind: ActionKind): boolean {
-  return kind === "create" || kind === "update" || kind === "delete";
+  return kind === "create" || kind === "update";
 }
 
 /**
- * Says whether a kind acts on an EXISTING object, which every run must then
- * name: Read, Update, and Delete (when they have an object type).
+ * Says whether a kind acts on an EXISTING object picked from the known
+ * instances of its type (the `object` parameter): Read and Update. A Delete
+ * action does not - it mirrors its Create action's parameters instead.
  * @param kind - The kind
- * @returns True for `read`, `update`, and `delete`
+ * @returns True for `read` and `update`
  */
 export function kindActsOnAnExistingObject(kind: ActionKind): boolean {
-  return kind === "read" || kind === "update" || kind === "delete";
+  return kind === "read" || kind === "update";
 }
 
 /**

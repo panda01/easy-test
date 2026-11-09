@@ -134,10 +134,10 @@ describe("the kind predicates", () => {
     expect(ACTION_KINDS).toEqual(["parameters", "create", "read", "update", "delete"]);
   });
 
-  it("say which kinds take, need, and act on an existing object", () => {
+  it("say which kinds take, need, and act on an existing object (Delete mirrors its Create action instead)", () => {
     expect(ACTION_KINDS.filter(kindTakesAnObjectType)).toEqual(["create", "read", "update", "delete"]);
-    expect(ACTION_KINDS.filter(kindNeedsAnObjectType)).toEqual(["create", "update", "delete"]);
-    expect(ACTION_KINDS.filter(kindActsOnAnExistingObject)).toEqual(["read", "update", "delete"]);
+    expect(ACTION_KINDS.filter(kindNeedsAnObjectType)).toEqual(["create", "update"]);
+    expect(ACTION_KINDS.filter(kindActsOnAnExistingObject)).toEqual(["read", "update"]);
   });
 });
 
@@ -227,9 +227,12 @@ describe("resolveActionObjectRole", () => {
     expect(role).toMatchObject({ kind: "parameters", objectTypeKey: null, objectTypeSource: null, warnings: [] });
   });
 
-  it("lets a Read action go without a type, but warns a Create, Update, or Delete action", () => {
+  it("lets a Read or Delete action go without a type, but warns a Create or Update action", () => {
     expect(resolveActionObjectRole({ title: "Open the dashboard", description: "", ...detectEverything }, CANDIDATES, []).warnings).toEqual([]);
-    for (const userActionKind of ["create", "update", "delete"]) {
+    expect(
+      resolveActionObjectRole({ title: "Do the widget", description: "", userActionKind: "delete", userObjectTypeKey: null }, CANDIDATES, []).warnings,
+    ).toEqual([]);
+    for (const userActionKind of ["create", "update"]) {
       expect(
         resolveActionObjectRole({ title: "Do the widget", description: "", userActionKind, userObjectTypeKey: null }, CANDIDATES, []).warnings,
       ).toEqual(["Pick the kind of object this action works on - none was detected"]);

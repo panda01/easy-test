@@ -23,13 +23,14 @@ import {
   describeFailedRun,
   performActionScriptRun,
   performRefinement,
+  pickCleanupValues,
   releaseActionRun,
   releaseRunRefinement,
   runFailedOnlyInItsCleanup,
   type WebsiteActionAndScript,
 } from "./actionScriptExecutionService.js";
 import { loadVersionParameters } from "./actionParameterService.js";
-import { OBJECT_PARAMETER_KEY } from "../utils/actionParameters.js";
+import { readUsedParameterValues, type UsedParameterValue } from "../utils/actionParameters.js";
 import { describeError } from "../utils/describeError.js";
 import { plansAreIdentical } from "../utils/plansAreIdentical.js";
 
@@ -57,22 +58,24 @@ const CLEANUP_FAILURE_COULD_NOT_BE_READ_MESSAGE =
 
 /** The created object a failed cleanup left on the site, which the refined Delete version is run on. */
 interface LeftoverCreatedObject {
-  /** The created object's cuid. */
+  /** The created object's cuid, for the delete mark. */
   id: string;
-  /** Its name, typed as the Delete version's `object` value. */
-  name: string;
+  /** The values the Create run used; the Delete version gets the ones it mirrors, by key. */
+  usedValues: UsedParameterValue[];
 }
 
 /**
  * Reads the created object a Create run recorded, when the run was read with
- * its objects.
+ * its objects, together with the values that run used.
  * @param run - The Create run as `performActionScriptRun` returned it
- * @returns The object's id and name, or null when the run carries none
+ * @returns The object's id and the run's values, or null when the run carries no object
  */
-function readLeftoverCreatedObject(run: ActionScriptRun | { createdObject: { id: string; name: string } | null }): LeftoverCreatedObject | null {
+function readLeftoverCreatedObject(
+  run: ActionScriptRun | { createdObject: { id: string; name: string } | null; parameterValues: unknown },
+): LeftoverCreatedObject | null {
   const runCarriesObjects = "createdObject" in run;
   if (!runCarriesObjects || run.createdObject === null) return null;
-  return { id: run.createdObject.id, name: run.createdObject.name };
+  return { id: run.createdObject.id, usedValues: readUsedParameterValues(run.parameterValues) };
 }
 
 /** The outcome of asking to start an auto-refine job. */
@@ -277,10 +280,13 @@ async function runAutoRefineInBackground(
         return { jobEnded: true };
       }
       try {
+        // The refined Delete version mirrors the Create action's parameters;
+        // it gets the Create run's values for the keys it has.
+        const deleteView = await loadVersionParameters(website.id, deleteAction, deleteVersion);
         deleteRun = await performActionScriptRun(
           actionScriptDirectory,
           { website, action: deleteAction, script: deleteVersion },
-          { [OBJECT_PARAMETER_KEY]: leftover.name },
+          pickCleanupValues(leftover.usedValues, deleteView.parameters),
           { cleanUpAfterwards: false, isCleanupRun: true, markDeletedCreatedObjectId: leftover.id },
         );
       } finally {

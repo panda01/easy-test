@@ -1292,6 +1292,25 @@ export async function findActionCleanupForCreateAction(
 }
 
 /**
+ * Lists the active cleanup links of a Delete action: the Create actions it
+ * cleans up after (whose parameters it mirrors), oldest link first.
+ * @param websiteId - The owning website's cuid
+ * @param deleteActionId - The Delete action's cuid
+ * @returns The links, empty when the action cleans up after nothing
+ */
+export async function listActionCleanupsForDeleteAction(
+  websiteId: string,
+  deleteActionId: string,
+): Promise<ActionCleanupLink[]> {
+  const links = await prisma.actionCleanup.findMany({
+    where: { websiteId, deleteActionId, deletedAt: null },
+    orderBy: { createdAt: "asc" },
+    include: ACTION_CLEANUP_INCLUDE,
+  });
+  return links;
+}
+
+/**
  * Links a Create action to the Delete action that cleans up after it. The
  * caller has already checked that both are active actions of the website,
  * that they differ, and that the Create action has no active link yet (the
@@ -2793,6 +2812,9 @@ function buildDetectedParameterColumns(
     crawlIsRequired: detected.crawlIsRequired,
     crawlReadAt: detected.crawlIsRequired === null ? null : readingTimes.crawlReadAt,
     objectTypeKey: detected.objectTypeKey,
+    // A Delete action's mirror of its Create action's parameter binds by this literal.
+    matchText: detected.matchText,
+    matchFields: [...detected.matchFields],
     deletedAt: null,
     ...(runReadingWasTaken ? { runIsRequired: detected.runIsRequired, runReadAt: readingTimes.runReadAt } : {}),
   };
@@ -3099,10 +3121,13 @@ export async function listCreatedObjectsForWebsite(websiteId: string): Promise<C
  */
 export async function listChoosableCreatedObjects(
   websiteId: string,
-  objectTypeKey: string,
+  objectTypeKey: string | null,
 ): Promise<CreatedObjectWithSources[]> {
+  // A null type means every type: a Delete action without a resolved type
+  // still marks the created object a run of it deleted.
+  const typeFilter = objectTypeKey === null ? {} : { objectTypeKey };
   const createdObjects = await prisma.createdObject.findMany({
-    where: { websiteId, objectTypeKey, deletedAt: null, notSeenSince: null, deletedOnSiteAt: null },
+    where: { websiteId, ...typeFilter, deletedAt: null, notSeenSince: null, deletedOnSiteAt: null },
     orderBy: { createdAt: "desc" },
     include: CREATED_OBJECT_INCLUDE,
   });
