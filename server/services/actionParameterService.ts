@@ -42,6 +42,7 @@ import { urlMatchesPatternKey } from "../utils/detectPagePatterns.js";
 import { normalizeFieldName } from "../utils/formFields.js";
 import { readAriaSnapshotOutline } from "../utils/readAriaSnapshotFields.js";
 import {
+  isLoginAction,
   kindActsOnAnExistingObject,
   resolveActionObjectRole,
   type ObjectTypeCandidate,
@@ -198,7 +199,10 @@ function listVisitedPageIdentities(versions: { plan: ActionPlan; contextPageUrls
  * its failed runs' page snapshots, and - when a run triggered the sync - that
  * run's field readings; detects the rows the action should have (see
  * `detectActionParameters`); and saves them (see
- * `saveSyncedActionParameters`), never touching the user's choices.
+ * `saveSyncedActionParameters`), never touching the user's choices. A Login
+ * action has no parameters (it types the picked credential's values), so
+ * its detected rows are all removed. The crawl read is the newest one done
+ * the way the action runs (logged in as its credential, or logged out).
  * @param websiteId - The owning website's cuid
  * @param action - The action
  * @param runReadings - The readings of the run that triggered the sync, with its plan and when it ended; omitted otherwise
@@ -212,6 +216,10 @@ export async function syncActionParameters(
   action: ActionWithCredential,
   runReadings?: { plan: ActionPlan; readings: RunFieldReading[]; readAt: Date },
 ): Promise<void> {
+  if (isLoginAction(action)) {
+    await saveSyncedActionParameters(websiteId, action.id, [], { crawlReadAt: null, runReadAt: null });
+    return;
+  }
   const syncInputs = await findActionParameterSyncInputs(websiteId, action.id);
   const webObjects = await listWebObjectsForWebsite(websiteId);
   const newestPlan = syncInputs.versions.at(0)?.plan ?? null;

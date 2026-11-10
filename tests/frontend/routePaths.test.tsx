@@ -24,6 +24,9 @@ import {
   credentialApiUrl,
   credentialEditPath,
   credentialsApiUrl,
+  LOGIN_FORM_FOUND_QUERY_PARAMETER,
+  loginRunScreenshotApiUrl,
+  loginRunsApiUrl,
   newCredentialPath,
   NEW_WEBSITE_PATH,
   WEBSITE_LIST_PATH,
@@ -32,12 +35,14 @@ import {
   screenshotRunImageApiUrl,
   screenshotRunsApiUrl,
   websiteApiUrl,
+  websiteCredentialsAfterLoginFormFoundPath,
   websiteDetailPath,
   websiteEditPath,
   websiteItemApiUrl,
   websiteItemDetailPath,
   websiteItemEditPath,
   websiteItemsApiUrl,
+  websiteLoginCheckApiUrl,
   webObjectApiUrl,
   actionScriptParametersApiUrl,
   actionParameterApiUrl,
@@ -102,6 +107,11 @@ describe("routePaths: API urls", () => {
   it("builds one website's API url", () => {
     expect(websiteApiUrl("website-1")).toBe("/api/websites/website-1");
     expect(websiteApiUrl(UNSAFE_ID)).toBe(`/api/websites/${ENCODED_UNSAFE_ID}`);
+  });
+
+  it("builds a website's login-form check url, encoding its id", () => {
+    expect(websiteLoginCheckApiUrl("website-1")).toBe("/api/websites/website-1/login-check");
+    expect(websiteLoginCheckApiUrl(UNSAFE_ID)).toBe(`/api/websites/${ENCODED_UNSAFE_ID}/login-check`);
   });
 
   it.each([
@@ -307,6 +317,44 @@ describe("routePaths: credentials", () => {
     );
     expect(credentialApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
       `/api/websites/${ENCODED_UNSAFE_ID}/credentials/${ENCODED_UNSAFE_ID}`,
+    );
+  });
+});
+
+describe("routePaths: login form found on create", () => {
+  it("names the query parameter that says a login form was just found", () => {
+    expect(LOGIN_FORM_FOUND_QUERY_PARAMETER).toBe("loginForm");
+  });
+
+  it("builds the new website's Credentials tab path, saying the login form was found, encoding its id", () => {
+    expect(websiteCredentialsAfterLoginFormFoundPath("website-1")).toBe(
+      "/websites/website-1?tab=credentials&loginForm=found",
+    );
+    expect(websiteCredentialsAfterLoginFormFoundPath(UNSAFE_ID)).toBe(
+      `/websites/${ENCODED_UNSAFE_ID}?tab=credentials&loginForm=found`,
+    );
+  });
+});
+
+describe("routePaths: login runs", () => {
+  it("builds a Login action's login run collection url", () => {
+    expect(loginRunsApiUrl("website-1", "login-action-1")).toBe(
+      "/api/websites/website-1/actions/login-action-1/login-runs",
+    );
+  });
+
+  it("builds one login run's screenshot url", () => {
+    expect(loginRunScreenshotApiUrl("website-1", "login-action-1", "login-run-1")).toBe(
+      "/api/websites/website-1/actions/login-action-1/login-runs/login-run-1/screenshot",
+    );
+  });
+
+  it("encodes the website and action ids in login run urls", () => {
+    expect(loginRunsApiUrl(UNSAFE_ID, UNSAFE_ID)).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/login-runs`,
+    );
+    expect(loginRunScreenshotApiUrl(UNSAFE_ID, UNSAFE_ID, "login-run-1")).toBe(
+      `/api/websites/${ENCODED_UNSAFE_ID}/actions/${ENCODED_UNSAFE_ID}/login-runs/login-run-1/screenshot`,
     );
   });
 });

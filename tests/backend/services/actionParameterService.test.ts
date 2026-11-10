@@ -70,6 +70,10 @@ function buildAction(overrides: Partial<ActionWithCredential> = {}): ActionWithC
     id: "action-1",
     websiteId: WEBSITE_ID,
     credentialId: null,
+    loginUrl: null,
+    usernameSelector: null,
+    passwordSelector: null,
+    submitSelector: null,
     title: "Create a project",
     description: "",
     userActionKind: null,
@@ -83,6 +87,9 @@ function buildAction(overrides: Partial<ActionWithCredential> = {}): ActionWithC
     ...overrides,
   };
 }
+
+/** The credential an action that runs logged in runs as, as an action read brings it along. */
+const ADMIN_CREDENTIAL = { id: "credential-1", name: "Admin" };
 
 /**
  * Builds a web object with its patterns.
@@ -359,8 +366,10 @@ describe("syncActionParameters", () => {
     });
   });
 
-  it("reads only the pages the versions visit from the action's crawl, and saves what detection finds", async () => {
-    await syncActionParameters(WEBSITE_ID, buildAction({ credentialId: "credential-1" }));
+  it("reads only the pages the versions visit from the crawl done as the credential the action runs as, and saves what detection finds", async () => {
+    const actionThatLogsIn = buildAction({ credentialId: ADMIN_CREDENTIAL.id, credential: ADMIN_CREDENTIAL });
+
+    await syncActionParameters(WEBSITE_ID, actionThatLogsIn);
 
     const [crawlWebsiteId, crawlCredentialId, keepPage] = mockDbService.findLatestCrawlPagesMatching.mock.calls[0] as [
       string,
@@ -384,6 +393,27 @@ describe("syncActionParameters", () => {
       ["description", "page", false],
     ]);
     expect(readTimes).toEqual({ crawlReadAt: CRAWLED_AT, runReadAt: null });
+  });
+
+  it("reads the logged-out crawl for an action that runs logged out", async () => {
+    await syncActionParameters(WEBSITE_ID, buildAction());
+
+    expect(mockDbService.findLatestCrawlPagesMatching).toHaveBeenCalledWith(WEBSITE_ID, null, expect.any(Function));
+  });
+
+  it("saves no parameters for a Login action, removing any detected ones, without reading its versions or a crawl", async () => {
+    const loginAction = buildAction({ title: "Log in", userActionKind: "login" });
+
+    await syncActionParameters(WEBSITE_ID, loginAction);
+
+    expect(mockDbService.saveSyncedActionParameters).toHaveBeenCalledTimes(1);
+    expect(mockDbService.saveSyncedActionParameters).toHaveBeenCalledWith(WEBSITE_ID, "action-1", [], {
+      crawlReadAt: null,
+      runReadAt: null,
+    });
+    expect(mockDbService.findActionParameterSyncInputs).not.toHaveBeenCalled();
+    expect(mockDbService.listWebObjectsForWebsite).not.toHaveBeenCalled();
+    expect(mockDbService.findLatestCrawlPagesMatching).not.toHaveBeenCalled();
   });
 
   it("passes a run's readings to detection and stamps when they were read", async () => {
@@ -569,6 +599,19 @@ describe("loadVersionParameters", () => {
     expect(namesNothingView.warnings).toEqual([
       'Nothing in this version\'s steps names a Project - add it as "A value in the steps"',
     ]);
+  });
+
+  it("reads an Object version's choices from the crawl done as the credential the action runs as", async () => {
+    mockDbService.listActionParametersForAction.mockResolvedValue([OBJECT_ROW]);
+    const openAction = buildAction({
+      title: "Open a project",
+      credentialId: ADMIN_CREDENTIAL.id,
+      credential: ADMIN_CREDENTIAL,
+    });
+
+    await loadVersionParameters(WEBSITE_ID, openAction, { plan: OPEN_PLAN });
+
+    expect(mockDbService.findLatestCrawlPagesMatching).toHaveBeenCalledWith(WEBSITE_ID, "credential-1", expect.any(Function));
   });
 });
 

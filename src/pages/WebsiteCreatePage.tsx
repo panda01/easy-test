@@ -5,16 +5,17 @@ import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import WebsiteForm from "../components/WebsiteForm";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useReturnNavigation } from "../hooks/useReturnNavigation";
-import { type WebsiteRecord, type WebsiteRequestBody } from "../hooks/useWebsites";
+import { type CreatedWebsiteRecord, type WebsiteRequestBody } from "../hooks/useWebsites";
 import {
   WEBSITE_LIST_PATH,
   WEBSITES_API_URL,
+  websiteCredentialsAfterLoginFormFoundPath,
   websiteDetailPath,
 } from "../utils/routePaths";
 
 /**
- * A new website's form: blank text fields (a blank login page URL means the
- * website doesn't require login), and the screenshot timing settings at their
+ * A new website's form: blank text fields (a blank login page URL means none
+ * is known yet), and the screenshot timing settings at their
  * defaults. The two numbers mirror the server's defaults
  * (`DEFAULT_NETWORK_IDLE_TIMEOUT_MS` / `DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS` in
  * `server/utils/validateRequestBodies.ts`); the client never imports server code.
@@ -31,8 +32,12 @@ const NEW_WEBSITE_VALUES: WebsiteRequestBody = {
 /**
  * The create-website page (`/websites/new`).
  *
- * On save it REPLACES its own history entry with the new website's detail
- * page, so Back from there goes to the list rather than to a stale form.
+ * Saving waits while the server also looks for a login form on the new
+ * website (the button reads "Creating… looking for a login form"). It then
+ * REPLACES its own history entry with the new website's detail page - on its
+ * Credentials tab, asking for the accounts to log in as, when a login form
+ * was found (and the website got its Login action) - so Back from there goes
+ * to the list rather than to a stale form.
  * Cancel returns to the list the same history-aware way (see
  * `useReturnNavigation`). Its "Create website" button carries a plus, like
  * every button that creates something.
@@ -44,7 +49,8 @@ export default function WebsiteCreatePage(): ReactElement {
 
   /**
    * POSTs the new website and, when the server accepts it, moves on to the
-   * created website's page. On failure the form stays put and shows the
+   * created website's page - its Credentials tab when the login-form check
+   * found a login form. On failure the form stays put and shows the
    * server's reason.
    * @param values - The form's URL, name, description, login page URL, and screenshot timing settings
    * @returns Resolves once the request (and any navigation) is done
@@ -52,8 +58,13 @@ export default function WebsiteCreatePage(): ReactElement {
   const createWebsite = async (values: WebsiteRequestBody): Promise<void> => {
     const result = await sendJsonRequest("POST", WEBSITES_API_URL, values);
     if (!result.succeeded) return;
-    const createdWebsite = result.data as WebsiteRecord;
-    replaceKeepingReturnState(websiteDetailPath(createdWebsite.id));
+    const createdWebsite = result.data as CreatedWebsiteRecord;
+    const loginFormWasFound = createdWebsite.loginCheck.outcome === "found";
+    replaceKeepingReturnState(
+      loginFormWasFound
+        ? websiteCredentialsAfterLoginFormFoundPath(createdWebsite.id)
+        : websiteDetailPath(createdWebsite.id),
+    );
   };
 
   /**
@@ -83,6 +94,7 @@ export default function WebsiteCreatePage(): ReactElement {
         submitLabel="Create website"
         submitButtonShowsPlus
         isSubmitting={isSubmitting}
+        submittingLabel="Creating… looking for a login form"
         errorMessage={errorMessage}
         onSubmit={handleSubmit}
         onCancel={handleCancel}

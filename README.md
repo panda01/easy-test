@@ -52,11 +52,24 @@ website runs at a time; a dev server restart ends a running crawl as
 "interrupted". See `server/services/README.md` and `src/pages/README.md`.
 
 A website can also have **Credentials** (name, description, username,
-password, login page URL, and optional login form CSS selectors). Picking one
-in the Crawls tab's **Crawl as** dropdown makes the crawler **log in
-first** - it finds the login form's fields itself unless the credential names
-selectors - and record nothing until the login works; the run is then marked
-`isLoggedIn` with that credential, and logout links are never followed. A
+password) - accounts - and ONE **Login action**: the action whose Kind is
+**Login** knows HOW the website logs in - its own login page URL (or the
+website's) and optional login form CSS selectors - and logs in as whichever
+credential an action, a crawl, or a test run picks. It has no steps; its
+page has **Run login** (with a **Log in as** pick) to test it, which records
+each attempt with a screenshot. A website gets its Login action
+automatically when it is created: the server looks for a login form (a
+visible password field) on its login page URL or its URL, following one
+"Log in" / "Sign in" link when that page has none, and - when it finds one -
+makes the "Log in" action and opens the website on its Credentials tab,
+asking for the accounts to log in as. The Credentials tab's **Look for a
+login form** runs the same check later; a Login action can also be added by
+hand (Kind = Login), but a website never has two. Picking a credential in
+the Crawls tab's **Crawl as** dropdown makes the crawler **log in first**
+through the Login action - it finds the login form's fields itself unless
+the Login action names selectors - and record nothing until the login works;
+the run is then marked `isLoggedIn` with that credential, and logout links
+are never followed. A
 failed login ends the run "failed" with no pages, and the crawl's page shows
 a screenshot of what the browser saw. The login page is only typed into once
 it has loaded and waited out the website's own timing settings (network idle
@@ -65,11 +78,12 @@ gives the site time to answer: up to 15 s for the login form to go, the
 sign-in's own requests to finish (capped by the network idle cap), and the
 minimum wait - so a login is never judged while it still says "Signing in…".
 
-A website can also have a **login page URL** (blank = it doesn't require
-login). Its credentials inherit it unless they set their own, and a website
-without one learns it from the first crawl that logs in with a credential's
-own URL. The Credentials tab and "Crawl as" only show when the website or
-one of its credentials has a login URL.
+A website can also have a **login page URL** (blank = none) - the default
+login page of its Login action, which uses it unless it sets its own; a
+website without one learns it from the login-form check, or from the first
+crawl that logs in with the Login action's own URL. The Credentials tab
+always shows; "Crawl as" only when the website has a credential and a Login
+action.
 
 A crawl can also **click buttons**: the crawl API takes a `buttonMode` -
 `linksOnly` (the default), `allButRisky`, or `openOnly`, picked in the
@@ -86,9 +100,12 @@ clicked. Passwords are stored
 and are never sent back to the browser; see `.env.example` for how to
 generate the key.
 
-An action can be linked to one of the website's credentials (**Log in as**
-on its create / edit form): every run of it then **logs in first** with the
-crawler's own login routine. Deleting the credential unlinks it.
+Any other action can pick one of the website's credentials (**Log in as** on
+its create / edit form): every run of it then **logs in first** as that
+credential, the way the website's Login action does, with the crawler's own
+login routine. Deleting a credential unlinks it (the action runs logged out
+again); deleting the Login action leaves the credentials picked, and their
+runs say the website has no login action until it gets one again.
 
 An action's page has **Model** and **Effort** dropdowns and a **Convert to
 new version** button. The dropdowns list every Claude model Anthropic's Models API
@@ -155,7 +172,7 @@ Development runs on `npm run dev`. A production build runs under pm2 with
 
 ## First-time setup
 
-Requires Node 26.12.0 and a local PostgreSQL server.
+Requires Node 26 (any 26.x release) and a local PostgreSQL server.
 
 ```sh
 createdb easy_test_dev
@@ -284,7 +301,19 @@ After any schema change:
 npx prisma db push && npx prisma generate
 ```
 
-Migrations are not used. Note that the `Website` model's fields are camelCase
+Migrations are not used. **One exception, for databases from before the
+one-Login-action-per-website change:** before the `prisma db push` that
+drops the credential's old `loginUrl` / `usernameSelector` /
+`passwordSelector` / `submitSelector` columns (and `loginActionId` on
+`actions` and `crawl_runs`, where an earlier version added it), run
+`npx tsx server/scripts/migrateLoginsToLoginActions.ts` - it gives every
+website that logs in ONE Login action "Log in" (keeping the oldest it has,
+merging the others into it, and filling its login page and selectors from
+the credentials' old columns), and gives the actions that logged in WITH a
+Login action that Login action's credential back (safe to run twice).
+Without it, `prisma db push` refuses to drop the columns, which hold data.
+
+Note that the `Website` model's fields are camelCase
 and are not individually `@map`'d, so hand-written SQL must quote them:
 `select "createdAt" from websites;`
 

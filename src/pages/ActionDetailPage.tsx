@@ -14,6 +14,7 @@ import ActionScriptsSection from "../components/ActionScriptsSection";
 import ConfirmDeleteDialog from "../components/ConfirmDeleteDialog";
 import DisclosureRow from "../components/DisclosureRow";
 import LoadStatusNotice from "../components/LoadStatusNotice";
+import LoginActionSection from "../components/LoginActionSection";
 import MoreActionsMenu from "../components/MoreActionsMenu";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import PageContainer from "../components/PageContainer";
@@ -23,6 +24,9 @@ import { type ActionScriptRecord, useActionScripts } from "../hooks/useActionScr
 import { type AutoRefineJobRecord, useAutoRefineJob } from "../hooks/useAutoRefineJob";
 import { useIsNarrowerThan } from "../hooks/useIsNarrowerThan";
 import { useJsonMutation } from "../hooks/useJsonMutation";
+import { useLoginChoices } from "../hooks/useLoginChoices";
+import { useLoginRuns } from "../hooks/useLoginRuns";
+import { useNow } from "../hooks/useNow";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { type ReturnState, useReturnToHereState } from "../hooks/useReturnNavigation";
 import { type ScriptModelOption, useScriptModels } from "../hooks/useScriptModels";
@@ -44,6 +48,8 @@ import {
 } from "../utils/actionParameters";
 import { type ActionPlan } from "../utils/actionPlanSteps";
 import { findVersionNumberOfScriptId } from "../utils/findVersionNumberOfScriptId";
+import { isLoginActionRecord } from "../utils/describeActionLogin";
+import { type LoginActionOption } from "../components/TitleDescriptionForm";
 import {
   WEBSITE_LIST_PATH,
   actionParameterApiUrl,
@@ -55,6 +61,7 @@ import {
   actionScriptsApiUrl,
   autoRefineJobStopApiUrl,
   autoRefineJobsApiUrl,
+  loginRunsApiUrl,
   newDeleteActionPath,
   websiteDetailPath,
   websiteItemApiUrl,
@@ -208,6 +215,8 @@ interface ActionHeaderProps {
   isCreateAction: boolean;
   /** The owning website's cuid, for the links to the other actions. */
   websiteId: string;
+  /** The website's login page and Login action, for how the action logs in. */
+  loginContext: ActionLoginContext;
 }
 
 /**
@@ -267,10 +276,70 @@ function ActionCleanupLinks(props: Pick<ActionHeaderProps, "action" | "isCreateA
   );
 }
 
+/** What the header needs to say how an action logs in, beyond the action itself. */
+interface ActionLoginContext {
+  /** The website's default login page, or null. */
+  websiteLoginUrl: string | null;
+  /** The website's Login action, null when it has none, or undefined while the action list loads. */
+  websiteLoginAction: LoginActionOption | null | undefined;
+}
+
+/**
+ * Says how an action logs in, for its page's header:
+ * - the Login action: where it logs in ("Logs in at **https://…/login**.");
+ * - any other action: as its credential, with the website's Login action
+ *   ("Logs in as **Admin** with **Log in**."), with a warning when the
+ *   website has no Login action, or not at all ("Runs logged out.").
+ * @param action - The action, with its credential
+ * @param context - The website's login page and Login action
+ * @returns The sentence, with the names emphasised
+ */
+function describeActionLoginLine(action: WebsiteItemRecord, context: ActionLoginContext): ReactNode {
+  /**
+   * Emphasises one name in the sentence.
+   * @param name - The credential's name or the Login action's title
+   * @returns The name, in the primary text color
+   */
+  const emphasise = (name: string): ReactNode => (
+    <Box component="span" sx={{ color: "text.primary" }}>
+      {name}
+    </Box>
+  );
+  if (isLoginActionRecord(action)) {
+    const loginPage = action.loginUrl ?? context.websiteLoginUrl;
+    return loginPage === null ? (
+      "Has no login page yet - edit it to add one. Logs in as whichever credential an action or crawl picks."
+    ) : (
+      <>Logs in at {emphasise(loginPage)}, as whichever credential an action or crawl picks.</>
+    );
+  }
+  const credentialName = action.credential?.name ?? null;
+  if (credentialName === null) {
+    return "Runs logged out.";
+  }
+  const websiteLoginAction = context.websiteLoginAction;
+  if (websiteLoginAction === undefined) {
+    return <>Logs in as {emphasise(credentialName)}.</>;
+  }
+  if (websiteLoginAction === null) {
+    return (
+      <>
+        Logs in as {emphasise(credentialName)} - but this website has no login action yet, so its runs cannot log
+        in.
+      </>
+    );
+  }
+  return (
+    <>
+      Logs in as {emphasise(credentialName)} with {emphasise(websiteLoginAction.title)}.
+    </>
+  );
+}
+
 /**
  * The top of an action's page, as the mockups draw it: the title, then the
- * description and who the action runs as ("Runs as **Admin**." or "Runs
- * logged out."), then what it does with an object ("Creates a Project, named
+ * description and how the action logs in (see `describeActionLoginLine`),
+ * then what it does with an object ("Creates a Project, named
  * by Project name") and its cleanup links (`ActionCleanupLinks`), with Edit
  * and Delete beside it - behind a "⋯" menu on a phone, where the description
  * is left out - and the delete confirmation dialog.
@@ -278,20 +347,18 @@ function ActionCleanupLinks(props: Pick<ActionHeaderProps, "action" | "isCreateA
  * @returns The rendered header
  */
 function ActionHeader(props: ActionHeaderProps): ReactElement {
-  const { action, editPath, editLinkState, deletion, isPhoneLayout, objectRoleLine, isCreateAction, websiteId } = props;
-  const credentialName = action.credential?.name ?? null;
-  const runsAsText: ReactNode =
-    credentialName === null ? (
-      "Runs logged out."
-    ) : (
-      <>
-        Runs as{" "}
-        <Box component="span" sx={{ color: "text.primary" }}>
-          {credentialName}
-        </Box>
-        .
-      </>
-    );
+  const {
+    action,
+    editPath,
+    editLinkState,
+    deletion,
+    isPhoneLayout,
+    objectRoleLine,
+    isCreateAction,
+    websiteId,
+    loginContext,
+  } = props;
+  const runsAsText = describeActionLoginLine(action, loginContext);
 
   return (
     <Box
@@ -359,8 +426,8 @@ function ActionHeader(props: ActionHeaderProps): ReactElement {
  *   "Edit steps" opens the step editor; saving there creates a NEW version,
  *   which becomes the shown one. "Compare" opens two versions side by side.
  * - The latest run: "Run again" runs the shown version (a browser window
- *   opens on this computer and logs in first when the action has a
- *   credential), then its outcome, failure screenshot, "Refine with Claude",
+ *   opens on this computer and logs in first when the action logs in with a
+ *   Login action), then its outcome, failure screenshot, "Refine with Claude",
  *   output log, and the version's other runs to pick from. Refine asks the
  *   model that wrote the version to fix the plan from the run's error,
  *   failure screenshot, and failing page, saving the result as a new
@@ -380,6 +447,11 @@ function ActionHeader(props: ActionHeaderProps): ReactElement {
  *
  * The shown version lives in the query string (`?version=5`, replaced rather
  * than pushed), so it survives a reload; without one, the newest is shown.
+ *
+ * The LOGIN action has no steps, so its page shows only the header (where
+ * it logs in) and `LoginActionSection`: "Run login" (as the credential
+ * picked beside it) and its login runs. The website's credentials and Login
+ * action are read for that select and for the header (see `useLoginChoices`).
  * The page owns every request; the sections only take props. The owning
  * website is fetched only for the breadcrumb; the action request alone
  * decides loading / not-found.
@@ -404,6 +476,45 @@ export default function ActionDetailPage(): ReactElement {
 
   const returnToHereState = useReturnToHereState();
   const deletion = useWebsiteItemDeletion(ACTION_KIND, websiteId, actionId);
+
+  // A Login action has no steps: its page shows its login runs instead.
+  const actionIsALoginAction = action !== null && isLoginActionRecord(action);
+  const loginRunsResource = useLoginRuns(websiteId, actionId, actionIsALoginAction);
+  const { loginChoices } = useLoginChoices(websiteId, action !== null, website?.loginUrl ?? null, null);
+  const loginContext: ActionLoginContext = {
+    websiteLoginUrl: website?.loginUrl ?? null,
+    websiteLoginAction: loginChoices === null ? undefined : loginChoices.loginAction,
+  };
+  const loginCredentials = loginChoices?.credentials ?? null;
+  const [pickedLoginRunCredentialId, setPickedLoginRunCredentialId] = useState<string | null>(null);
+  // The first credential is picked until the user picks another (or the
+  // picked one is no longer offered).
+  const pickedLoginRunCredentialIsOffered =
+    loginCredentials?.some((credential) => credential.id === pickedLoginRunCredentialId) ?? false;
+  const loginRunCredentialId = pickedLoginRunCredentialIsOffered
+    ? pickedLoginRunCredentialId
+    : (loginCredentials?.at(0)?.id ?? null);
+  const {
+    sendJsonRequest: sendLoginRunRequest,
+    isSubmitting: loginRunIsInFlight,
+    errorMessage: loginRunErrorMessage,
+  } = useJsonMutation();
+  const now = useNow(false);
+
+  /**
+   * Runs the Login action's login once ("Run login"), as the credential
+   * picked beside the button, and, when the server recorded the run (passed
+   * or failed), fetches the run list again so it shows first. A refused
+   * request shows its reason under the button.
+   * @returns Resolves once the request (and the reload) is done
+   */
+  const runLogin = async (): Promise<void> => {
+    if (loginRunCredentialId === null) return;
+    const result = await sendLoginRunRequest("POST", loginRunsApiUrl(websiteId, actionId), {
+      credentialId: loginRunCredentialId,
+    });
+    if (result.succeeded) loginRunsResource.reload();
+  };
 
   const {
     scripts,
@@ -686,6 +797,10 @@ export default function ActionDetailPage(): ReactElement {
       title: action.title,
       description: action.description,
       credentialId: action.credentialId ?? null,
+      loginUrl: action.loginUrl ?? null,
+      usernameSelector: action.usernameSelector ?? null,
+      passwordSelector: action.passwordSelector ?? null,
+      submitSelector: action.submitSelector ?? null,
       userActionKind: action.userActionKind ?? null,
       userObjectTypeKey: action.userObjectTypeKey ?? null,
       userNameParameterKey: parameterKey,
@@ -943,6 +1058,56 @@ export default function ActionDetailPage(): ReactElement {
     );
   }
 
+  if (actionIsALoginAction) {
+    const websiteHasNoCredentials = loginCredentials !== null && loginCredentials.length === 0;
+    // Until the website has loaded, its login page is not known yet - so a
+    // Login action without its own page is not reported as having none.
+    const websiteHasLoaded = website !== null;
+    const loginActionHasNoLoginPage =
+      websiteHasLoaded && (action.loginUrl ?? null) === null && website.loginUrl === null;
+    const loginRunInputsAreLoading = !websiteHasLoaded || loginRunCredentialId === null;
+    const loginRunBlockedReason = websiteHasNoCredentials
+      ? "Save a credential on the website's Credentials tab first"
+      : loginActionHasNoLoginPage
+        ? "Edit this login action to give it a login page URL"
+        : loginRunInputsAreLoading
+          ? "Loading the website and its credentials"
+          : null;
+    return (
+      <PageContainer>
+        {breadcrumbs}
+        <ActionHeader
+          action={action}
+          editPath={websiteItemEditPath(ACTION_KIND, websiteId, actionId)}
+          editLinkState={returnToHereState}
+          deletion={deletion}
+          isPhoneLayout={isPhoneLayout}
+          objectRoleLine={null}
+          isCreateAction={false}
+          websiteId={websiteId}
+          loginContext={loginContext}
+        />
+        <LoginActionSection
+          websiteId={websiteId}
+          actionId={actionId}
+          runs={loginRunsResource.data}
+          isLoading={loginRunsResource.isLoading}
+          errorMessage={loginRunsResource.errorMessage}
+          runBlockedReason={loginRunBlockedReason}
+          credentials={loginCredentials ?? []}
+          selectedCredentialId={loginRunCredentialId}
+          onSelectedCredentialChange={setPickedLoginRunCredentialId}
+          isRunning={loginRunIsInFlight}
+          runErrorMessage={loginRunErrorMessage}
+          onRunLogin={() => {
+            void runLogin();
+          }}
+          now={now}
+        />
+      </PageContainer>
+    );
+  }
+
   const versionsColumn = (
     <ActionScriptsSection
       scripts={scripts}
@@ -1115,6 +1280,7 @@ export default function ActionDetailPage(): ReactElement {
         objectRoleLine={objectRoleLine}
         isCreateAction={objectRole?.kind === "create"}
         websiteId={websiteId}
+        loginContext={loginContext}
       />
       {deleteActionConversionNote !== null && (
         <Alert

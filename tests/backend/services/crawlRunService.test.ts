@@ -54,6 +54,7 @@ vi.mock("../../../server/services/actionParameterService.js", () => mockActionPa
 import {
   startCrawlRun,
   markUnfinishedCrawlRunsInterrupted,
+  type CrawlLoginChoice,
 } from "../../../server/services/crawlRunService.js";
 
 const website: Website = {
@@ -110,7 +111,10 @@ const visitedPage: CrawledPageInput = {
   durationMs: 800,
 };
 
-/** A credential of the website, as crawl start reads it (with its encrypted password). */
+/**
+ * A credential of the website, as crawl start reads it (with its encrypted
+ * password). The website's Login action says where and how to log in.
+ */
 const credential: Credential = {
   id: "credential-1",
   websiteId: "website-1",
@@ -118,20 +122,31 @@ const credential: Credential = {
   description: null,
   username: "admin@example.com",
   encryptedPassword: "iv.tag.ciphertext",
-  loginUrl: "https://example.com/login",
-  usernameSelector: "#email",
-  passwordSelector: null,
-  submitSelector: "button.sign-in",
   createdAt: new Date("2026-03-01T00:00:00.000Z"),
   updatedAt: new Date("2026-03-01T00:00:00.000Z"),
   deletedAt: null,
 };
 
-/** The website with a login page of its own, which credentials without one inherit. */
+/** The website's Login action, with its own login page and some selectors, and the credential the crawl logs in as. */
+const loginChoice: CrawlLoginChoice = {
+  loginAction: {
+    title: "Log in",
+    loginUrl: "https://example.com/login",
+    usernameSelector: "#email",
+    passwordSelector: null,
+    submitSelector: "button.sign-in",
+  },
+  credential,
+};
+
+/** The website with a login page of its own, which Login actions without one inherit. */
 const websiteWithLoginUrl: Website = { ...website, loginUrl: "https://example.com/sign-in" };
 
-/** The credential without a login URL of its own: it logs in on its website's. */
-const inheritingCredential: Credential = { ...credential, loginUrl: null };
+/** The Login action without a login URL of its own: it logs in on its website's. */
+const inheritingLoginChoice: CrawlLoginChoice = {
+  ...loginChoice,
+  loginAction: { ...loginChoice.loginAction, loginUrl: null },
+};
 
 /** The screenshot directory handed to every crawl start. */
 const SCREENSHOT_DIRECTORY = "/tmp/easy-test-screenshots";
@@ -177,18 +192,18 @@ function readLoginPassedToCrawler(): CrawlLogin | null {
 
 /**
  * Starts a crawl and narrows the result to the started case.
- * @param crawlCredential - The credential to log in as, or null to crawl logged out
+ * @param crawlLoginChoice - The Login action to log in with (and its credential), or null to crawl logged out
  * @param crawledWebsite - The website to crawl; the fixture website (no login URL) by default
  * @returns The new run and the promise for the crawl's end
  */
 async function startCrawlThatMustStart(
-  crawlCredential: Credential | null = null,
+  crawlLoginChoice: CrawlLoginChoice | null = null,
   crawledWebsite: Website = website,
 ): Promise<{
   crawlRun: unknown;
   crawlCompletion: Promise<void>;
 }> {
-  const crawlRunStart = await startCrawlRun(crawledWebsite, crawlCredential, SCREENSHOT_DIRECTORY);
+  const crawlRunStart = await startCrawlRun(crawledWebsite, crawlLoginChoice, SCREENSHOT_DIRECTORY);
   if (!crawlRunStart.crawlStarted) {
     throw new Error("Expected the crawl to start");
   }
@@ -598,7 +613,7 @@ describe("startCrawlRun", () => {
   });
 });
 
-describe("startCrawlRun with a credential", () => {
+describe("startCrawlRun with a Login action", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockCrawlerService.CRAWL_PAGE_LIMIT = 50;
@@ -625,8 +640,8 @@ describe("startCrawlRun with a credential", () => {
     vi.restoreAllMocks();
   });
 
-  it("decrypts the password, records the credential on the run, and hands the crawler the login details", async () => {
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+  it("decrypts the credential's password, records only the credential on the run, and hands the crawler the Login action's login details", async () => {
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
 
     expect(mockCredentialEncryption.decryptCredentialPassword).toHaveBeenCalledWith(
@@ -652,9 +667,9 @@ describe("startCrawlRun with a credential", () => {
     );
   });
 
-  it("logs in on the website's login URL when the credential has none of its own (inherits it)", async () => {
+  it("logs in on the website's login URL when the Login action has none of its own (inherits it)", async () => {
     const { crawlCompletion } = await startCrawlThatMustStart(
-      inheritingCredential,
+      inheritingLoginChoice,
       websiteWithLoginUrl,
     );
     await crawlCompletion;
@@ -662,29 +677,29 @@ describe("startCrawlRun with a credential", () => {
     expect(readLoginPassedToCrawler()?.details.loginUrl).toBe("https://example.com/sign-in");
   });
 
-  it("logs in on the credential's own login URL even when the website has one (overrides it)", async () => {
-    const { crawlCompletion } = await startCrawlThatMustStart(credential, websiteWithLoginUrl);
+  it("logs in on the Login action's own login URL even when the website has one (overrides it)", async () => {
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice, websiteWithLoginUrl);
     await crawlCompletion;
 
     expect(readLoginPassedToCrawler()?.details.loginUrl).toBe("https://example.com/login");
   });
 
-  it("rejects before claiming the website or creating a run when neither the credential nor the website has a login URL", async () => {
+  it("rejects before claiming the website or creating a run when neither the Login action nor the website has a login URL", async () => {
     await expect(
-      startCrawlRun(website, inheritingCredential, SCREENSHOT_DIRECTORY),
-    ).rejects.toThrow('The credential "Admin" has no login page URL, and neither does its website');
+      startCrawlRun(website, inheritingLoginChoice, SCREENSHOT_DIRECTORY),
+    ).rejects.toThrow('The login action "Log in" has no login page URL, and neither does its website');
     expect(mockDbService.createCrawlRunForWebsite).not.toHaveBeenCalled();
     expect(mockCrawlerService.crawlWebsite).not.toHaveBeenCalled();
 
-    const retry = await startCrawlThatMustStart(credential);
+    const retry = await startCrawlThatMustStart(loginChoice);
     await retry.crawlCompletion;
     expect(mockDbService.createCrawlRunForWebsite).toHaveBeenCalledTimes(1);
   });
 
-  it("teaches a website with no login URL the credential's URL once the login succeeded", async () => {
+  it("teaches a website with no login URL the Login action's URL once the login succeeded", async () => {
     mockDbService.markCrawlRunLoggedIn.mockResolvedValue(true);
     mockDbService.adoptWebsiteLoginUrl.mockResolvedValue(true);
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
     expect(mockDbService.adoptWebsiteLoginUrl).not.toHaveBeenCalled();
 
@@ -700,7 +715,7 @@ describe("startCrawlRun with a credential", () => {
   it("still crawls on when the website turned out to have a login URL already (nothing adopted)", async () => {
     mockDbService.markCrawlRunLoggedIn.mockResolvedValue(true);
     mockDbService.adoptWebsiteLoginUrl.mockResolvedValue(false);
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
 
     const runIsStillActive = await readLoginPassedToCrawler()?.recordLoginSucceeded();
@@ -710,14 +725,14 @@ describe("startCrawlRun with a credential", () => {
   });
 
   it.each([
-    { label: "the credential's own URL", crawlCredential: credential },
-    { label: "the inherited URL", crawlCredential: inheritingCredential },
+    { label: "the Login action's own URL", crawlLoginChoice: loginChoice },
+    { label: "the inherited URL", crawlLoginChoice: inheritingLoginChoice },
   ])(
     "does not touch the login URL of a website that already has one, after logging in on $label",
-    async ({ crawlCredential }) => {
+    async ({ crawlLoginChoice }) => {
       mockDbService.markCrawlRunLoggedIn.mockResolvedValue(true);
       const { crawlCompletion } = await startCrawlThatMustStart(
-        crawlCredential,
+        crawlLoginChoice,
         websiteWithLoginUrl,
       );
       await crawlCompletion;
@@ -731,7 +746,7 @@ describe("startCrawlRun with a credential", () => {
 
   it("does not teach the website the login URL when the run is no longer active", async () => {
     mockDbService.markCrawlRunLoggedIn.mockResolvedValue(false);
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
 
     const runIsStillActive = await readLoginPassedToCrawler()?.recordLoginSucceeded();
@@ -751,7 +766,7 @@ describe("startCrawlRun with a credential", () => {
       loginFailureScreenshotWasCaptured: false,
     });
 
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
 
     expect(mockDbService.markCrawlRunLoggedIn).not.toHaveBeenCalled();
@@ -762,7 +777,7 @@ describe("startCrawlRun with a credential", () => {
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     mockDbService.markCrawlRunLoggedIn.mockResolvedValue(true);
     mockDbService.adoptWebsiteLoginUrl.mockRejectedValue(new Error("database is down"));
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
 
     const runIsStillActive = await readLoginPassedToCrawler()?.recordLoginSucceeded();
@@ -777,7 +792,7 @@ describe("startCrawlRun with a credential", () => {
     "marks the run logged in when the crawler reports the login worked, handing back the result (%s)",
     async (runWasMarked) => {
       mockDbService.markCrawlRunLoggedIn.mockResolvedValue(runWasMarked);
-      const { crawlCompletion } = await startCrawlThatMustStart(credential);
+      const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
       await crawlCompletion;
       const login = readLoginPassedToCrawler();
 
@@ -788,7 +803,7 @@ describe("startCrawlRun with a credential", () => {
     },
   );
 
-  it("finishes the run as failed, naming the credential and the reason, with the screenshot taken of the failed login", async () => {
+  it("finishes the run as failed, naming the Login action, its credential, and the reason, with the screenshot taken of the failed login", async () => {
     mockCrawlerService.crawlWebsite.mockResolvedValue({
       stopReason: "loginFailed",
       visitedPageCount: 0,
@@ -799,7 +814,7 @@ describe("startCrawlRun with a credential", () => {
       loginFailureScreenshotWasCaptured: true,
     });
 
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
 
     const login = readLoginPassedToCrawler();
@@ -814,7 +829,7 @@ describe("startCrawlRun with a credential", () => {
       skippedSimilarUrlCount: 0,
       skippedSimilarUrlCountsByPattern: {},
       errorMessage:
-        'Login as "Admin" failed: Still on the login form after submitting - check the username and password',
+        'Login with "Log in" as "Admin" failed: Still on the login form after submitting - check the username and password',
       loginFailureScreenshotFileName: expectedFileName,
       durationMs: PINNED_DURATION_MS,
     });
@@ -832,7 +847,7 @@ describe("startCrawlRun with a credential", () => {
       loginFailureScreenshotWasCaptured: false,
     });
 
-    const { crawlCompletion } = await startCrawlThatMustStart(credential);
+    const { crawlCompletion } = await startCrawlThatMustStart(loginChoice);
     await crawlCompletion;
 
     expect(mockDbService.finishCrawlRun).toHaveBeenCalledWith(
@@ -842,7 +857,7 @@ describe("startCrawlRun with a credential", () => {
     );
   });
 
-  it("still words the failure (with no screenshot to record) when a failed login comes without a reason or a credential", async () => {
+  it("still words the failure (with no screenshot to record) when a failed login comes without a reason or a Login action", async () => {
     mockCrawlerService.crawlWebsite.mockResolvedValue({
       stopReason: "loginFailed",
       visitedPageCount: 0,
@@ -861,7 +876,7 @@ describe("startCrawlRun with a credential", () => {
       "crawl-run-1",
       expect.objectContaining({
         status: "failed",
-        errorMessage: 'Login as "the credential" failed: no reason was given',
+        errorMessage: 'Login with "the login action" as "the credential" failed: no reason was given',
         loginFailureScreenshotFileName: null,
       }),
     );
@@ -873,13 +888,13 @@ describe("startCrawlRun with a credential", () => {
       throw decryptError;
     });
 
-    await expect(startCrawlRun(website, credential, SCREENSHOT_DIRECTORY)).rejects.toBe(
+    await expect(startCrawlRun(website, loginChoice, SCREENSHOT_DIRECTORY)).rejects.toBe(
       decryptError,
     );
     expect(mockDbService.createCrawlRunForWebsite).not.toHaveBeenCalled();
     expect(mockCrawlerService.crawlWebsite).not.toHaveBeenCalled();
 
-    const retry = await startCrawlThatMustStart(credential);
+    const retry = await startCrawlThatMustStart(loginChoice);
     await retry.crawlCompletion;
     expect(mockDbService.createCrawlRunForWebsite).toHaveBeenCalledTimes(1);
   });

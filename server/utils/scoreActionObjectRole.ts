@@ -14,15 +14,34 @@ export const CRUD_ACTION_KINDS = ["create", "read", "update", "delete"] as const
 export type CrudActionKind = (typeof CRUD_ACTION_KINDS)[number];
 
 /**
- * What an action does with an object - the action's "switch":
- * - `parameters`: the special kind for login-style actions that only take
- *   typed values and touch no object;
- * - the four object kinds of `CRUD_ACTION_KINDS`.
+ * The kind of a Login action: it has no step plan, and logs in as its
+ * credential with the built-in login routine. Other actions and crawls log in
+ * WITH a Login action. Never detected - only the user picks it.
  */
-export const ACTION_KINDS = ["parameters", ...CRUD_ACTION_KINDS] as const;
+export const LOGIN_ACTION_KIND = "login";
+
+/**
+ * What an action does with an object - the action's "switch":
+ * - `parameters`: the kind for actions that only take typed values and touch
+ *   no object;
+ * - the four object kinds of `CRUD_ACTION_KINDS`;
+ * - `login` (`LOGIN_ACTION_KIND`): the special kind that logs in.
+ */
+export const ACTION_KINDS = ["parameters", ...CRUD_ACTION_KINDS, LOGIN_ACTION_KIND] as const;
 
 /** One action kind (see `ACTION_KINDS`). */
 export type ActionKind = (typeof ACTION_KINDS)[number];
+
+/**
+ * Says whether a stored action is a Login action. Because the Login kind is
+ * never detected, this is exactly "the user picked Login".
+ * @param action - The action's stored kind choice
+ * @param action.userActionKind - The `userActionKind` column
+ * @returns True for a Login action
+ */
+export function isLoginAction(action: { userActionKind: string | null }): boolean {
+  return action.userActionKind === LOGIN_ACTION_KIND;
+}
 
 /** How sure a detection is: the winner's share of the score. */
 export type DetectionConfidence = "high" | "medium" | "low";
@@ -576,12 +595,14 @@ function listRoleWarnings(role: Omit<ResolvedActionRole, "warnings">): string[] 
 }
 
 /**
- * Says whether a kind can have an object type: every kind but `parameters`.
+ * Says whether a kind can have an object type: the four object kinds, not
+ * `parameters` or `login`.
  * @param kind - The kind
  * @returns True for the four object kinds
  */
 export function kindTakesAnObjectType(kind: ActionKind): boolean {
-  return kind !== "parameters";
+  const kindTouchesNoObject = kind === "parameters" || kind === LOGIN_ACTION_KIND;
+  return !kindTouchesNoObject;
 }
 
 /**
@@ -611,8 +632,8 @@ export function kindActsOnAnExistingObject(kind: ActionKind): boolean {
  * Works out what an action does with an object: its kind and the object type
  * it works on. The user's choices always win; anything left on "detect" is
  * detected from the title and description (no LLM), and the object type also
- * from the newest version's addresses. A `parameters` action has no object
- * type.
+ * from the newest version's addresses. A `parameters` or `login` action has
+ * no object type.
  * @param action - The action's text and the user's choices
  * @param candidates - The website's web objects
  * @param planUrls - The newest version's start URL and `goto` addresses (empty when it has none)

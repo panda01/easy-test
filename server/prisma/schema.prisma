@@ -54,11 +54,15 @@ generator client {
 /// Both are whole milliseconds from 0 to 30000, and the cap may not be lower
 /// than the minimum (enforced by `validateWebsiteInput`).
 ///
-/// `loginUrl` is the website's login page. Null means the website does not
-/// require login. Its credentials inherit it (a credential may override it
-/// with its own `loginUrl`). When it is null and a crawl logs in successfully
-/// with a credential's own login URL, the website LEARNS it: that URL is
-/// saved here (`adoptWebsiteLoginUrl`), never overwriting one already set.
+/// `loginUrl` is the website's login page: the DEFAULT login page of its
+/// Login action (see `Action`). Null means the website has no default. The
+/// Login action inherits it (it may override it with its own `loginUrl`).
+/// The website LEARNS it (`adoptWebsiteLoginUrl`, never overwriting one
+/// already set) when:
+/// - the login-form check finds a login form - it runs when the website is
+///   created and on demand (`checkWebsiteForLoginForm`), and makes the
+///   website's Login action when it finds one;
+/// - a crawl logs in successfully with the Login action's own login URL.
 model Website {
   id                         String                      @id @default(cuid())
   url                        String
@@ -86,6 +90,7 @@ model Website {
   createdObjects             CreatedObject[]
   autoRefineJobs             AutoRefineJob[]
   actionCleanups             ActionCleanup[]
+  loginRuns                  LoginRun[]
 
   // Partial unique index: a URL may appear on any number of soft-deleted rows
   // but on at most one active row, so a deleted website's URL can be re-added.
@@ -109,28 +114,47 @@ model UseCase {
   @@map("use_cases")
 }
 
-/// A reusable step on a website, e.g. "Log in". Belongs to exactly one
+/// A reusable step on a website, e.g. "Add a project". Belongs to exactly one
 /// website. Soft deleted like `Website`; deleting an action also stamps the
 /// same `deletedAt` on its active scripts, script runs, script run
-/// screenshots, script refinements, parameters, and auto-refine jobs. Its
-/// created objects are kept (they are still on the site).
+/// screenshots, script refinements, parameters, auto-refine jobs, and login
+/// runs. Its created objects are kept (they are still on the site).
 ///
-/// `credentialId` is the credential the action runs AS, or null for a
-/// logged-out visitor. With one, every run first logs in with the crawler's
-/// login routine (see `logInWithCredential`) and only then runs the plan.
+/// THE LOGIN ACTION (`userActionKind: "login"`) is special: a website has at
+/// most ONE active Login action (enforced by the actions API), and it has no
+/// step plan. It knows HOW the website logs in, not as whom: it logs in as
+/// whichever credential the action, crawl, or "Run login" picks, with the
+/// built-in login routine (`logInWithCredential`) - it opens its login page,
+/// finds the username field, the password field, and the submit button on
+/// its own, types the credential's username and password, and submits. Only
+/// the Login action uses these columns:
+/// - `loginUrl`: its login page, or null to use its website's `loginUrl`.
+/// - `usernameSelector`, `passwordSelector`, `submitSelector`: optional CSS
+///   selectors that replace the routine's guess, one field at a time, for
+///   forms the guess gets wrong.
+/// Its own runs ("Run login") are `LoginRun` rows. It is made by the
+/// login-form check (see `Website.loginUrl`) or by the user picking the
+/// kind; it is never detected from the title.
+///
+/// EVERY OTHER ACTION has those columns null and may name the credential it
+/// runs AS: `credentialId`, or null for a logged-out visitor. With one, every
+/// run first logs in as that credential through the website's Login action
+/// and only then runs the plan; crawls log in the same way (see `CrawlRun`).
 /// Soft deleting the credential unlinks it here (sets this back to null).
+/// The Login action itself never has a credential.
 ///
 /// PARAMETERS (see `ActionParameter`): the user's choices about what the
 /// action does with an object. Each is null for "detect" - worked out on read
 /// from the title and description (`resolveActionObjectRole`), so it follows
 /// edits to them:
-/// - `userActionKind`: `parameters` (the special kind for login-style actions
-///   that only type values and touch no object), or one of the four object
-///   kinds: `create` (makes a new object, recorded as a `CreatedObject`),
-///   `read` (opens or checks an existing object), `update` (changes one), or
-///   `delete` (deletes one; a passed run marks the `CreatedObject` it ran on
-///   as deleted on the site). Read, Update and Delete runs name the object
-///   they act on through the `object` parameter.
+/// - `userActionKind`: `login` (see above; only ever chosen by the user),
+///   `parameters` (the kind for actions that only type values and touch no
+///   object), or one of the four object kinds: `create` (makes a new object,
+///   recorded as a `CreatedObject`), `read` (opens or checks an existing
+///   object), `update` (changes one), or `delete` (deletes one; a passed run
+///   marks the `CreatedObject` it ran on as deleted on the site). Read,
+///   Update and Delete runs name the object they act on through the `object`
+///   parameter. A Login action has no parameters.
 /// - `userObjectTypeKey`: the web object (its `instancePatternKey`) the
 ///   action acts on or creates.
 /// - `userNameParameterKey`: the parameter that names a created object.
@@ -142,29 +166,34 @@ model UseCase {
 /// row); the Delete action sees the link from the other side
 /// (`cleanupsAsDelete`). Deleting either action soft deletes the link.
 model Action {
-  id                   String                      @id @default(cuid())
-  websiteId            String
-  credentialId         String?
-  title                String
-  description          String
-  userActionKind       String?
-  userObjectTypeKey    String?
-  userNameParameterKey String?
-  parametersSyncedAt   DateTime?
-  createdAt            DateTime                    @default(now())
-  updatedAt            DateTime                    @updatedAt
-  deletedAt            DateTime?
-  website              Website                     @relation(fields: [websiteId], references: [id])
-  credential           Credential?                 @relation(fields: [credentialId], references: [id])
-  scripts              ActionScript[]
-  scriptRuns           ActionScriptRun[]
-  scriptRunScreenshots ActionScriptRunScreenshot[]
-  scriptRefinements    ActionScriptRefinement[]
-  parameters           ActionParameter[]
-  createdObjects       CreatedObject[]
-  autoRefineJobs       AutoRefineJob[]
-  cleanupsAsCreate     ActionCleanup[]             @relation("CleanupCreateAction")
-  cleanupsAsDelete     ActionCleanup[]             @relation("CleanupDeleteAction")
+  id                       String                      @id @default(cuid())
+  websiteId                String
+  credentialId             String?
+  loginUrl                 String?
+  usernameSelector         String?
+  passwordSelector         String?
+  submitSelector           String?
+  title                    String
+  description              String
+  userActionKind           String?
+  userObjectTypeKey        String?
+  userNameParameterKey     String?
+  parametersSyncedAt       DateTime?
+  createdAt                DateTime                    @default(now())
+  updatedAt                DateTime                    @updatedAt
+  deletedAt                DateTime?
+  website                  Website                     @relation(fields: [websiteId], references: [id])
+  credential               Credential?                 @relation(fields: [credentialId], references: [id])
+  loginRuns                LoginRun[]
+  scripts                  ActionScript[]
+  scriptRuns               ActionScriptRun[]
+  scriptRunScreenshots     ActionScriptRunScreenshot[]
+  scriptRefinements        ActionScriptRefinement[]
+  parameters               ActionParameter[]
+  createdObjects           CreatedObject[]
+  autoRefineJobs           AutoRefineJob[]
+  cleanupsAsCreate         ActionCleanup[]             @relation("CleanupCreateAction")
+  cleanupsAsDelete         ActionCleanup[]             @relation("CleanupDeleteAction")
 
   @@index([websiteId])
   @@index([credentialId])
@@ -525,9 +554,10 @@ model ActionScriptRefinement {
 /// live progress counters (pages recorded so far, links queued but not yet
 /// visited). `durationMs` and `finishedAt` are null while the crawl runs.
 ///
-/// LOGGING IN: `credentialId` is the credential chosen when the crawl was
-/// started, or null for a crawl as a logged-out visitor. With a credential,
-/// the crawler logs in FIRST and records no page until that succeeds:
+/// LOGGING IN: `credentialId` is the credential the crawl was started as, or
+/// null for a crawl as a logged-out visitor. With one, the crawler logs in
+/// as it through the website's Login action FIRST and records no page until
+/// that succeeds:
 /// - while it logs in the run is `running` with 0 pages and
 ///   `isLoggedIn: false`;
 /// - once the login succeeds `isLoggedIn` turns true, BEFORE the first page
@@ -588,6 +618,48 @@ model CrawlRun {
   @@index([websiteId])
   @@index([credentialId])
   @@map("crawl_runs")
+}
+
+/// One "Run login" of a Login action: the server opened a browser on this
+/// machine and logged in as the credential the user picked for that run, with
+/// the built-in login routine, to test that the login works. Belongs to exactly one Login
+/// action (and, denormalized for the cascades, its website). Create-only;
+/// soft deleted together with its action or website.
+///
+/// Logins that other actions' runs and crawls do first are NOT recorded
+/// here - they are part of that run.
+///
+/// `credentialName` and `loginUrl` are snapshots of who it logged in as and
+/// which page it opened, because the Login action can be edited afterwards.
+/// `succeeded` is true when the login form was submitted and went away.
+/// `errorMessage` says why a failed run failed (first line only, the
+/// credential's username and password scrubbed out). `screenshotFileName` is
+/// RELATIVE to `ACTION_SCRIPT_DIR`: `<websiteId>/<uuid>/logged-in.png` after a
+/// passed run, `.../failure.png` after a failed one, or null when none could
+/// be taken. `finalPageUrl` is the address the browser was on at the end
+/// (scrubbed), or null when it could not be read. `output` is the run's log
+/// and `durationMs` runs from browser launch to browser close.
+model LoginRun {
+  id                 String    @id @default(cuid())
+  websiteId          String
+  actionId           String
+  credentialName     String
+  loginUrl           String
+  succeeded          Boolean
+  errorMessage       String?
+  screenshotFileName String?
+  finalPageUrl       String?
+  output             String
+  durationMs         Int
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+  website            Website   @relation(fields: [websiteId], references: [id])
+  action             Action    @relation(fields: [actionId], references: [id])
+
+  @@index([websiteId])
+  @@index([actionId])
+  @@map("login_runs")
 }
 
 /// One background "auto-refine" of an action: the job runs the version it
@@ -853,13 +925,13 @@ model PagePattern {
   @@map("page_patterns")
 }
 
-/// A login for a website - what the crawler types into the website's login
-/// form when a crawl is started "as" this credential, and what an action
-/// linked to it logs in with before each run. Belongs to exactly one
-/// website; a website can have any number. Soft deleted on its own or
-/// together with its website. A soft-deleted credential stays linked to the
-/// crawl runs that used it, so their history still names it, but is UNLINKED
-/// from the actions that ran as it (they go back to running logged out).
+/// An account on a website: the username and password the website's Login
+/// action types into its login form (see `Action`). Belongs to exactly one
+/// website; a website can have any number. Actions and crawls pick the one
+/// they run as. Soft deleted on its own or together with its website. A
+/// soft-deleted credential stays linked to the crawl runs that used it, so
+/// their history still names it, but is UNLINKED from the actions that ran
+/// as it (they run logged out until they are given another).
 ///
 /// `name` and `description` are the user's own label for it (the description
 /// is optional). `username` is stored as typed.
@@ -871,11 +943,8 @@ model PagePattern {
 /// hashed because the crawler has to type the real password; changing or
 /// losing the key makes every saved password unreadable.
 ///
-/// Logging in: the crawler opens the login page - the credential's own
-/// `loginUrl` when it has one, otherwise its website's `loginUrl` (null here
-/// means "inherit") - finds the username field, the password field, and the
-/// submit button on its own, fills them in, and submits. The three optional selectors are CSS selectors that replace that
-/// guess, one field at a time, for forms the guess gets wrong.
+/// Where and how the website logs in - the login page and the form-field
+/// selectors - belongs to its Login action, not to the credential.
 model Credential {
   id                String     @id @default(cuid())
   websiteId         String
@@ -883,10 +952,6 @@ model Credential {
   description       String?
   username          String
   encryptedPassword String
-  loginUrl          String?
-  usernameSelector  String?
-  passwordSelector  String?
-  submitSelector    String?
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
   deletedAt         DateTime?

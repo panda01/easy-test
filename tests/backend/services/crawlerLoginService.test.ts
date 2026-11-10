@@ -41,7 +41,7 @@ vi.mock("../../../server/services/playwrightService.js", async (importOriginal) 
 });
 
 import {
-  buildCrawlLoginDetails,
+  buildLoginDetails,
   captureLoginFailureScreenshot,
   DEFAULT_PASSWORD_FIELD_SELECTOR,
   DEFAULT_SUBMIT_BUTTON_SELECTOR,
@@ -49,8 +49,12 @@ import {
   LOGIN_RESULT_TIMEOUT_MS,
   LOGIN_STEP_TIMEOUT_MS,
   STILL_ON_LOGIN_FORM_MESSAGE,
+  WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE,
+  describeLoginActionWithoutLoginPage,
+  findEffectiveLoginUrl,
   logInWithCredential,
   type CrawlLoginDetails,
+  type LoginActionSettings,
 } from "../../../server/services/crawlerLoginService.js";
 import {
   ACTION_REQUESTS_POLL_INTERVAL_MS,
@@ -669,7 +673,7 @@ describe("captureLoginFailureScreenshot", () => {
   });
 });
 
-describe("buildCrawlLoginDetails", () => {
+describe("buildLoginDetails", () => {
   /** A website without a login page of its own. */
   const website: Website = {
     id: "website-1",
@@ -684,10 +688,22 @@ describe("buildCrawlLoginDetails", () => {
     deletedAt: null,
   };
 
-  /** The website with a login page, which credentials without one inherit. */
+  /** The website with a login page, which Login actions without one inherit. */
   const websiteWithLoginUrl: Website = { ...website, loginUrl: "https://example.com/sign-in" };
 
-  /** A credential with its own login page and some of its own selectors. */
+  /** A Login action with its own login page and some of its own selectors. */
+  const loginAction: LoginActionSettings = {
+    title: "Log in as Admin",
+    loginUrl: "https://auth.example.com/login",
+    usernameSelector: "#email",
+    passwordSelector: null,
+    submitSelector: "button.sign-in",
+  };
+
+  /**
+   * The credential the Login action logs in as. It holds only the username
+   * and password: where and how to log in is the website's Login action's.
+   */
   const credential: Credential = {
     id: "credential-1",
     websiteId: "website-1",
@@ -695,10 +711,6 @@ describe("buildCrawlLoginDetails", () => {
     description: null,
     username: "admin@example.com",
     encryptedPassword: "iv.tag.ciphertext",
-    loginUrl: "https://auth.example.com/login",
-    usernameSelector: "#email",
-    passwordSelector: null,
-    submitSelector: "button.sign-in",
     createdAt: new Date("2026-03-01T00:00:00.000Z"),
     updatedAt: new Date("2026-03-01T00:00:00.000Z"),
     deletedAt: null,
@@ -709,8 +721,8 @@ describe("buildCrawlLoginDetails", () => {
     mockDecryptCredentialPassword.mockReturnValue("correct horse");
   });
 
-  it("decrypts the password and gathers the credential's login page, username, and selectors", () => {
-    const loginDetails = buildCrawlLoginDetails(credential, website);
+  it("decrypts the credential's password and gathers the Login action's login page and selectors with the credential's username", () => {
+    const loginDetails = buildLoginDetails(loginAction, credential, website);
 
     expect(loginDetails).toEqual({
       loginUrl: "https://auth.example.com/login",
@@ -723,47 +735,47 @@ describe("buildCrawlLoginDetails", () => {
     expect(mockDecryptCredentialPassword).toHaveBeenCalledWith("iv.tag.ciphertext");
   });
 
-  it("prefers the credential's own login page over the website's", () => {
-    const loginDetails = buildCrawlLoginDetails(credential, websiteWithLoginUrl);
+  it("prefers the Login action's own login page over the website's", () => {
+    const loginDetails = buildLoginDetails(loginAction, credential, websiteWithLoginUrl);
 
     expect(loginDetails.loginUrl).toBe("https://auth.example.com/login");
   });
 
-  it("falls back to the website's login page when the credential has none", () => {
-    const loginDetails = buildCrawlLoginDetails({ ...credential, loginUrl: null }, websiteWithLoginUrl);
+  it("falls back to the website's login page when the Login action has none", () => {
+    const loginDetails = buildLoginDetails({ ...loginAction, loginUrl: null }, credential, websiteWithLoginUrl);
 
     expect(loginDetails.loginUrl).toBe("https://example.com/sign-in");
   });
 
-  it("passes every selector through, including when none are set", () => {
-    const credentialWithoutSelectors: Credential = {
-      ...credential,
+  it("passes every Login action selector through, including when none are set", () => {
+    const loginActionWithoutSelectors: LoginActionSettings = {
+      ...loginAction,
       usernameSelector: null,
       passwordSelector: null,
       submitSelector: null,
     };
-    const credentialWithEverySelector: Credential = {
-      ...credential,
+    const loginActionWithEverySelector: LoginActionSettings = {
+      ...loginAction,
       usernameSelector: "#user",
       passwordSelector: "#pass",
       submitSelector: "#go",
     };
 
-    expect(buildCrawlLoginDetails(credentialWithoutSelectors, website)).toMatchObject({
+    expect(buildLoginDetails(loginActionWithoutSelectors, credential, website)).toMatchObject({
       usernameSelector: null,
       passwordSelector: null,
       submitSelector: null,
     });
-    expect(buildCrawlLoginDetails(credentialWithEverySelector, website)).toMatchObject({
+    expect(buildLoginDetails(loginActionWithEverySelector, credential, website)).toMatchObject({
       usernameSelector: "#user",
       passwordSelector: "#pass",
       submitSelector: "#go",
     });
   });
 
-  it("throws, naming the credential, without decrypting, when neither it nor its website has a login page", () => {
-    expect(() => buildCrawlLoginDetails({ ...credential, loginUrl: null }, website)).toThrow(
-      'The credential "Admin" has no login page URL, and neither does its website',
+  it("throws, naming the Login action, without decrypting, when neither it nor its website has a login page", () => {
+    expect(() => buildLoginDetails({ ...loginAction, loginUrl: null }, credential, website)).toThrow(
+      'The login action "Log in as Admin" has no login page URL, and neither does its website',
     );
     expect(mockDecryptCredentialPassword).not.toHaveBeenCalled();
   });
@@ -774,6 +786,39 @@ describe("buildCrawlLoginDetails", () => {
       throw decryptionError;
     });
 
-    expect(() => buildCrawlLoginDetails(credential, website)).toThrow(decryptionError);
+    expect(() => buildLoginDetails(loginAction, credential, website)).toThrow(decryptionError);
   });
 });
+
+describe("findEffectiveLoginUrl", () => {
+  it("picks the Login action's own login page, even when the website has one", () => {
+    expect(
+      findEffectiveLoginUrl({ loginUrl: "https://auth.example.com/login" }, { loginUrl: "https://example.com/sign-in" }),
+    ).toBe("https://auth.example.com/login");
+  });
+
+  it("falls back to the website's login page when the Login action has none", () => {
+    expect(findEffectiveLoginUrl({ loginUrl: null }, { loginUrl: "https://example.com/sign-in" })).toBe(
+      "https://example.com/sign-in",
+    );
+  });
+
+  it("answers null when neither has a login page", () => {
+    expect(findEffectiveLoginUrl({ loginUrl: null }, { loginUrl: null })).toBeNull();
+  });
+});
+
+describe("the Login action problem messages", () => {
+  it("says the website has no Login action yet, and how to get one", () => {
+    expect(WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE).toBe(
+      "This website has no login action yet - look for a login form on its Credentials tab, or add an action with the kind Login",
+    );
+  });
+
+  it("names the Login action that has no login page, and says how to fix it", () => {
+    expect(describeLoginActionWithoutLoginPage("Log in as Admin")).toBe(
+      'The login action "Log in as Admin" has no login page URL, and neither does its website; add one to log in',
+    );
+  });
+});
+

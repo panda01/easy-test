@@ -190,6 +190,29 @@ export function websiteApiUrl(websiteId: string): string {
 }
 
 /**
+ * Builds the API url of a website's login-form check (POST: look for a
+ * login form and, when one is found, make the website's Login action).
+ * @param websiteId - The website's cuid
+ * @returns `/api/websites/<websiteId>/login-check`
+ */
+export function websiteLoginCheckApiUrl(websiteId: string): string {
+  return `${websiteApiUrl(websiteId)}/login-check`;
+}
+
+/** The query parameter that tells the website page a login form was just found when it was created. */
+export const LOGIN_FORM_FOUND_QUERY_PARAMETER = "loginForm";
+
+/**
+ * Builds the path the website create page opens when the login-form check
+ * found a login form: the new website's Credentials tab, saying so.
+ * @param websiteId - The website's cuid
+ * @returns `/websites/<websiteId>?tab=credentials&loginForm=found`
+ */
+export function websiteCredentialsAfterLoginFormFoundPath(websiteId: string): string {
+  return `${websiteDetailPath(websiteId)}?tab=credentials&${LOGIN_FORM_FOUND_QUERY_PARAMETER}=found`;
+}
+
+/**
  * Builds the API url of a website's use case or action collection.
  * @param itemKind - Which kind of website item
  * @param websiteId - The owning website's cuid
@@ -578,4 +601,27 @@ export function deleteActionProposalApiUrl(websiteId: string, actionId: string):
  */
 export function deleteActionApiUrl(websiteId: string, actionId: string): string {
   return `${websiteItemApiUrl(ACTION_KIND, websiteId, actionId)}/delete-action`;
+}
+
+/**
+ * Builds the API url of a Login action's login runs: GET lists them, newest
+ * first; POST runs the login once ("Run login") and records it.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Login action's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/login-runs`
+ */
+export function loginRunsApiUrl(websiteId: string, actionId: string): string {
+  return `${websiteItemApiUrl(ACTION_KIND, websiteId, actionId)}/login-runs`;
+}
+
+/**
+ * Builds the API url of one login run's screenshot (GET, a PNG): logged in,
+ * or what the failed login showed.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Login action's cuid
+ * @param loginRunId - The login run's cuid
+ * @returns `/api/websites/<websiteId>/actions/<actionId>/login-runs/<loginRunId>/screenshot`
+ */
+export function loginRunScreenshotApiUrl(websiteId: string, actionId: string, loginRunId: string): string {
+  return `${loginRunsApiUrl(websiteId, actionId)}/${encodeURIComponent(loginRunId)}/screenshot`;
 }

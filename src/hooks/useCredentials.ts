@@ -14,16 +14,8 @@ export interface CredentialRecord {
   name: string;
   /** An optional longer note, or null. */
   description: string | null;
-  /** What the crawler types into the username field. */
+  /** What a Login action types into the username field. */
   username: string;
-  /** The credential's own login page, or null to use its website's login page. */
-  loginUrl: string | null;
-  /** A CSS selector for the username field, or null when the crawler finds it. */
-  usernameSelector: string | null;
-  /** A CSS selector for the password field, or null when the crawler finds it. */
-  passwordSelector: string | null;
-  /** A CSS selector for the submit button, or null when the crawler finds it. */
-  submitSelector: string | null;
   /** Always true: a password is saved (but never sent to the browser). */
   hasPassword: true;
   createdAt: string;
@@ -41,14 +33,6 @@ export interface CredentialRequestBody {
   description: string;
   username: string;
   password: string;
-  /**
-   * The credential's own login page; blank to use the website's. The server
-   * refuses a blank one when the website has no login page either.
-   */
-  loginUrl: string;
-  usernameSelector: string;
-  passwordSelector: string;
-  submitSelector: string;
 }
 
 /**
@@ -56,7 +40,7 @@ export interface CredentialRequestBody {
  * (`GET /api/websites/:websiteId/credentials`), newest first.
  *
  * `isNeeded` lets a page that only sometimes shows credentials (the shared
- * use case / action forms) call this hook unconditionally: when it is false
+ * use case / action forms, where a Login action picks one) call this hook unconditionally: when it is false
  * nothing is fetched and the state stays idle.
  * @param websiteId - The owning website's cuid
  * @param isNeeded - False to skip the request; true (the default) to fetch

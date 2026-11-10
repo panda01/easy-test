@@ -8,7 +8,9 @@ import { startAutoRefineJob } from "../services/autoRefineService.js";
 import {
   ACTION_ALREADY_RUNNING_MESSAGE,
   EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE,
+  LOGIN_ACTION_HAS_NO_STEPS_MESSAGE,
 } from "../services/actionScriptExecutionService.js";
+import { isLoginAction } from "../utils/scoreActionObjectRole.js";
 import { describeError } from "../utils/describeError.js";
 import { validateRunParameterValuesInput } from "../utils/validateRequestBodies.js";
 import { findWebsiteAndAction, findWebsiteActionAndScript } from "./actionLookups.js";
@@ -57,7 +59,7 @@ export function registerAutoRefineJobRoutes(app: Express, actionScriptDirectory:
    * @param actionId - Path parameter: the owning action's cuid
    * @param actionScriptId - Path parameter: the version to start from
    * @param body - Optional JSON `{ parameterValues }`: the values by parameter key, each text of at most 1000 characters without `{{`
-   * @returns 201 with the new job; 400 with `{ error }` when the body is invalid; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the version was saved from the step editor (no model wrote it, so Claude cannot refine it) or the action is already running; 500 with `{ error }` when the job cannot be created or a query fails
+   * @returns 201 with the new job; 400 with `{ error }` when the body is invalid; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the action is a Login action (it has no steps to run or refine - even one that kept versions from before its kind changed), the version was saved from the step editor (no model wrote it, so Claude cannot refine it), or the action is already running; 500 with `{ error }` when the job cannot be created or a query fails
    */
   app.post(
     "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/auto-refine-jobs",
@@ -78,7 +80,11 @@ export function registerAutoRefineJobRoutes(app: Express, actionScriptDirectory:
           res.status(404).json({ error: lookup.notFoundMessage });
           return;
         }
-        const { script } = lookup.found;
+        const { action, script } = lookup.found;
+        if (isLoginAction(action)) {
+          res.status(409).json({ error: LOGIN_ACTION_HAS_NO_STEPS_MESSAGE });
+          return;
+        }
         const versionWasSavedFromTheEditor = script.modelId === null;
         if (versionWasSavedFromTheEditor) {
           res.status(409).json({ error: EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE });

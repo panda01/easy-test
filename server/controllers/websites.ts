@@ -6,12 +6,31 @@ import {
   updateWebsite,
   softDeleteWebsite,
   isUniqueConstraintViolation,
+  type Website,
 } from "../services/dbService.js";
+import { checkWebsiteForLoginForm, type LoginCheck } from "../services/loginFormCheckService.js";
 import { describeError } from "../utils/describeError.js";
 import { validateWebsiteInput } from "../utils/validateRequestBodies.js";
 
 const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
 const DUPLICATE_URL_MESSAGE = "Another website already uses this URL";
+export const WEBSITE_ALREADY_HAS_A_LOGIN_ACTION_MESSAGE =
+  "This website already has its login action, so there is no login form to look for";
+
+/**
+ * Runs a just-created website's login-form check (see
+ * `checkWebsiteForLoginForm`) without letting it fail the create: a check
+ * that throws (a query failed) becomes a `failed` check.
+ * @param website - The website that was just created
+ * @returns What the check did
+ */
+async function checkNewWebsiteForLoginForm(website: Website): Promise<LoginCheck> {
+  try {
+    return await checkWebsiteForLoginForm(website);
+  } catch (error: unknown) {
+    return { outcome: "failed", loginUrl: null, loginActionId: null, message: describeError(error) };
+  }
+}
 
 /**
  * Registers the website CRUD routes on the given express app.
@@ -48,11 +67,18 @@ export function registerWebsiteRoutes(app: Express): void {
   });
 
   /**
-   * Creates a website. The URL is normalized (lowercased host, root slash
-   * added) before it is stored, and must not match another ACTIVE website.
+   * Creates a website, then looks for a login form on it (the login-form
+   * check, see `checkWebsiteForLoginForm`): first on its login page URL when
+   * one was given, otherwise on its URL, following one "Log in" / "Sign in"
+   * link when that page has no password field. When a form is found the
+   * website gets its Login action ("Log in") and - when it had no login page
+   * URL - learns the form's page. The request waits for the check (at most
+   * about 20 seconds); a check that fails or runs out of time never fails
+   * the create. The URL is normalized (lowercased host, root slash added)
+   * before it is stored, and must not match another ACTIVE website.
    * @route POST /api/websites
-   * @param body - JSON `{ url, name, description?, networkIdleTimeoutMs?, screenshotMinimumWaitMs?, loginUrl? }`; `url` must be http/https; the two settings are whole milliseconds 0-30000 (defaults 5000 and 1) and the cap may not be lower than the minimum; `loginUrl` is the website's login page (http/https, normalized like `url`) - left out, null, or blank means the website doesn't require login
-   * @returns 201 with the created website; 400 with `{ error }` for an invalid body; 409 with `{ error }` when another active website has the URL; 500 with `{ error }` otherwise
+   * @param body - JSON `{ url, name, description?, networkIdleTimeoutMs?, screenshotMinimumWaitMs?, loginUrl? }`; `url` must be http/https; the two settings are whole milliseconds 0-30000 (defaults 5000 and 1) and the cap may not be lower than the minimum; `loginUrl` is the website's default login page, used by its Login action when it has none of its own (http/https, normalized like `url`) - left out, null, or blank means it has none
+   * @returns 201 with the created website (as it is after the check) plus `loginCheck: { outcome, loginUrl, loginActionId, message }` - `outcome` is `found`, `notFound`, or `failed`; 400 with `{ error }` for an invalid body; 409 with `{ error }` when another active website has the URL; 500 with `{ error }` otherwise
    */
   app.post("/api/websites", async (req, res) => {
     const validation = validateWebsiteInput(req.body);
@@ -63,7 +89,9 @@ export function registerWebsiteRoutes(app: Express): void {
 
     try {
       const created = await createWebsite(validation.input);
-      res.status(201).json(created);
+      const loginCheck = await checkNewWebsiteForLoginForm(created);
+      const websiteAfterTheCheck = (await findWebsiteById(created.id)) ?? created;
+      res.status(201).json({ ...websiteAfterTheCheck, loginCheck });
     } catch (error: unknown) {
       if (isUniqueConstraintViolation(error)) {
         res.status(409).json({ error: DUPLICATE_URL_MESSAGE });
@@ -97,7 +125,7 @@ export function registerWebsiteRoutes(app: Express): void {
    * settings, and login page URL.
    * @route PUT /api/websites/:websiteId
    * @param websiteId - Path parameter: the website's cuid
-   * @param body - JSON `{ url, name, description?, networkIdleTimeoutMs?, screenshotMinimumWaitMs?, loginUrl? }`; same rules as POST (an omitted setting goes back to its default, and an omitted `loginUrl` clears it - the website then doesn't require login)
+   * @param body - JSON `{ url, name, description?, networkIdleTimeoutMs?, screenshotMinimumWaitMs?, loginUrl? }`; same rules as POST (an omitted setting goes back to its default, and an omitted `loginUrl` clears it - the website then has no default login page)
    * @returns 200 with the updated website; 400 with `{ error }` for an invalid body; 404 with `{ error }` when it does not exist or was deleted; 409 with `{ error }` when another active website has the URL; 500 with `{ error }` otherwise
    */
   app.put("/api/websites/:websiteId", async (req, res) => {
@@ -119,6 +147,35 @@ export function registerWebsiteRoutes(app: Express): void {
         res.status(409).json({ error: DUPLICATE_URL_MESSAGE });
         return;
       }
+      res.status(500).json({ error: describeError(error) });
+    }
+  });
+
+  /**
+   * Looks for a login form on an existing website, on demand (the same
+   * login-form check website create runs - see `checkWebsiteForLoginForm`):
+   * for websites made before the check existed, or whose URL has changed.
+   * When a form is found the website gets its Login action ("Log in"). The
+   * request waits for the check (at most about 20 seconds).
+   * @route POST /api/websites/:websiteId/login-check
+   * @param websiteId - Path parameter: the website's cuid
+   * @returns 200 with `{ loginCheck: { outcome, loginUrl, loginActionId, message } }` - `outcome` is `found`, `notFound`, or `failed`; 404 with `{ error }` when the website does not exist or was deleted; 409 with `{ error }` when the website already has its Login action; 500 with `{ error }` when a query fails
+   */
+  app.post("/api/websites/:websiteId/login-check", async (req, res) => {
+    try {
+      const website = await findWebsiteById(req.params.websiteId);
+      if (website === null) {
+        res.status(404).json({ error: WEBSITE_NOT_FOUND_MESSAGE });
+        return;
+      }
+      const loginCheck = await checkWebsiteForLoginForm(website);
+      const websiteAlreadyHadALoginAction = loginCheck.outcome === "alreadyHasLoginAction";
+      if (websiteAlreadyHadALoginAction) {
+        res.status(409).json({ error: WEBSITE_ALREADY_HAS_A_LOGIN_ACTION_MESSAGE });
+        return;
+      }
+      res.json({ loginCheck });
+    } catch (error: unknown) {
       res.status(500).json({ error: describeError(error) });
     }
   });

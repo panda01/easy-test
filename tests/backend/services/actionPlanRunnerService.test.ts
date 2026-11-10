@@ -87,6 +87,7 @@ import {
   PLAN_OUTPUT_CHARACTER_LIMIT,
   PLAN_RUN_SLOW_MO_MS,
   PLAN_RUN_TIMEOUT_MS,
+  PLAN_RUN_VIEWPORT,
   PLAN_STEP_TIMEOUT_MS,
   START_PAGE_SCREENSHOT_FILE_NAME,
   STEP_SCREENSHOT_SETTLE_TIMEOUT_MS,
@@ -96,6 +97,7 @@ import {
   describePlanStep,
   describePlanTarget,
   runActionPlan,
+  readScrubbedPageUrl,
   runPlanStep,
   scrubSecrets,
   type ActionPlanRunRequest,
@@ -135,8 +137,9 @@ const TWO_CLICK_PLAN = buildPlan([
   buildStep("click", { target: { role: "button", name: "Pay" } }),
 ]);
 
-/** The credential a logged-in run logs in as. */
+/** The Login action a logged-in run logs in with, and the credential it logs in as. */
 const LOGIN: PlanRunLogin = {
+  loginActionTitle: "Log in as Admin",
   credentialName: "Admin",
   details: {
     loginUrl: "https://auth.example.com/login",
@@ -372,6 +375,7 @@ describe("runActionPlan", () => {
     expect(mockChromium.launch).toHaveBeenCalledWith({ headless: true, slowMo: PLAN_RUN_SLOW_MO_MS });
     expect(PLAN_RUN_SLOW_MO_MS).toBe(100);
     expect(mockBrowser.newPage).toHaveBeenCalledWith({ viewport: { width: 1280, height: 720 } });
+    expect(PLAN_RUN_VIEWPORT).toEqual({ width: 1280, height: 720 });
     expect(mockPage.setDefaultTimeout).toHaveBeenCalledWith(PLAN_STEP_TIMEOUT_MS);
     expect(mockPage.setDefaultNavigationTimeout).toHaveBeenCalledWith(PLAN_NAVIGATION_TIMEOUT_MS);
     expectCalledInOrder(mockMkdir, mockChromium.launch, mockBrowser.newPage);
@@ -387,7 +391,7 @@ describe("runActionPlan", () => {
       errorMessage: null,
       failedStepNumber: null,
       output: [
-        'Log in as "Admin"',
+        'Log in with "Log in as Admin" as "Admin"',
         "✔ Logged in",
         "Open https://shop.example.com/",
         'Step 1: Click link "Shoes"',
@@ -459,7 +463,7 @@ describe("runActionPlan", () => {
     const result = await runActionPlan(buildRunRequest());
 
     const expectedError =
-      'Could not log in as "Admin": Still on the login form after submitting - check the username and password';
+      'Could not log in with "Log in as Admin" as "Admin": Still on the login form after submitting - check the username and password';
     expect(result).toMatchObject({
       succeeded: false,
       timedOut: false,
@@ -467,7 +471,7 @@ describe("runActionPlan", () => {
       failedStepNumber: null,
       failureScreenshotWasCaptured: true,
     });
-    expect(readOutputLines(result.output)).toEqual(['Log in as "Admin"', `✘ Stopped: ${expectedError}`]);
+    expect(readOutputLines(result.output)).toEqual(['Log in with "Log in as Admin" as "Admin"', `✘ Stopped: ${expectedError}`]);
     expect(mockPage.goto).not.toHaveBeenCalled();
     expect(mockPage.screenshot).toHaveBeenCalledWith({
       path: FAILURE_SCREENSHOT_PATH,
@@ -1587,6 +1591,35 @@ describe("scrubSecrets", () => {
 
   it("returns the message unchanged when there are no secrets", () => {
     expect(scrubSecrets("plain message", [])).toBe("plain message");
+  });
+});
+
+describe("readScrubbedPageUrl", () => {
+  /**
+   * Builds a page whose address reads as given, or throws.
+   * @param readPageUrl - What `page.url()` does
+   * @returns The stand-in page
+   */
+  function buildPageWithUrl(readPageUrl: () => string): Page {
+    return { url: readPageUrl } as unknown as Page;
+  }
+
+  it("answers the page's address with the credential's values scrubbed out", () => {
+    const page = buildPageWithUrl(() => "https://example.com/welcome?user=admin@example.com");
+
+    expect(readScrubbedPageUrl(page, ["admin@example.com"])).toBe("https://example.com/welcome?user=••••••");
+  });
+
+  it.each(["", "about:blank"])("answers null for a page with no address (%j)", (pageUrl) => {
+    expect(readScrubbedPageUrl(buildPageWithUrl(() => pageUrl), [])).toBeNull();
+  });
+
+  it("answers null when the address cannot be read", () => {
+    const page = buildPageWithUrl(() => {
+      throw new Error("Target page, context or browser has been closed");
+    });
+
+    expect(readScrubbedPageUrl(page, [])).toBeNull();
   });
 });
 

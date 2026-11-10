@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  type Action,
   type ActionScriptRun,
   type ActionScriptRunScreenshotInput,
   type ActionScriptRunWithObjects,
@@ -15,6 +16,7 @@ import {
   findCredentialForWebsite,
   findCredentialWithPasswordForWebsite,
   findLatestCrawledPagesForWebsite,
+  findLoginActionForWebsite,
   findNewestActionScriptForAction,
   createRefinedActionScriptForAction,
   createActionScriptRunForScript,
@@ -35,7 +37,13 @@ import {
   type PlanRunLogin,
   type RunStepScreenshot,
 } from "./actionPlanRunnerService.js";
-import { buildCrawlLoginDetails } from "./crawlerLoginService.js";
+import {
+  WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE,
+  buildLoginDetails,
+  describeLoginActionWithoutLoginPage,
+  findEffectiveLoginUrl,
+} from "./crawlerLoginService.js";
+import { isLoginAction } from "../utils/scoreActionObjectRole.js";
 import {
   type RunFollowUpOutcome,
   followUpRecordedRun,
@@ -72,7 +80,9 @@ export const ACTION_ALREADY_RUNNING_MESSAGE =
 export const ACTION_CREDENTIAL_MISSING_MESSAGE =
   "This action's credential no longer exists; edit the action to pick another one";
 export const PLAN_NEEDS_A_CREDENTIAL_MESSAGE =
-  "This plan types the credential's username or password, but the action runs logged out; edit the action to pick a credential";
+  "This plan types the credential's username or password, but the action runs logged out; edit the action to pick a credential to log in as";
+export const LOGIN_ACTION_HAS_NO_STEPS_MESSAGE =
+  "A login action logs in by itself, so it has no steps to write, run, or refine; use Run login instead";
 export const ONLY_A_FAILED_RUN_CAN_BE_REFINED_MESSAGE = "Only a failed run can be refined; this run passed";
 export const EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE =
   "This version was saved from the step editor, so no model wrote it; only a version Claude wrote can be refined";
@@ -292,31 +302,31 @@ export function resolveEffortForModel(
 }
 
 /**
- * Looks up the credential an action runs as, without its password - for its
- * name and login URL.
+ * Looks up the credential an action's runs log in as, without its password -
+ * for its name.
  * @param website - The action's website row
  * @param action - The action row
- * @returns The credential, or null when the action runs logged out (or its credential is gone)
+ * @returns The credential, or null when the action runs logged out (or the credential is gone)
  */
 export async function findActionCredential(
   website: Website,
   action: ActionWithCredential,
 ): Promise<CredentialSummary | null> {
-  const { credentialId } = action;
+  const credentialId = action.credentialId;
   const actionRunsLoggedOut = credentialId === null;
   if (actionRunsLoggedOut) return null;
   return findCredentialForWebsite(website.id, credentialId);
 }
 
 /**
- * The origins a plan for this action may open: the website's own, and the
- * login pages' (the website's and the credential's).
+ * The origins a plan for this website's actions may open: the website's own,
+ * and the login pages' (the website's and its Login action's own).
  * @param website - The action's website row
- * @param credential - The action's credential, or null
+ * @param loginAction - The website's Login action (see `findLoginActionForWebsite`), or null when it has none
  * @returns The allowed origins
  */
-export function allowedOriginsFor(website: Website, credential: CredentialSummary | null): string[] {
-  return buildAllowedPlanOrigins([website.url, website.loginUrl, credential?.loginUrl ?? null]);
+export function allowedOriginsFor(website: Website, loginAction: Pick<Action, "loginUrl"> | null): string[] {
+  return buildAllowedPlanOrigins([website.url, website.loginUrl, loginAction?.loginUrl ?? null]);
 }
 
 /**
@@ -359,7 +369,8 @@ export function buildStepScreenshotInputs(
  * the work behind the "run a version" route and each run of an auto-refine
  * job, after the lookups and the one-run-per-action claim (`claimActionRun`).
  *
- * Checks the action's credential and the stored plan, puts the run's
+ * Checks how the action logs in (the credential it runs as, and the website's
+ * Login action and its login page) and the stored plan, puts the run's
  * parameter values in (see `prepareParameterRun`) and checks the plan they
  * make, runs it, records the run with the values it used, and follows the run
  * up (see `followUpRecordedRun`: the parameters learn from it, and a Create or
@@ -378,7 +389,7 @@ export function buildStepScreenshotInputs(
  * @param parameterValues - The run's values, by parameter key (validated as text)
  * @param options - Whether to clean up afterwards, and whether this IS the cleanup run (see `ActionScriptRunOptions`)
  * @returns The recorded run, with the objects it created and deleted and its cleanup run when they could be read
- * @throws {ActionScriptRequestProblem} 503 when the action has a credential but no encryption key is configured; 409 when its credential is gone, the stored plan no longer passes the plan rules, or the plan types a credential the action does not have; 400 when the credential has no login URL and neither does the website, a value is not accepted, or the plan the values make breaks a plan rule
+ * @throws {ActionScriptRequestProblem} 503 when the action logs in but no encryption key is configured; 409 when it is itself a Login action (which has no steps), its credential no longer exists, it runs as a credential but the website has no Login action, the stored plan no longer passes the plan rules, or the plan types a credential the action does not have; 400 when the Login action has no login URL and neither does the website, a value is not accepted, or the plan the values make breaks a plan rule
  * @throws Anything else the password decryption, the runner, or a query rejects with
  */
 export async function performActionScriptRun(
@@ -388,27 +399,32 @@ export async function performActionScriptRun(
   options: ActionScriptRunOptions = DEFAULT_RUN_OPTIONS,
 ): Promise<ActionScriptRunWithObjects | ActionScriptRun> {
   const { website, action, script } = found;
-  const { credentialId } = action;
+  if (isLoginAction(action)) {
+    throw new ActionScriptRequestProblem(409, LOGIN_ACTION_HAS_NO_STEPS_MESSAGE);
+  }
+  const credentialId = action.credentialId;
   const actionRunsLoggedIn = credentialId !== null;
   if (actionRunsLoggedIn && !credentialEncryptionIsConfigured()) {
     throw new ActionScriptRequestProblem(503, CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE);
   }
-  const credential = actionRunsLoggedIn
-    ? await findCredentialWithPasswordForWebsite(website.id, credentialId)
-    : null;
-  if (actionRunsLoggedIn && credential === null) {
+  const credential =
+    credentialId === null ? null : await findCredentialWithPasswordForWebsite(website.id, credentialId);
+  const actionsCredentialIsGone = actionRunsLoggedIn && credential === null;
+  if (actionsCredentialIsGone) {
     throw new ActionScriptRequestProblem(409, ACTION_CREDENTIAL_MISSING_MESSAGE);
   }
-  const credentialHasNoLoginUrl =
-    credential !== null && credential.loginUrl === null && website.loginUrl === null;
-  if (credentialHasNoLoginUrl) {
-    throw new ActionScriptRequestProblem(
-      400,
-      `The credential "${credential.name}" has no login page URL, and neither does its website; add one to log in`,
-    );
+  const loginAction = await findLoginActionForWebsite(website.id);
+  const credentialHasNoLoginActionToLogInWith = credential !== null && loginAction === null;
+  if (credentialHasNoLoginActionToLogInWith) {
+    throw new ActionScriptRequestProblem(409, WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE);
+  }
+  const loginActionHasNoLoginPage =
+    credential !== null && loginAction !== null && findEffectiveLoginUrl(loginAction, website) === null;
+  if (loginActionHasNoLoginPage) {
+    throw new ActionScriptRequestProblem(400, describeLoginActionWithoutLoginPage(loginAction.title));
   }
 
-  const allowedOrigins = allowedOriginsFor(website, credential);
+  const allowedOrigins = allowedOriginsFor(website, loginAction);
   const planValidation = validateActionPlan(script.plan, allowedOrigins);
   if (!planValidation.isValid) {
     throw new ActionScriptRequestProblem(
@@ -422,9 +438,13 @@ export async function performActionScriptRun(
     throw new ActionScriptRequestProblem(409, PLAN_NEEDS_A_CREDENTIAL_MESSAGE);
   }
   const login: PlanRunLogin | null =
-    credential === null
+    loginAction === null || credential === null
       ? null
-      : { credentialName: credential.name, details: buildCrawlLoginDetails(credential, website) };
+      : {
+          loginActionTitle: loginAction.title,
+          credentialName: credential.name,
+          details: buildLoginDetails(loginAction, credential, website),
+        };
 
   const parametersView = await loadVersionParameters(website.id, action, script);
   const preparedRun = prepareParameterRun(parametersView, plan, parameterValues);
@@ -813,7 +833,7 @@ export async function readFailureScreenshotAsBase64(
  * @param source - The failed run, the version it ran, and their website and action
  * @param note - The user's hint for Claude, or null
  * @returns The new version, with its `refinement`
- * @throws {ActionScriptRequestProblem} 409 when the model that wrote the version is no longer offered
+ * @throws {ActionScriptRequestProblem} 409 when the action is a Login action (it has no steps), or the model that wrote the version is no longer offered
  * @throws {ScriptGenerationError} When Claude declined, its reply was cut off, or the reply was not a valid plan (see `refineActionPlan`)
  * @throws Anything else the screenshot read, the Anthropic API call, or a query rejects with
  */
@@ -823,6 +843,9 @@ export async function performRefinement(
   note: string | null,
 ): Promise<ActionScriptWithPlan> {
   const { website, action, script, run, failedRun, sourceModelId } = source;
+  if (isLoginAction(action)) {
+    throw new ActionScriptRequestProblem(409, LOGIN_ACTION_HAS_NO_STEPS_MESSAGE);
+  }
   const model = await findScriptModel(sourceModelId);
   if (model === null) {
     throw new ActionScriptRequestProblem(
@@ -833,8 +856,7 @@ export async function performRefinement(
   const effort = chooseRefinementEffort(model, script.effort);
   const planThatRan = await planWithRunValues(website.id, action, script, run);
 
-  const actionCredential = await findActionCredential(website, action);
-  const allowedOrigins = allowedOriginsFor(website, actionCredential);
+  const allowedOrigins = allowedOriginsFor(website, await findLoginActionForWebsite(website.id));
   const contextPages = await selectRefinementContextPages(website, script);
   const failureScreenshotPngBase64 = await readFailureScreenshotAsBase64(
     actionScriptDirectory,

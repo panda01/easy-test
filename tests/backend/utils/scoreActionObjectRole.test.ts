@@ -4,6 +4,7 @@ import {
   detectActionKind,
   detectObjectType,
   findWordMatches,
+  isLoginAction,
   isOneTypoApart,
   kindActsOnAnExistingObject,
   kindNeedsAnObjectType,
@@ -16,6 +17,7 @@ import {
   sumWordMatches,
   ACTION_KINDS,
   CREATE_WORDS,
+  LOGIN_ACTION_KIND,
   READ_WORDS,
   type ObjectTypeCandidate,
 } from "../../../server/utils/scoreActionObjectRole.js";
@@ -130,8 +132,23 @@ describe("detectActionKind", () => {
 });
 
 describe("the kind predicates", () => {
-  it("lists Parameters first, then the four object kinds", () => {
-    expect(ACTION_KINDS).toEqual(["parameters", "create", "read", "update", "delete"]);
+  it("lists Parameters first, then the four object kinds, then Login", () => {
+    expect(ACTION_KINDS).toEqual(["parameters", "create", "read", "update", "delete", "login"]);
+    expect(LOGIN_ACTION_KIND).toBe("login");
+  });
+
+  it("gives neither a Parameters nor a Login action an object type", () => {
+    expect(kindTakesAnObjectType("parameters")).toBe(false);
+    expect(kindTakesAnObjectType("login")).toBe(false);
+    expect(kindNeedsAnObjectType("login")).toBe(false);
+    expect(kindActsOnAnExistingObject("login")).toBe(false);
+  });
+
+  it("says an action is a Login action only when the user picked Login", () => {
+    expect(isLoginAction({ userActionKind: "login" })).toBe(true);
+    expect(isLoginAction({ userActionKind: "create" })).toBe(false);
+    expect(isLoginAction({ userActionKind: "parameters" })).toBe(false);
+    expect(isLoginAction({ userActionKind: null })).toBe(false);
   });
 
   it("say which kinds take, need, and act on an existing object (Delete mirrors its Create action instead)", () => {
@@ -227,6 +244,22 @@ describe("resolveActionObjectRole", () => {
     expect(role).toMatchObject({ kind: "parameters", objectTypeKey: null, objectTypeSource: null, warnings: [] });
   });
 
+  it("gives a Login action no type, even when the title names one", () => {
+    const role = resolveActionObjectRole(
+      { title: "Log in to a project", description: "", userActionKind: "login", userObjectTypeKey: "/projects/{project}" },
+      CANDIDATES,
+      [],
+    );
+    expect(role).toMatchObject({
+      kind: "login",
+      kindSource: "you",
+      objectTypeKey: null,
+      objectTypeName: null,
+      objectTypeSource: null,
+      warnings: [],
+    });
+  });
+
   it("lets a Read or Delete action go without a type, but warns a Create or Update action", () => {
     expect(resolveActionObjectRole({ title: "Open the dashboard", description: "", ...detectEverything }, CANDIDATES, []).warnings).toEqual([]);
     expect(
@@ -262,6 +295,7 @@ describe("resolveActionObjectRole", () => {
 
   it("reads only a known stored kind", () => {
     expect(readActionKind("create")).toBe("create");
+    expect(readActionKind("login")).toBe("login");
     expect(readActionKind("destroy")).toBeNull();
     expect(readActionKind(null)).toBeNull();
   });

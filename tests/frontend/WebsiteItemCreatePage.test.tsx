@@ -8,6 +8,7 @@ import {
   ITEM_KIND_TEST_CASES,
   buildCredentialRecord,
   buildJsonResponse,
+  buildLoginActionItemRecord,
   buildWebsiteItemRecord,
   buildWebsiteRecord,
   countRequests,
@@ -36,6 +37,30 @@ const WEBSITE_CREDENTIALS = [
 ];
 
 /**
+ * The website's actions, newest first, as the action list returns them: its
+ * Login action ("Sign in", which every other action logs in through) and one
+ * ordinary action.
+ */
+const WEBSITE_ACTIONS = [
+  buildWebsiteItemRecord({ id: "item-3", title: "Book a class", userActionKind: "create" }),
+  buildLoginActionItemRecord({ id: "login-action-1", title: "Sign in" }),
+];
+
+/** The website's actions before it has a Login action: the Kind select then offers Login. */
+const WEBSITE_ACTIONS_WITHOUT_LOGIN_ACTION = [
+  buildWebsiteItemRecord({ id: "item-3", title: "Book a class", userActionKind: "create" }),
+];
+
+/** The login fields an action's create request sends when it runs logged out: every one null. */
+const LOGGED_OUT_LOGIN_FIELDS = {
+  credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+};
+
+/**
  * Renders the create page on both of its real routes, keyed per kind exactly
  * as App.tsx declares them.
  * @param routerStart - The history stack to start from
@@ -61,8 +86,8 @@ function renderWebsiteItemCreatePage(routerStart: RouterStart): RenderResult {
 const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null };
 
 /**
- * Stubs a successful load of the owning website and its credentials, plus
- * any extra or replacement routes.
+ * Stubs a successful load of the owning website, its credentials, and its
+ * actions (for its Login action), plus any extra or replacement routes.
  * @param extraRoutes - More replies, e.g. for the POST
  * @returns The installed fetch stub
  */
@@ -70,6 +95,7 @@ function stubLoadedWebsite(extraRoutes: StubbedRouteTable = {}): FetchStub {
   return stubFetchRoutes({
     [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord() },
     [`GET ${CREDENTIALS_API_URL}`]: { status: 200, body: WEBSITE_CREDENTIALS },
+    [`GET ${ACTIONS_API_URL}`]: { status: 200, body: WEBSITE_ACTIONS },
     ...extraRoutes,
   });
 }
@@ -101,8 +127,9 @@ describe.each(ITEM_KIND_TEST_CASES)(
     const createPath = `${WEBSITE_PATH}/${segment}/new`;
     const itemsApiUrl = `${WEBSITE_API_URL}/${segment}`;
     const submitLabel = `Create ${singularLabel}`;
-    /** What the create request adds for this kind: an action says who it logs in as (nobody, by default). */
-    const expectedCredentialFields = segment === "actions" ? { credentialId: null, ...DETECT_EVERY_ROLE_CHOICE } : {};
+    /** What the create request adds for this kind: an action says how it logs in (logged out, by default). */
+    const expectedCredentialFields =
+      segment === "actions" ? { ...LOGGED_OUT_LOGIN_FIELDS, ...DETECT_EVERY_ROLE_CHOICE } : {};
 
     /** History as it is after clicking "New ..." on the website's page. */
     const openedFromWebsite: RouterStart = {
@@ -285,7 +312,9 @@ describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
 
     renderWebsiteItemCreatePage(openedFromWebsite);
 
-    expect(await screen.findByRole("progressbar", { name: "Loading credentials" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("progressbar", { name: "Loading credentials and login actions" }),
+    ).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("progressbar", { name: "Loading website" })).not.toBeInTheDocument();
     });
@@ -297,8 +326,29 @@ describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
     });
 
     expect(await screen.findByRole("textbox", { name: "Title" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no credential)");
-    expect(screen.queryByRole("progressbar", { name: "Loading credentials" })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no login)");
+    expect(
+      screen.queryByRole("progressbar", { name: "Loading credentials and login actions" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("waits for the website's actions (its Login action) before showing the form", async () => {
+    const pendingActions = createDeferred<Response>();
+    stubLoadedWebsite({ [`GET ${ACTIONS_API_URL}`]: () => pendingActions.promise });
+
+    renderWebsiteItemCreatePage(openedFromWebsite);
+
+    expect(
+      await screen.findByRole("progressbar", { name: "Loading credentials and login actions" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingActions.resolve(buildJsonResponse(200, WEBSITE_ACTIONS));
+      await pendingActions.promise;
+    });
+
+    expect(await screen.findByRole("combobox", { name: /^Log in as/ })).toBeInTheDocument();
   });
 
   it("shows why the credentials could not be loaded, and no form", async () => {
@@ -312,7 +362,18 @@ describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
   });
 
-  it("offers logged out and each of the website's credentials, and sends the one picked", async () => {
+  it("shows why the actions could not be loaded, and no form", async () => {
+    stubLoadedWebsite({
+      [`GET ${ACTIONS_API_URL}`]: { status: 500, body: { error: "Actions are unavailable" } },
+    });
+
+    renderWebsiteItemCreatePage(openedFromWebsite);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Actions are unavailable");
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  });
+
+  it("offers logged out and each of the website's credentials, names its Login action, and sends the one picked", async () => {
     const user = userEvent.setup();
     const fetchStub = stubLoadedWebsite({
       [`POST ${ACTIONS_API_URL}`]: { status: 201, body: buildWebsiteItemRecord({ id: "item-9" }) },
@@ -323,19 +384,28 @@ describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
     await user.click(screen.getByRole("combobox", { name: /^Log in as/ }));
     const credentialOptions = within(await screen.findByRole("listbox")).getAllByRole("option");
     expect(credentialOptions.map((credentialOption) => credentialOption.textContent)).toEqual([
-      "Logged out (no credential)",
+      "Logged out (no login)",
       "Viewer",
       "Admin",
     ]);
     await user.click(screen.getByRole("option", { name: "Admin" }));
     expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Admin");
+    expect(
+      screen.getByText('Before each run, the browser logs in as this credential with the login action "Sign in"'),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create action" }));
 
     await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
     expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: "credential-1", ...DETECT_EVERY_ROLE_CHOICE }),
+      body: JSON.stringify({
+        title: "Log in",
+        description: "Sign in",
+        ...LOGGED_OUT_LOGIN_FIELDS,
+        credentialId: "credential-1",
+        ...DETECT_EVERY_ROLE_CHOICE,
+      }),
     });
   });
 
@@ -348,14 +418,109 @@ describe("WebsiteItemCreatePage ('actions'): Log in as", () => {
     await fillForm(user);
 
     await pickFromSelect(user, /^Log in as/, "Viewer");
-    await pickFromSelect(user, /^Log in as/, "Logged out (no credential)");
+    await pickFromSelect(user, /^Log in as/, "Logged out (no login)");
     await user.click(screen.getByRole("button", { name: "Create action" }));
 
     await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
     expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Log in", description: "Sign in", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE }),
+      body: JSON.stringify({ title: "Log in", description: "Sign in", ...LOGGED_OUT_LOGIN_FIELDS, ...DETECT_EVERY_ROLE_CHOICE }),
+    });
+  });
+
+  it("does not offer a second Login kind while the website already has its Login action", async () => {
+    const user = userEvent.setup();
+    stubLoadedWebsite();
+    renderWebsiteItemCreatePage(openedFromWebsite);
+    await fillForm(user);
+
+    await user.click(screen.getByRole("combobox", { name: /^Kind/ }));
+    expect(
+      await screen.findByRole("option", { name: 'Login (this website already has one: "Sign in")' }),
+    ).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("WebsiteItemCreatePage ('actions'): a Login action", () => {
+  /** History as it is after clicking "New action" on the website's page. */
+  const openedFromWebsite: RouterStart = {
+    initialEntries: [WEBSITE_PATH, { pathname: ACTION_CREATE_PATH, state: { returnTo: WEBSITE_PATH } }],
+  };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("starts the login page URL blank, offering the website's login page, and POSTs no credential", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedWebsite({
+      [`GET ${ACTIONS_API_URL}`]: { status: 200, body: WEBSITE_ACTIONS_WITHOUT_LOGIN_ACTION },
+      [`POST ${ACTIONS_API_URL}`]: { status: 201, body: buildLoginActionItemRecord({ id: "item-9" }) },
+    });
+    renderWebsiteItemCreatePage(openedFromWebsite);
+    await fillForm(user);
+
+    await pickFromSelect(user, /^Kind/, "Login");
+    const loginUrlField = screen.getByLabelText(/^Login page URL/);
+    expect(loginUrlField).toHaveValue("");
+    expect(loginUrlField).not.toBeRequired();
+    expect(loginUrlField).toHaveAttribute("placeholder", "https://example.com/login");
+    expect(loginUrlField).toHaveAccessibleDescription(
+      "Leave blank to use the website's login page (https://example.com/login)",
+    );
+    // The Login action logs in as whichever credential is picked elsewhere: it has none of its own.
+    expect(screen.queryByRole("combobox", { name: /^Log in as/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create action" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Create action" }));
+
+    await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
+    expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Log in",
+        description: "Sign in",
+        ...LOGGED_OUT_LOGIN_FIELDS,
+        ...DETECT_EVERY_ROLE_CHOICE,
+        userActionKind: "login",
+      }),
+    });
+  });
+
+  it("requires a login page URL when the website has none, and POSTs the typed one", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedWebsite({
+      [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
+      [`GET ${ACTIONS_API_URL}`]: { status: 200, body: WEBSITE_ACTIONS_WITHOUT_LOGIN_ACTION },
+      [`POST ${ACTIONS_API_URL}`]: { status: 201, body: buildLoginActionItemRecord({ id: "item-9" }) },
+    });
+    renderWebsiteItemCreatePage(openedFromWebsite);
+    await fillForm(user);
+
+    await pickFromSelect(user, /^Kind/, "Login");
+    const loginUrlField = screen.getByLabelText(/^Login page URL/);
+    expect(loginUrlField).toBeRequired();
+    expect(loginUrlField).toHaveAccessibleDescription(
+      "This website has no login page URL yet - enter it here (a successful crawl login will also save it to the website)",
+    );
+    expect(screen.getByRole("button", { name: "Create action" })).toBeDisabled();
+    await user.click(loginUrlField);
+    await user.paste("https://example.com/sign-in");
+    await user.click(screen.getByRole("button", { name: "Create action" }));
+
+    await readProbeAfterLanding(`${WEBSITE_PATH}/actions/item-9`);
+    expect(fetchStub).toHaveBeenCalledWith(ACTIONS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Log in",
+        description: "Sign in",
+        ...LOGGED_OUT_LOGIN_FIELDS,
+        loginUrl: "https://example.com/sign-in",
+        ...DETECT_EVERY_ROLE_CHOICE,
+        userActionKind: "login",
+      }),
     });
   });
 });
@@ -365,15 +530,19 @@ describe("WebsiteItemCreatePage ('use-cases'): no credential", () => {
     vi.restoreAllMocks();
   });
 
-  it("neither fetches credentials nor asks who to log in as", async () => {
+  it("neither fetches credentials or the Login action nor asks how to log in", async () => {
     const fetchStub = stubLoadedWebsite();
 
     renderWebsiteItemCreatePage({ initialEntries: [`${WEBSITE_PATH}/use-cases/new`] });
 
     expect(await screen.findByRole("textbox", { name: "Title" })).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: /^Log in as/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("progressbar", { name: "Loading credentials" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Login page URL/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("progressbar", { name: "Loading credentials and login actions" }),
+    ).not.toBeInTheDocument();
     expect(countRequests(fetchStub, "GET", CREDENTIALS_API_URL)).toBe(0);
+    expect(countRequests(fetchStub, "GET", ACTIONS_API_URL)).toBe(0);
   });
 });
 

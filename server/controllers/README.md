@@ -5,9 +5,10 @@ Route registrars. One file per API section.
 | File | Routes |
 |---|---|
 | `health.ts` | `GET /api/health` |
-| `websites.ts` | `GET`/`POST /api/websites`, `GET`/`PUT`/`DELETE /api/websites/:websiteId`. The list answers each website with the dashboard's `summary: { actionCount, passedActionCount, failedActionCount, notRunActionCount, latestRunAt, latestCrawlRun }` |
+| `websites.ts` | `GET`/`POST /api/websites`, `GET`/`PUT`/`DELETE /api/websites/:websiteId`, `POST /api/websites/:websiteId/login-check`. The list answers each website with the dashboard's `summary: { actionCount, passedActionCount, failedActionCount, notRunActionCount, latestRunAt, latestCrawlRun }`. POST (create) waits for the login-form check (see below) and answers the website plus `loginCheck` |
 | `useCases.ts` | `GET`/`POST /api/websites/:websiteId/use-cases`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/use-cases/:useCaseId` |
-| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, credentialId, userActionKind, userObjectTypeKey, userNameParameterKey }`; the credential must be one of the website's; each role choice null / left out means "detect"). The list answers each action with `newestScript: { id, versionNumber, actionTitle, actionDescription, credentialId, latestRun }` (or null when it has no versions) for its status, version, and "Out of date" tag, and every action (list and single) with its cleanup links `deleteAction` / `createActions` (read from the website's `ActionCleanup` rows in one query). A single action (GET, POST, PUT) also carries `objectRole`: its kind (`parameters` / `create` / `read` / `update` / `delete`) and object type, with the detections and how sure they are (see `../utils/scoreActionObjectRole.ts`). A PUT syncs the action's parameters. `POST .../actions/:actionId/delete-action/proposal` asks Claude for the Delete action that cleans up after a Create action (`{ title, description, modelId }`, nothing saved; 409 for a non-Create or already linked action); `POST .../actions/:actionId/delete-action` (body `{ title, description }`) creates it with `userActionKind: "delete"`, the Create action's credential and resolved type, links the two, and syncs it |
+| `actions.ts` | `GET`/`POST /api/websites/:websiteId/actions`, `GET`/`PUT`/`DELETE /api/websites/:websiteId/actions/:actionId` (body `{ title, description, userActionKind, userObjectTypeKey, userNameParameterKey, credentialId, loginUrl, usernameSelector, passwordSelector, submitSelector }`; each role choice null / left out means "detect". The **Login** action - at most one per website: a second answers `409 This website already has a login action: "<title>"` - needs a login page (its own `loginUrl` or the website's), may have the three selectors, and has no credential; any other action may only name one of the website's credentials as the one it runs as (`credentialId`). Deleting the Login action, or changing its kind, is allowed: the others keep their credentials). Every action carries `credential: { id, name }` (the credential it runs as) or null. The list answers each action with `newestScript: { id, versionNumber, actionTitle, actionDescription, credentialId, latestRun }` (or null when it has no versions) for its status, version, and "Out of date" tag, and every action (list and single) with its cleanup links `deleteAction` / `createActions` (read from the website's `ActionCleanup` rows in one query). A single action (GET, POST, PUT) also carries `objectRole`: its kind (`parameters` / `create` / `read` / `update` / `delete` / `login`) and object type, with the detections and how sure they are (see `../utils/scoreActionObjectRole.ts`). A PUT syncs the action's parameters. `POST .../actions/:actionId/delete-action/proposal` asks Claude for the Delete action that cleans up after a Create action (`{ title, description, modelId }`, nothing saved; 409 for a non-Create or already linked action); `POST .../actions/:actionId/delete-action` (body `{ title, description }`) creates it with `userActionKind: "delete"`, the Create action's Login action and resolved type, links the two, and syncs it. Deleting a Login action unlinks the actions that log in with it |
+| `loginRuns.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/login-runs` and `GET .../login-runs/:loginRunId/screenshot`: a Login action's "Run login" (see below) |
 | `playwright.ts` | `GET`/`POST /api/websites/:websiteId/screenshot-runs`, `GET /api/websites/:websiteId/screenshot-runs/:screenshotRunId/screenshot` |
 | `actionScripts.ts` | `GET`/`POST /api/websites/:websiteId/actions/:actionId/scripts`, `POST .../scripts/:actionScriptId/edits`, `GET`/`POST .../scripts/:actionScriptId/runs`, `GET .../runs/:actionScriptRunId` (one run for the run page, with its `screenshots`), `GET .../runs/:actionScriptRunId/failure-screenshot`, `GET .../runs/:actionScriptRunId/screenshots/:screenshotId`, `POST .../runs/:actionScriptRunId/refinements` (body `{ note }`, optional). Every version answered carries `latestRun` (`{ id, succeeded, failedStepNumber, timedOut, createdAt }` of its newest run, or null). A run takes an optional body `{ parameterValues, cleanUpAfterwards }` (values by parameter key - see below; the flag defaults to true) and answers with the run plus `createdObject`, `deletedObjects`, `cleanupRun` (the Delete action's run that cleaned up after a Create run) and `cleanedUpRun`; a Create run whose cleanup failed or could not start (no Delete action, or no version of it) is recorded as failed, and refining such a run is refused (409) in favour of the Delete action's run. Convert also converts a Create action's linked Delete action when it has no version yet (answered as `deleteActionScript`, with `deleteActionConversionError` when that second call failed). Convert, edit, and refine sync the action's parameters afterwards, and refine puts the failed run's values back into the plan it sends |
 | `autoRefineJobs.ts` | `POST /api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/auto-refine-jobs` (body `{ parameterValues }`, optional; answers `201` at once with the running job), `GET /api/websites/:websiteId/actions/:actionId/auto-refine-jobs` (newest first), `GET .../auto-refine-jobs/:autoRefineJobId` (polled while the job runs), `POST .../auto-refine-jobs/:autoRefineJobId/stop`. The shared website / action / script lookups these routes and the action script routes both use live in `actionLookups.ts` |
@@ -128,7 +129,7 @@ running lives in `../services/actionPlanRunnerService.ts`.
   `null`. It drives the versions list's pass / fail / not run icon. The JSON
   never carries a `runs` list; the runs themselves come from `GET .../runs`.
 - **The allowed origins** of a plan are the website URL's and the login
-  URLs' (the website's and the action credential's), from
+  URLs' (the website's and its Login action's), from
   `buildAllowedPlanOrigins`. A plan's `startUrl` and every `goto` must stay
   on them - checked when Claude answers, when an edit is saved, and again
   before every run.
@@ -164,9 +165,13 @@ running lives in `../services/actionPlanRunnerService.ts`.
   the screenshot POST, so the run reaches the client. Before running:
   - `409` when this action already has a run in progress (a module `Set`,
     claimed before the first await - one visible browser per action);
-  - with a credential: `503` when `CREDENTIAL_ENCRYPTION_KEY` is not
-    configured, `409` when the credential is gone, `400` when neither it nor
-    the website has a login page URL;
+  - `409` for a Login action (it has no steps - `POST .../scripts` and
+    refine answer the same);
+  - for an action that runs as a credential: `503` when
+    `CREDENTIAL_ENCRYPTION_KEY` is not configured, `409` when that
+    credential no longer exists (`ACTION_CREDENTIAL_MISSING_MESSAGE`) or the
+    website has no Login action (`WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE`), `400` when
+    neither the Login action nor the website has a login page URL;
   - `409` when the stored plan no longer passes the rules (e.g. the website
     URL changed), or types a credential placeholder while the action runs
     logged out.
@@ -250,14 +255,15 @@ resolved at boot): a failed login's screenshot is written there.
 - **`POST .../crawl-runs` answers `201` at once** with the new run
   (`status: "running"`); the crawl carries on in the background (up to 50
   pages and 10 minutes). The body is optional: `{ credentialId }` crawls
-  logged in as one of the website's credentials, while no body, `{}`, or
-  `credentialId: null` crawls logged out; `buttonMode` (`linksOnly` -
-  the default, `allButRisky`, or `openOnly`) picks which buttons the crawl
-  clicks, and an unknown mode answers `400`. A credential with no login page
-  URL of its own on a website that has none answers `400` "This credential
-  has no login page URL, and neither does the website". `400` for a `credentialId` that is
+  logged in as one of the website's credentials, through the website's
+  Login action, while no body, `{}`, or `credentialId: null` crawls logged
+  out; `buttonMode` (`linksOnly` - the default, `allButRisky`, or
+  `openOnly`) picks which buttons the crawl clicks, and an unknown mode
+  answers `400`. A Login action with no login page URL of its own on a
+  website that has none answers `400`. `400` for a `credentialId` that is
   not a non-blank string, `404 "Credential not found"` for one that is not
-  the website's (or was deleted), `503` when a credential was chosen but
+  one of the website's credentials (or was deleted), `409` when the website
+  has no Login action, `503` when one was chosen but
   `CREDENTIAL_ENCRYPTION_KEY` is not configured. A second POST while a crawl
   of the same website is running answers `409 "A crawl is already running
   for this website"` and starts nothing. `500` when the run cannot be created
@@ -265,15 +271,15 @@ resolved at boot): a failed login's screenshot is written there.
 - **Logged-in crawls log in first.** The crawler records no page until the
   login worked, then sets the run's `isLoggedIn: true` - so every page of a
   run with `isLoggedIn: true` was viewed logged in. A failed login ends the
-  run `failed` with `Login as "<name>" failed: <reason>` and no pages, and
+  run `failed` with `Login with "<login action>" as "<name>" failed: <reason>` and no pages, and
   the crawler screenshots what the browser showed at that moment:
   `loginFailureScreenshotFileName` (`<websiteId>/<uuid>.png`, relative to the
   screenshot directory) is set on the run, and
   **`GET .../crawl-runs/:crawlRunId/login-failure-screenshot`** serves the PNG
   (sent with `root` = the screenshot directory, so a stored name cannot climb
   out of it; `404` when the run has none or the file is gone). Every run read
-  carries `credentialId`, `isLoggedIn`, `loginFailureScreenshotFileName`, and
-  `credential: { id, name }` (null for a logged-out crawl).
+  carries `credentialId`, `isLoggedIn`, `loginFailureScreenshotFileName`,
+  and `credential: { id, name }` (null for a logged-out crawl).
 - **`GET .../crawl-runs/:crawlRunId`** answers the run plus `pages`: its page
   summaries in visiting order (the tree, via `parentPageId`) **without** each
   page's `ariaSnapshot` and `linkedUrls`, because the UI polls it every 2
@@ -358,9 +364,9 @@ the action script routes, because both controllers share
 
 ## The credentials controller (`credentials.ts`)
 
-A credential is a username and password for one website, used to crawl it
-logged in. CRUD like use cases (website checked first, soft deletes), with
-these differences:
+A credential is a username and password for one website - an account that
+actions and crawls run as, typed by the website's Login action. CRUD like use cases (website checked first, soft
+deletes), with these differences:
 
 - **The password goes in, never out.** POST and PUT take `password`; it is
   encrypted with `CREDENTIAL_ENCRYPTION_KEY` (`../utils/credentialEncryption.ts`)
@@ -373,11 +379,51 @@ these differences:
   password) and `CREDENTIAL_ENCRYPTION_KEY` is missing or not 32 bytes of
   base64. Listing, reading, deleting, and a PUT that keeps the password work
   without the key.
-- **The login page URL is inherited.** A credential's `loginUrl` is an
-  optional override; null/blank uses the website's `loginUrl`. POST and PUT
-  answer `400` "A login page URL is required - this website doesn't have one
-  yet" only when neither the body nor the website has one.
+- **No login page or selectors.** Where and how it logs in belongs to the
+  website's Login action (see `actions.ts`). Deleting a credential unlinks
+  it from the actions that run as it, which then run logged out.
 - **Body rules:** see `../utils/README.md`.
+
+## The login runs controller (`loginRuns.ts`)
+
+"Run login" on the LOGIN action (the one with `userActionKind: "login"`): it
+has no steps, so this is how it is tested on its own, as a credential picked
+for that run.
+
+- **`POST .../login-runs` answers `201` for a failed login too**, like a
+  plan run, with the recorded `LoginRun`. The body is `{ credentialId }`
+  (required; `400` when missing, or when it is not one of the website's
+  credentials). `409` when the action is not a Login action or is already
+  running (the same one-run-per-action claim plan runs take); `400` when
+  neither it nor the website has a login page URL; `503` when
+  `CREDENTIAL_ENCRYPTION_KEY` is not configured. The work is
+  `performLoginRun` (`../services/loginRunService.ts`): a headless browser
+  logs in with `logInWithCredential` and takes ONE screenshot, into its own
+  run folder under the action script directory.
+- **`GET .../login-runs`** lists the action's login runs, newest first.
+- **`GET .../login-runs/:loginRunId/screenshot`** serves the run's PNG
+  (`logged-in.png` or `failure.png`), with `root` = the action script
+  directory; `404` when the run has none or the file is gone.
+
+## The login-form check (`websites.ts`)
+
+A website gets its Login action by itself when it has a login form:
+
+- **`POST /api/websites` waits for the check** after creating the website
+  (`checkWebsiteForLoginForm` in `../services/loginFormCheckService.ts`, at
+  most about 20 s): a headless browser looks for a visible password field
+  on the website's login page URL (or its URL), following one "Log in" /
+  "Sign in" link when that page has none. On a find it makes the "Log in"
+  Login action and the website learns the form's page. The answer is the
+  website as it is after the check, plus `loginCheck: { outcome, loginUrl,
+  loginActionId, message }` (`found` / `notFound` / `failed`). A check that
+  fails - the site did not load, the browser could not start, it ran out of
+  time, or a query threw - is a `failed` `loginCheck`, never a failed
+  create.
+- **`POST /api/websites/:websiteId/login-check`** runs the same check on
+  demand ("Look for a login form" on the Credentials tab): `200` with
+  `{ loginCheck }`, `404` for a missing website, `409` when the website
+  already has its Login action.
 
 ## The script models controller (`scriptModels.ts`)
 

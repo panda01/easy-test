@@ -11,7 +11,7 @@ import CrawlRunsSection, {
   CRAWL_LOGGED_OUT_VALUE,
   DEFAULT_CRAWL_BUTTON_MODE,
 } from "../components/CrawlRunsSection";
-import CredentialsSection from "../components/CredentialsSection";
+import CredentialsSection, { type CredentialsLoginAction } from "../components/CredentialsSection";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import MoreActionsMenu from "../components/MoreActionsMenu";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
@@ -29,18 +29,21 @@ import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
 import { useReturnNavigation, useReturnToHereState } from "../hooks/useReturnNavigation";
 import { type ScreenshotRunRecord, useScreenshotRuns } from "../hooks/useScreenshotRuns";
 import { useWebsiteItems } from "../hooks/useWebsiteItems";
-import { useWebsite } from "../hooks/useWebsites";
+import { type LoginCheckRecord, useWebsite } from "../hooks/useWebsites";
 import { MONOSPACE_FONT_FAMILY, nocturneTokens, statusColors } from "../theme/nocturneTheme";
 import { formatCount } from "../utils/formatCount";
 import { formatFullDateTime, formatRelativeTime } from "../utils/formatRelativeTime";
 import {
+  LOGIN_FORM_FOUND_QUERY_PARAMETER,
   WEBSITE_LIST_PATH,
   crawlRunDetailPath,
   crawlRunsApiUrl,
   screenshotRunsApiUrl,
   websiteApiUrl,
   websiteEditPath,
+  websiteLoginCheckApiUrl,
 } from "../utils/routePaths";
+import { LOGIN_ACTION_KIND } from "../utils/actionParameters";
 import { ACTION_KIND, USE_CASE_KIND } from "../utils/websiteItemKinds";
 
 /** The query parameter naming the open tab. */
@@ -62,7 +65,7 @@ const TAB_LABELS: Record<WebsiteTab, string> = {
 /**
  * Picks the open tab from the query string: the requested one when this
  * layout offers it, otherwise the layout's first tab (an old link, a tab the
- * other layout has, or Credentials on a site that cannot log in).
+ * other layout has).
  * @param requestedTab - The `?tab=` value, or null
  * @param availableTabs - The tabs this layout shows, in order
  * @returns The tab to show
@@ -116,17 +119,22 @@ function formatLoginPage(loginUrl: string, websiteUrl: string): string {
  * History. While a crawl runs, the crawl list is re-fetched (see
  * `useCrawlRuns`) so its progress card counts pages live.
  *
- * The login features - the Credentials tab and the "Crawl as" picker - show
- * only when the website or one of its credentials has a login page URL.
- * Otherwise nothing can log in, so both are hidden and every crawl is logged
- * out.
+ * Logging in:
+ * - the Credentials tab always shows: how the website logs in (its Login
+ *   action, or **Look for a login form** - which POSTs the login-form check
+ *   and, when it made the Login action, reloads the website and its
+ *   actions), and its credentials. Right after website create found a login
+ *   form (`?loginForm=found`), it says so;
+ * - the "Crawl as" picker shows when the website has a credential AND a
+ *   Login action (the only way a crawl logs in). Otherwise every crawl is
+ *   logged out.
  *
  * The page fetches the website, both item lists, the screenshot runs, the
  * crawl runs, AND the credentials itself (rather than letting each section
  * fetch), so the delete dialog can say exactly how many of each will be
- * deleted along with the website, the login features can be shown or hidden
- * by the credentials' login page URLs, and the crawl tab can offer the same
- * credentials the Credentials tab lists.
+ * deleted along with the website, the "Crawl as" picker can be shown or
+ * hidden, and the crawl tab can offer the same credentials the Credentials
+ * tab lists.
  *
  * After a delete it returns to the dashboard history-aware (see
  * `useReturnNavigation`); a later Forward onto this deleted website shows the
@@ -167,20 +175,35 @@ export default function WebsiteDetailPage(): ReactElement {
     errorMessage: crawlStartErrorMessage,
   } = useJsonMutation();
   const [selectedCredentialId, setSelectedCredentialId] = useState(CRAWL_LOGGED_OUT_VALUE);
+  const {
+    sendJsonRequest: sendLoginCheckRequest,
+    isSubmitting: loginCheckIsInFlight,
+    errorMessage: loginCheckErrorMessage,
+  } = useJsonMutation();
+  const [lastLoginCheck, setLastLoginCheck] = useState<LoginCheckRecord | null>(null);
   const [selectedButtonMode, setSelectedButtonMode] =
     useState<CrawlButtonModeRecord>(DEFAULT_CRAWL_BUTTON_MODE);
 
   const websiteLoginUrl = website?.loginUrl ?? null;
-  const websiteRequiresLogin = websiteLoginUrl !== null;
-  const aCredentialHasItsOwnLoginUrl = credentials.some(
-    (credential) => credential.loginUrl !== null,
-  );
-  const loginFeaturesAreShown = websiteRequiresLogin || aCredentialHasItsOwnLoginUrl;
+  const websiteHasALoginPage = websiteLoginUrl !== null;
+  const loginActionRecord =
+    actionsResource.data?.find((action) => action.userActionKind === LOGIN_ACTION_KIND) ?? null;
+  const loginAction: CredentialsLoginAction | null =
+    loginActionRecord === null
+      ? null
+      : {
+          id: loginActionRecord.id,
+          title: loginActionRecord.title,
+          loginUrl: loginActionRecord.loginUrl ?? websiteLoginUrl,
+        };
+  const websiteHasALoginAction = loginAction !== null;
+  const websiteHasACredential = credentials.length > 0;
+  const crawlAsPickerIsShown = websiteHasACredential && websiteHasALoginAction;
+  const loginFormWasJustFound = searchParams.get(LOGIN_FORM_FOUND_QUERY_PARAMETER) === "found";
 
-  const credentialsTabs: WebsiteTab[] = loginFeaturesAreShown ? ["credentials"] : [];
-  const panelTabs: WebsiteTab[] = ["crawls", "objects", "screenshots", ...credentialsTabs];
+  const panelTabs: WebsiteTab[] = ["crawls", "objects", "screenshots", "credentials"];
   const availableTabs: WebsiteTab[] = isPhoneLayout
-    ? ["actions", "crawls", "objects", "use-cases", "screenshots", ...credentialsTabs]
+    ? ["actions", "crawls", "objects", "use-cases", "screenshots", "credentials"]
     : panelTabs;
   const openTab = chooseOpenTab(searchParams.get(TAB_QUERY_PARAMETER), availableTabs);
 
@@ -240,8 +263,8 @@ export default function WebsiteDetailPage(): ReactElement {
 
   /**
    * POSTs a new crawl run for this website - with the credential picked in
-   * "Crawl as", or `credentialId: null` to crawl logged out (always, while the
-   * login features are hidden) and the `buttonMode` picked in "Buttons" -
+   * "Crawl as", or `credentialId: null` to crawl logged out (always, while
+   * that picker is hidden) and the `buttonMode` picked in "Buttons" -
    * and, when the server started it, opens the run's own page to watch it. A
    * refused start (e.g. a crawl is already running) shows the error alert in
    * the Crawls tab.
@@ -249,7 +272,7 @@ export default function WebsiteDetailPage(): ReactElement {
    */
   const startCrawl = async (): Promise<void> => {
     const loggedOutIsPicked = selectedCredentialId === CRAWL_LOGGED_OUT_VALUE;
-    const crawlIsLoggedOut = loggedOutIsPicked || !loginFeaturesAreShown;
+    const crawlIsLoggedOut = loggedOutIsPicked || !crawlAsPickerIsShown;
     const credentialId = crawlIsLoggedOut ? null : selectedCredentialId;
     const result = await sendCrawlRequest("POST", crawlRunsApiUrl(websiteId), {
       credentialId,
@@ -267,6 +290,34 @@ export default function WebsiteDetailPage(): ReactElement {
    */
   const handleCrawlClick = (): void => {
     void startCrawl();
+  };
+
+  /**
+   * POSTs the login-form check ("Look for a login form") and keeps what it
+   * found. When it made the website's Login action, the website (which may
+   * have learned its login page) and the action list are reloaded, so the
+   * tab moves on to asking for credentials.
+   * @returns Resolves once the request (and any reload) is done
+   */
+  const lookForLoginForm = async (): Promise<void> => {
+    setLastLoginCheck(null);
+    const result = await sendLoginCheckRequest("POST", websiteLoginCheckApiUrl(websiteId));
+    if (!result.succeeded) return;
+    const { loginCheck } = result.data as { loginCheck: LoginCheckRecord };
+    setLastLoginCheck(loginCheck);
+    const loginActionWasMade = loginCheck.outcome === "found";
+    if (loginActionWasMade) {
+      websiteResource.reload();
+      actionsResource.reload();
+    }
+  };
+
+  /**
+   * Starts the login-form check without returning its promise, because a
+   * button's `onClick` expects a plain void callback.
+   */
+  const handleLookForLoginForm = (): void => {
+    void lookForLoginForm();
   };
 
   /** Opens the delete confirmation dialog. */
@@ -374,7 +425,7 @@ export default function WebsiteDetailPage(): ReactElement {
         isStartingCrawl={crawlStartIsInFlight}
         startCrawlErrorMessage={crawlStartErrorMessage}
         onCrawlClick={handleCrawlClick}
-        crawlAsPickerIsShown={loginFeaturesAreShown}
+        crawlAsPickerIsShown={crawlAsPickerIsShown}
         credentials={credentials}
         selectedCredentialId={selectedCredentialId}
         onSelectedCredentialChange={setSelectedCredentialId}
@@ -404,6 +455,13 @@ export default function WebsiteDetailPage(): ReactElement {
         websiteId={website.id}
         credentialsResource={credentialsResource}
         returnToHereState={returnToHereState}
+        loginAction={loginAction}
+        loginActionIsKnown={actionsResource.data !== null}
+        loginFormWasJustFound={loginFormWasJustFound}
+        isCheckingForLoginForm={loginCheckIsInFlight}
+        loginCheckErrorMessage={loginCheckErrorMessage}
+        lastLoginCheck={lastLoginCheck}
+        onLookForLoginForm={handleLookForLoginForm}
       />
     ),
   };
@@ -426,9 +484,11 @@ export default function WebsiteDetailPage(): ReactElement {
     </Box>
   );
 
-  const loginPageText = websiteRequiresLogin
+  const loginPageText = websiteHasALoginPage
     ? `Login page ${formatLoginPage(websiteLoginUrl, website.url)}`
-    : "Doesn't require login";
+    : websiteHasALoginAction
+      ? "No default login page"
+      : "Doesn't require login";
 
   return (
     <PageContainer>

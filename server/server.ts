@@ -24,6 +24,7 @@ import { registerCredentialRoutes } from "./controllers/credentials.js";
 import { registerWebObjectRoutes } from "./controllers/webObjects.js";
 import { registerActionParameterRoutes } from "./controllers/actionParameters.js";
 import { registerCreatedObjectRoutes } from "./controllers/createdObjects.js";
+import { registerLoginRunRoutes } from "./controllers/loginRuns.js";
 import { markUnfinishedCrawlRunsInterrupted } from "./services/crawlRunService.js";
 import { markUnfinishedAutoRefineJobsInterrupted } from "./services/autoRefineService.js";
 
@@ -81,6 +82,7 @@ registerCredentialRoutes(app);
 registerWebObjectRoutes(app);
 registerActionParameterRoutes(app);
 registerCreatedObjectRoutes(app);
+registerLoginRunRoutes(app, ACTION_SCRIPT_DIRECTORY);
 
 // Production only, and after every route so the API always wins: any other
 // page load answers index.html, so react-router can render a client route.

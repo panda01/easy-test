@@ -2,10 +2,14 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { userEvent, type UserEvent } from "@testing-library/user-event";
 import TitleDescriptionForm, {
-  type CredentialOption,
+  describeLogInAsHelp,
+  describeLoginPageHelp,
+  type LoginActionOption,
+  type LoginChoices,
   type TitleDescriptionFormProps,
 } from "../../src/components/TitleDescriptionForm";
 import { type WebsiteItemRequestBody } from "../../src/hooks/useWebsiteItems";
+import { ACTION_KIND_HELP } from "../../src/utils/actionObjectRole";
 import { buildActionObjectRoleRecord } from "./support/frontendTestHelpers";
 
 /**
@@ -37,23 +41,75 @@ function renderTitleDescriptionForm(overrides: Partial<TitleDescriptionFormProps
   return { onSubmit, onCancel, formElement };
 }
 
-/** Two credentials the "Log in as" select can offer. */
-const CREDENTIAL_OPTIONS: CredentialOption[] = [
-  { id: "credential-2", name: "Viewer" },
-  { id: "credential-1", name: "Admin" },
-];
+/** The website's login page, which a Login action with none of its own uses. */
+const WEBSITE_LOGIN_URL = "https://example.com/login";
+
+/** The website's one Login action, as the form names it. */
+const WEBSITE_LOGIN_ACTION: LoginActionOption = { id: "login-action-1", title: "Sign in" };
+
+/**
+ * What the login fields offer by default: two credentials (for any other
+ * action's "Log in as"), the website's Login action (which those actions log
+ * in through), and the website's login page.
+ */
+const LOGIN_CHOICES: LoginChoices = {
+  credentials: [
+    { id: "credential-2", name: "Viewer" },
+    { id: "credential-1", name: "Admin" },
+  ],
+  loginAction: WEBSITE_LOGIN_ACTION,
+  websiteLoginUrl: WEBSITE_LOGIN_URL,
+};
+
+/**
+ * The same choices for a website without a Login action yet - as on the
+ * page creating its Login action, or editing it (the page leaves the edited
+ * action out), where the Kind select still offers Login.
+ */
+const LOGIN_CHOICES_WITHOUT_LOGIN_ACTION: LoginChoices = { ...LOGIN_CHOICES, loginAction: null };
 
 /** A filled-in title and description, so submit is enabled. */
 const FILLED_VALUES = { title: "Log in", description: "Sign in" };
 
+/** The login fields a submit sends for an action that runs logged out: every one null. */
+const LOGGED_OUT_LOGIN_FIELDS = {
+  credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+};
+
+/** What an action form sends for its object role when every choice is left on "Detect". */
+const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null };
+
 /**
- * Picks an option from the "Log in as" select.
+ * Picks an option from one of the form's selects.
  * @param user - The user-event session
+ * @param selectName - The select's label
  * @param optionName - The option's text
  */
-async function pickCredential(user: UserEvent, optionName: string): Promise<void> {
-  await user.click(screen.getByRole("combobox", { name: /^Log in as/ }));
+async function pickOption(user: UserEvent, selectName: RegExp, optionName: string | RegExp): Promise<void> {
+  await user.click(screen.getByRole("combobox", { name: selectName }));
   await user.click(await screen.findByRole("option", { name: optionName }));
+}
+
+/**
+ * Picks an option from any other action's "Log in as" select.
+ * @param user - The user-event session
+ * @param optionName - The option's text: a credential's name, or "Logged out (no login)"
+ */
+async function pickCredential(user: UserEvent, optionName: string): Promise<void> {
+  await pickOption(user, /^Log in as/, optionName);
+}
+
+/**
+ * Finds a text field by its label, ignoring the required-field asterisk.
+ * @param label - The field's label, e.g. "Login page URL"
+ * @returns The field's input
+ */
+function getField(label: string): HTMLElement {
+  return screen.getByLabelText(new RegExp(`^${label}\\W*$`));
 }
 
 /**
@@ -172,56 +228,90 @@ describe("TitleDescriptionForm", () => {
     expect(within(submitButton).queryByTestId("AddIcon")).not.toBeInTheDocument();
   });
 
-  it("asks who to log in as only when given credential options, and leaves credentialId out otherwise", async () => {
+  it("asks how to log in only when given login choices, and leaves the login fields out otherwise", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderTitleDescriptionForm({ initialValues: FILLED_VALUES });
 
     expect(screen.queryByRole("combobox", { name: /^Log in as/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Login page URL/)).not.toBeInTheDocument();
     await user.click(getSubmitButton());
 
     expect(onSubmit).toHaveBeenCalledWith({ title: "Log in", description: "Sign in" });
     expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("credentialId");
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("loginUrl");
   });
 
-  it("starts logged out, offers each credential, and explains when the credential is used", async () => {
+  it("starts logged out, offers each credential, and explains what the pick does", async () => {
     const user = userEvent.setup();
-    renderTitleDescriptionForm({ initialValues: FILLED_VALUES, credentialOptions: CREDENTIAL_OPTIONS });
+    renderTitleDescriptionForm({ initialValues: FILLED_VALUES, loginChoices: LOGIN_CHOICES });
 
     const credentialSelect = screen.getByRole("combobox", { name: /^Log in as/ });
-    expect(credentialSelect).toHaveTextContent("Logged out (no credential)");
-    expect(screen.getByText("Before each run, the browser logs in as this credential first")).toBeInTheDocument();
+    expect(credentialSelect).toHaveTextContent("Logged out (no login)");
+    expect(screen.getByText("Each run starts logged out")).toBeInTheDocument();
+    // An action that is not the Login action has none of the Login action's own fields.
+    expect(screen.queryByLabelText(/^Login page URL/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Login form selectors (optional)" })).not.toBeInTheDocument();
 
     await user.click(credentialSelect);
     const options = within(await screen.findByRole("listbox")).getAllByRole("option");
-    expect(options.map((option) => option.textContent)).toEqual(["Logged out (no credential)", "Viewer", "Admin"]);
+    expect(options.map((option) => option.textContent)).toEqual(["Logged out (no login)", "Viewer", "Admin"]);
+    await user.click(screen.getByRole("option", { name: "Admin" }));
+    expect(
+      screen.getByText('Before each run, the browser logs in as this credential with the login action "Sign in"'),
+    ).toBeInTheDocument();
   });
 
-  it("submits null for logged out when the website has no credentials", async () => {
+  it("submits logged out when the website has no credentials, saying how to add one", async () => {
     const user = userEvent.setup();
-    const { onSubmit } = renderTitleDescriptionForm({ initialValues: FILLED_VALUES, credentialOptions: [] });
+    const { onSubmit } = renderTitleDescriptionForm({
+      initialValues: FILLED_VALUES,
+      loginChoices: { ...LOGIN_CHOICES, credentials: [] },
+    });
 
-    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no credential)");
+    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no login)");
+    expect(
+      screen.getByText("This website has no credentials yet - add one on its Credentials tab to run logged in"),
+    ).toBeInTheDocument();
     await user.click(getSubmitButton());
 
-    expect(onSubmit).toHaveBeenCalledWith({ title: "Log in", description: "Sign in", credentialId: null });
+    expect(onSubmit).toHaveBeenCalledWith({ title: "Log in", description: "Sign in", ...LOGGED_OUT_LOGIN_FIELDS });
   });
 
-  it("starts on the saved credential and submits the one picked", async () => {
+  it("warns that a run cannot log in while the website has no Login action, but still saves the picked credential", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderTitleDescriptionForm({
       initialValues: { ...FILLED_VALUES, credentialId: "credential-1" },
-      credentialOptions: CREDENTIAL_OPTIONS,
+      loginChoices: LOGIN_CHOICES_WITHOUT_LOGIN_ACTION,
+    });
+
+    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Admin");
+    expect(screen.getByText(describeLogInAsHelp(true, null, true))).toBeInTheDocument();
+    await user.click(getSubmitButton());
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      title: "Log in",
+      description: "Sign in",
+      ...LOGGED_OUT_LOGIN_FIELDS,
+      credentialId: "credential-1",
+    });
+  });
+
+  it("starts on the saved credential and submits the one picked, with the Login-only fields null", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderTitleDescriptionForm({
+      initialValues: { ...FILLED_VALUES, credentialId: "credential-1" },
+      loginChoices: LOGIN_CHOICES,
     });
     expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Admin");
 
     await pickCredential(user, "Viewer");
     await user.click(getSubmitButton());
-    await pickCredential(user, "Logged out (no credential)");
+    await pickCredential(user, "Logged out (no login)");
     await user.click(getSubmitButton());
 
     expect(onSubmit.mock.calls).toEqual([
-      [{ title: "Log in", description: "Sign in", credentialId: "credential-2" }],
-      [{ title: "Log in", description: "Sign in", credentialId: null }],
+      [{ title: "Log in", description: "Sign in", ...LOGGED_OUT_LOGIN_FIELDS, credentialId: "credential-2" }],
+      [{ title: "Log in", description: "Sign in", ...LOGGED_OUT_LOGIN_FIELDS }],
     ]);
   });
 
@@ -229,13 +319,53 @@ describe("TitleDescriptionForm", () => {
     const user = userEvent.setup();
     const { onSubmit } = renderTitleDescriptionForm({
       initialValues: { ...FILLED_VALUES, credentialId: "deleted-credential" },
-      credentialOptions: CREDENTIAL_OPTIONS,
+      loginChoices: LOGIN_CHOICES,
     });
 
-    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no credential)");
+    expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no login)");
+    expect(screen.getByText("Each run starts logged out")).toBeInTheDocument();
     await user.click(getSubmitButton());
 
-    expect(onSubmit).toHaveBeenCalledWith({ title: "Log in", description: "Sign in", credentialId: null });
+    expect(onSubmit).toHaveBeenCalledWith({ title: "Log in", description: "Sign in", ...LOGGED_OUT_LOGIN_FIELDS });
+  });
+
+  describe("describeLoginPageHelp", () => {
+    it("says a blank login page uses the website's, naming it", () => {
+      expect(describeLoginPageHelp("https://example.com/login")).toBe(
+        "Leave blank to use the website's login page (https://example.com/login)",
+      );
+    });
+
+    it("asks for the login page when the website has none", () => {
+      expect(describeLoginPageHelp(null)).toBe(
+        "This website has no login page URL yet - enter it here (a successful crawl login will also save it to the website)",
+      );
+    });
+  });
+
+  describe("describeLogInAsHelp", () => {
+    it("says how to add a credential when the website has none, whatever else is true", () => {
+      const noCredentialsHelp = "This website has no credentials yet - add one on its Credentials tab to run logged in";
+      expect(describeLogInAsHelp(false, null, false)).toBe(noCredentialsHelp);
+      expect(describeLogInAsHelp(false, WEBSITE_LOGIN_ACTION, false)).toBe(noCredentialsHelp);
+    });
+
+    it("says a run cannot log in while the website has credentials but no Login action", () => {
+      const noLoginActionHelp =
+        "This website has no login action yet, so a run cannot log in - look for a login form on its Credentials tab, or add an action with the kind Login";
+      expect(describeLogInAsHelp(true, null, false)).toBe(noLoginActionHelp);
+      expect(describeLogInAsHelp(true, null, true)).toBe(noLoginActionHelp);
+    });
+
+    it("says each run starts logged out while Logged out is picked", () => {
+      expect(describeLogInAsHelp(true, WEBSITE_LOGIN_ACTION, false)).toBe("Each run starts logged out");
+    });
+
+    it("says the browser logs in as the picked credential with the website's Login action, naming it", () => {
+      expect(describeLogInAsHelp(true, WEBSITE_LOGIN_ACTION, true)).toBe(
+        'Before each run, the browser logs in as this credential with the login action "Sign in"',
+      );
+    });
   });
 
   describe("object role choices (actions)", () => {
@@ -265,22 +395,11 @@ describe("TitleDescriptionForm", () => {
       },
     });
 
-    /**
-     * Picks an option from one of the form's selects.
-     * @param user - The user-event session
-     * @param selectName - The select's label
-     * @param optionName - The option's text
-     */
-    async function pickOption(user: UserEvent, selectName: RegExp, optionName: string | RegExp): Promise<void> {
-      await user.click(screen.getByRole("combobox", { name: selectName }));
-      await user.click(await screen.findByRole("option", { name: optionName }));
-    }
-
     it("starts every choice on Detect, naming what the detection picks, and submits nulls", async () => {
       const user = userEvent.setup();
       const { onSubmit } = renderTitleDescriptionForm({
         initialValues: { ...FILLED_VALUES, credentialId: null, userNameParameterKey: "projectName" },
-        credentialOptions: CREDENTIAL_OPTIONS,
+        loginChoices: LOGIN_CHOICES,
         objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: DETECTED_CREATE_ROLE },
       });
 
@@ -295,18 +414,18 @@ describe("TitleDescriptionForm", () => {
       await user.click(getSubmitButton());
       expect(onSubmit).toHaveBeenCalledWith({
         ...FILLED_VALUES,
-        credentialId: null,
+        ...LOGGED_OUT_LOGIN_FIELDS,
         userActionKind: null,
         userObjectTypeKey: null,
         userNameParameterKey: "projectName",
       });
     });
 
-    it("lists the five kinds and submits the kind and type the user picks", async () => {
+    it("lists the six kinds and submits the kind and type the user picks", async () => {
       const user = userEvent.setup();
       const { onSubmit } = renderTitleDescriptionForm({
         initialValues: { ...FILLED_VALUES, credentialId: null },
-        credentialOptions: CREDENTIAL_OPTIONS,
+        loginChoices: LOGIN_CHOICES_WITHOUT_LOGIN_ACTION,
         objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: DETECTED_CREATE_ROLE },
       });
 
@@ -319,6 +438,7 @@ describe("TitleDescriptionForm", () => {
         "Read",
         "Update",
         "Delete",
+        "Login",
       ]);
       await user.click(screen.getByRole("option", { name: "Delete" }));
       expect(
@@ -328,7 +448,7 @@ describe("TitleDescriptionForm", () => {
       await user.click(getSubmitButton());
       expect(onSubmit).toHaveBeenLastCalledWith({
         ...FILLED_VALUES,
-        credentialId: null,
+        ...LOGGED_OUT_LOGIN_FIELDS,
         userActionKind: "delete",
         userObjectTypeKey: "/projects/{project}",
         userNameParameterKey: null,
@@ -340,6 +460,31 @@ describe("TitleDescriptionForm", () => {
       expect(screen.queryByRole("combobox", { name: /^Object type/ })).not.toBeInTheDocument();
     });
 
+    it("offers Login disabled, naming the website's Login action, while the website already has one", async () => {
+      const user = userEvent.setup();
+      renderTitleDescriptionForm({
+        initialValues: { ...FILLED_VALUES, credentialId: null },
+        loginChoices: LOGIN_CHOICES,
+        objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: DETECTED_CREATE_ROLE },
+      });
+
+      await user.click(screen.getByRole("combobox", { name: /^Kind/ }));
+      const kindOptions = await screen.findAllByRole("option");
+      expect(kindOptions.map((option) => option.textContent)).toEqual([
+        "Detect — Create (High: create, adds)",
+        "Parameters",
+        "Create",
+        "Read",
+        "Update",
+        "Delete",
+        'Login (this website already has one: "Sign in")',
+      ]);
+      const loginKindOption = screen.getByRole("option", { name: 'Login (this website already has one: "Sign in")' });
+      expect(loginKindOption).toHaveAttribute("aria-disabled", "true");
+      const readKindOption = screen.getByRole("option", { name: "Read" });
+      expect(readKindOption).not.toHaveAttribute("aria-disabled");
+    });
+
     it("keeps saved choices, including a type the latest crawl no longer finds", () => {
       renderTitleDescriptionForm({
         initialValues: {
@@ -348,7 +493,7 @@ describe("TitleDescriptionForm", () => {
           userActionKind: "update",
           userObjectTypeKey: "/gone/{gone}",
         },
-        credentialOptions: CREDENTIAL_OPTIONS,
+        loginChoices: LOGIN_CHOICES,
         objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: null },
       });
 
@@ -361,7 +506,7 @@ describe("TitleDescriptionForm", () => {
     it("on a new action, offers every choice before anything is detected", () => {
       renderTitleDescriptionForm({
         initialValues: { ...FILLED_VALUES, credentialId: null },
-        credentialOptions: CREDENTIAL_OPTIONS,
+        loginChoices: LOGIN_CHOICES,
         objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: null },
       });
 
@@ -383,13 +528,219 @@ describe("TitleDescriptionForm", () => {
     it("shows the role's warnings", () => {
       renderTitleDescriptionForm({
         initialValues: { ...FILLED_VALUES, credentialId: null },
-        credentialOptions: CREDENTIAL_OPTIONS,
+        loginChoices: LOGIN_CHOICES,
         objectRoleChoices: {
           objectTypes: [],
           detectedRole: { ...DETECTED_CREATE_ROLE, warnings: ["Pick the kind of object this action works on - none was detected"] },
         },
       });
       expect(screen.getByRole("alert")).toHaveTextContent("Pick the kind of object this action works on");
+    });
+  });
+
+  describe("a Login action (Kind = Login)", () => {
+    /** The website's one object type. */
+    const OBJECT_TYPES = [{ key: "/projects/{project}", name: "Project" }];
+
+    /** A saved Login action's values, as the edit page seeds them: it has no credential. */
+    const SAVED_LOGIN_ACTION_VALUES: WebsiteItemRequestBody = {
+      title: "Sign in",
+      description: "Sign in through the website's login form",
+      credentialId: null,
+      loginUrl: "https://example.com/admin/login",
+      usernameSelector: "#email",
+      passwordSelector: null,
+      submitSelector: "button.sign-in",
+      userActionKind: "login",
+      userObjectTypeKey: null,
+      userNameParameterKey: null,
+    };
+
+    /**
+     * Renders an action's form with the login and object role fields, for a
+     * website without a Login action yet (so the Kind select offers Login),
+     * letting a test override any prop.
+     * @param overrides - Props to replace
+     * @returns The submit and cancel spies, and the rendered form element
+     */
+    function renderActionForm(overrides: Partial<TitleDescriptionFormProps> = {}): ReturnType<
+      typeof renderTitleDescriptionForm
+    > {
+      return renderTitleDescriptionForm({
+        initialValues: FILLED_VALUES,
+        loginChoices: LOGIN_CHOICES_WITHOUT_LOGIN_ACTION,
+        objectRoleChoices: { objectTypes: OBJECT_TYPES, detectedRole: null },
+        ...overrides,
+      });
+    }
+
+    it("puts the Kind select before the login fields", () => {
+      renderActionForm();
+
+      const kindSelect = screen.getByRole("combobox", { name: /^Kind/ });
+      const credentialSelect = screen.getByRole("combobox", { name: /^Log in as/ });
+      const loginFieldFollowsKind =
+        kindSelect.compareDocumentPosition(credentialSelect) & Node.DOCUMENT_POSITION_FOLLOWING;
+      expect(loginFieldFollowsKind).toBeTruthy();
+    });
+
+    it("swaps Log in as for the Login action's own fields, and hides the object type, once Login is picked", async () => {
+      const user = userEvent.setup();
+      renderActionForm();
+
+      await pickOption(user, /^Kind/, "Login");
+
+      expect(screen.getByText(ACTION_KIND_HELP.login)).toBeInTheDocument();
+      // The Login action has no credential of its own: whoever logs in is picked elsewhere.
+      expect(screen.queryByRole("combobox", { name: /^Log in as/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("combobox", { name: /^Object type/ })).not.toBeInTheDocument();
+      expect(
+        screen.getByText(/^Logs in as whichever credential the action or crawl picks: it opens the login page/),
+      ).toBeInTheDocument();
+      expect(getField("Login page URL")).toHaveValue("");
+      expect(screen.getByRole("heading", { name: "Login form selectors (optional)" })).toBeInTheDocument();
+      expect(getField("Username field selector")).toHaveValue("");
+      expect(getField("Password field selector")).toHaveValue("");
+      expect(getField("Submit button selector")).toHaveValue("");
+    });
+
+    it("can be submitted without picking a credential, and submits none", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderActionForm({
+        initialValues: { ...FILLED_VALUES, userActionKind: "login" },
+        loginChoices: { ...LOGIN_CHOICES_WITHOUT_LOGIN_ACTION, credentials: [] },
+      });
+
+      expect(getSubmitButton()).toBeEnabled();
+      await user.click(getSubmitButton());
+
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ credentialId: null, userActionKind: "login" }));
+    });
+
+    it("submits a null credential even for a Login action saved with one", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderActionForm({
+        initialValues: { ...SAVED_LOGIN_ACTION_VALUES, credentialId: "credential-1" },
+      });
+
+      await user.click(getSubmitButton());
+
+      expect(onSubmit).toHaveBeenCalledWith(SAVED_LOGIN_ACTION_VALUES);
+    });
+
+    it("makes the login page optional when the website has one, offering it, and submits a blank one as null", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderActionForm({
+        initialValues: { ...FILLED_VALUES, userActionKind: "login" },
+      });
+
+      const loginUrlField = getField("Login page URL");
+      expect(loginUrlField).not.toBeRequired();
+      expect(loginUrlField).toHaveAttribute("placeholder", WEBSITE_LOGIN_URL);
+      expect(loginUrlField).toHaveAccessibleDescription(describeLoginPageHelp(WEBSITE_LOGIN_URL));
+      await user.type(getField("Username field selector"), "   ");
+      await user.click(getSubmitButton());
+
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...FILLED_VALUES,
+        credentialId: null,
+        loginUrl: null,
+        usernameSelector: null,
+        passwordSelector: null,
+        submitSelector: null,
+        userActionKind: "login",
+        userObjectTypeKey: null,
+        userNameParameterKey: null,
+      });
+    });
+
+    it("requires the login page when the website has none, then submits the typed one trimmed", async () => {
+      const user = userEvent.setup();
+      const { onSubmit, formElement } = renderActionForm({
+        initialValues: { ...FILLED_VALUES, userActionKind: "login" },
+        loginChoices: { ...LOGIN_CHOICES_WITHOUT_LOGIN_ACTION, websiteLoginUrl: null },
+      });
+
+      const loginUrlField = getField("Login page URL");
+      expect(loginUrlField).toBeRequired();
+      expect(loginUrlField).toHaveAttribute("placeholder", "https://example.com/login");
+      expect(loginUrlField).toHaveAccessibleDescription(describeLoginPageHelp(null));
+      expect(getSubmitButton()).toBeDisabled();
+      fireEvent.submit(formElement);
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      await user.type(loginUrlField, "   ");
+      expect(getSubmitButton()).toBeDisabled();
+      await user.paste("https://example.com/sign-in  ");
+      expect(getSubmitButton()).toBeEnabled();
+      await user.click(getSubmitButton());
+
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ credentialId: null, loginUrl: "https://example.com/sign-in" }),
+      );
+    });
+
+    it("starts a saved Login action on its login page and selectors, and submits the edits trimmed", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderActionForm({ initialValues: SAVED_LOGIN_ACTION_VALUES });
+
+      expect(screen.getByRole("combobox", { name: /^Kind/ })).toHaveTextContent("Login");
+      expect(getField("Login page URL")).toHaveValue("https://example.com/admin/login");
+      expect(getField("Username field selector")).toHaveValue("#email");
+      expect(getField("Password field selector")).toHaveValue("");
+      expect(getField("Submit button selector")).toHaveValue("button.sign-in");
+
+      await user.type(getField("Password field selector"), "  #password  ");
+      await user.clear(getField("Submit button selector"));
+      await user.click(getSubmitButton());
+
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...SAVED_LOGIN_ACTION_VALUES,
+        passwordSelector: "#password",
+        submitSelector: null,
+      });
+    });
+
+    it("sends the Login-only fields null, and the picked credential, once the kind is switched away from Login", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderActionForm({ initialValues: SAVED_LOGIN_ACTION_VALUES });
+
+      await pickOption(user, /^Kind/, "Read");
+      expect(screen.queryByLabelText(/^Login page URL/)).not.toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Logged out (no login)");
+      await pickCredential(user, "Viewer");
+      await user.click(getSubmitButton());
+
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...SAVED_LOGIN_ACTION_VALUES,
+        ...LOGGED_OUT_LOGIN_FIELDS,
+        credentialId: "credential-2",
+        userActionKind: "read",
+      });
+    });
+
+    it("drops the picked credential and object type once the kind is switched to Login", async () => {
+      const user = userEvent.setup();
+      const { onSubmit } = renderActionForm({
+        initialValues: {
+          ...FILLED_VALUES,
+          credentialId: "credential-1",
+          userActionKind: "read",
+          userObjectTypeKey: "/projects/{project}",
+        },
+      });
+      expect(screen.getByRole("combobox", { name: /^Object type/ })).toHaveTextContent("Project");
+      expect(screen.getByRole("combobox", { name: /^Log in as/ })).toHaveTextContent("Admin");
+
+      await pickOption(user, /^Kind/, "Login");
+      await user.click(getSubmitButton());
+
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...FILLED_VALUES,
+        ...LOGGED_OUT_LOGIN_FIELDS,
+        ...DETECT_EVERY_ROLE_CHOICE,
+        userActionKind: "login",
+      });
     });
   });
 });

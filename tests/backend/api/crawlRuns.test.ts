@@ -12,6 +12,7 @@ const mockDbService = vi.hoisted(() => ({
   findCrawlRunForWebsite: vi.fn(),
   listCrawledPageSummariesForRun: vi.fn(),
   findCrawledPageForRun: vi.fn(),
+  findLoginActionForWebsite: vi.fn(),
   findCredentialWithPasswordForWebsite: vi.fn(),
   findWebObjectNamesForCrawlRun: vi.fn(),
 }));
@@ -64,8 +65,10 @@ const CRAWL_RUN_NOT_FOUND_MESSAGE = "Crawl run not found";
 const CRAWLED_PAGE_NOT_FOUND_MESSAGE = "Crawled page not found";
 const CRAWL_ALREADY_RUNNING_MESSAGE = "A crawl is already running for this website";
 const CREDENTIAL_NOT_FOUND_MESSAGE = "Credential not found";
-const CREDENTIAL_HAS_NO_EFFECTIVE_LOGIN_URL_MESSAGE =
-  "This credential has no login page URL, and neither does the website";
+const WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE =
+  "This website has no login action yet - look for a login form on its Credentials tab, or add an action with the kind Login";
+const LOGIN_ACTION_HAS_NO_LOGIN_PAGE_MESSAGE =
+  'The login action "Log in" has no login page URL, and neither does its website; add one to log in';
 const BUTTON_MODE_INVALID_MESSAGE =
   "The button mode must be one of: linksOnly, allButRisky, openOnly";
 
@@ -85,7 +88,7 @@ const foundWebsite = {
   description: null,
   networkIdleTimeoutMs: 5000,
   screenshotMinimumWaitMs: 1,
-  /** No login URL of its own: only a credential with its own URL can log in. */
+  /** No login URL of its own: only a Login action with its own URL can log in. */
   loginUrl: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
@@ -153,14 +156,33 @@ const foundCredential = {
   description: null,
   username: "admin@example.com",
   encryptedPassword: "aXY.dGFn.Y2lwaGVy",
-  loginUrl: "http://localhost:5180/login",
-  usernameSelector: null,
-  passwordSelector: null,
-  submitSelector: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,
 };
+
+/** The found website's one Login action, with its own login page; it logs in as whichever credential the crawl picks. */
+const foundLoginAction = {
+  id: "login-action-id-from-db",
+  websiteId: foundWebsite.id,
+  credentialId: null,
+  loginUrl: "http://localhost:5180/login",
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+  title: "Log in",
+  description: "Signs in with the picked account",
+  userActionKind: "login",
+  userObjectTypeKey: null,
+  userNameParameterKey: null,
+  parametersSyncedAt: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  deletedAt: null,
+};
+
+/** The credential id a logged-in crawl request names. */
+const REQUESTED_CREDENTIAL_ID = "credential-id-from-request";
 
 /** A rejection that is not an Error instance, to prove it is stringified. */
 const nonErrorRejection = { code: "P1001" };
@@ -240,6 +262,7 @@ describe("Crawl run routes", () => {
         FIXTURE_SCREENSHOT_DIRECTORY,
         "linksOnly",
       );
+      expect(mockDbService.findLoginActionForWebsite).not.toHaveBeenCalled();
       expect(mockDbService.findCredentialWithPasswordForWebsite).not.toHaveBeenCalled();
     });
 
@@ -264,12 +287,13 @@ describe("Crawl run routes", () => {
       );
     });
 
-    it("looks the credential up under the found website and starts a logged-in crawl with it", async () => {
+    it("looks the credential and the website's Login action up under the found website and starts a logged-in crawl with them", async () => {
       const loggedInRun = {
         ...runningCrawlRun,
         credentialId: foundCredential.id,
         credential: { id: foundCredential.id, name: foundCredential.name },
       };
+      mockDbService.findLoginActionForWebsite.mockResolvedValue(foundLoginAction);
       mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(foundCredential);
       mockCrawlRunService.startCrawlRun.mockResolvedValue({
         crawlStarted: true,
@@ -279,17 +303,18 @@ describe("Crawl run routes", () => {
 
       const res = await request(createCrawlRunApp())
         .post(CRAWL_RUNS_PATH)
-        .send({ credentialId: "credential-id-from-request" });
+        .send({ credentialId: ` ${REQUESTED_CREDENTIAL_ID} ` });
 
       expect(res.status).toBe(201);
       expect(res.body).toEqual(loggedInRun);
       expect(mockDbService.findCredentialWithPasswordForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
-        "credential-id-from-request",
+        REQUESTED_CREDENTIAL_ID,
       );
+      expect(mockDbService.findLoginActionForWebsite).toHaveBeenCalledWith(foundWebsite.id);
       expect(mockCrawlRunService.startCrawlRun).toHaveBeenCalledWith(
         foundWebsite,
-        foundCredential,
+        { loginAction: foundLoginAction, credential: foundCredential },
         FIXTURE_SCREENSHOT_DIRECTORY,
         "linksOnly",
       );
@@ -328,7 +353,8 @@ describe("Crawl run routes", () => {
       expect(mockCrawlRunService.startCrawlRun).not.toHaveBeenCalled();
     });
 
-    it("starts a logged-in crawl, with the button mode, as a credential with its own login URL on a website with none", async () => {
+    it("starts a logged-in crawl, with the button mode, through a Login action with its own login URL on a website with none", async () => {
+      mockDbService.findLoginActionForWebsite.mockResolvedValue(foundLoginAction);
       mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(foundCredential);
       mockCrawlRunService.startCrawlRun.mockResolvedValue({
         crawlStarted: true,
@@ -338,23 +364,24 @@ describe("Crawl run routes", () => {
 
       const res = await request(createCrawlRunApp())
         .post(CRAWL_RUNS_PATH)
-        .send({ credentialId: "credential-id-from-request", buttonMode: "openOnly" });
+        .send({ credentialId: REQUESTED_CREDENTIAL_ID, buttonMode: "openOnly" });
 
       expect(res.status).toBe(201);
       expect(foundWebsite.loginUrl).toBeNull();
       expect(mockCrawlRunService.startCrawlRun).toHaveBeenCalledWith(
         foundWebsite,
-        foundCredential,
+        { loginAction: foundLoginAction, credential: foundCredential },
         FIXTURE_SCREENSHOT_DIRECTORY,
         "openOnly",
       );
     });
 
-    it("starts a logged-in crawl as a credential with no login URL of its own when it inherits the website's", async () => {
+    it("starts a logged-in crawl through a Login action with no login URL of its own when it inherits the website's", async () => {
       const websiteWithLoginUrl = { ...foundWebsite, loginUrl: "http://localhost:5180/sign-in" };
-      const inheritingCredential = { ...foundCredential, loginUrl: null };
+      const inheritingLoginAction = { ...foundLoginAction, loginUrl: null };
       mockDbService.findWebsiteById.mockResolvedValue(websiteWithLoginUrl);
-      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(inheritingCredential);
+      mockDbService.findLoginActionForWebsite.mockResolvedValue(inheritingLoginAction);
+      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(foundCredential);
       mockCrawlRunService.startCrawlRun.mockResolvedValue({
         crawlStarted: true,
         crawlRun: runningCrawlRun,
@@ -363,33 +390,27 @@ describe("Crawl run routes", () => {
 
       const res = await request(createCrawlRunApp())
         .post(CRAWL_RUNS_PATH)
-        .send({ credentialId: "credential-id-from-request" });
+        .send({ credentialId: REQUESTED_CREDENTIAL_ID });
 
       expect(res.status).toBe(201);
       expect(mockCrawlRunService.startCrawlRun).toHaveBeenCalledWith(
         websiteWithLoginUrl,
-        inheritingCredential,
+        { loginAction: inheritingLoginAction, credential: foundCredential },
         FIXTURE_SCREENSHOT_DIRECTORY,
         "linksOnly",
       );
     });
 
-    it("returns 400 and starts nothing when neither the credential nor the website has a login URL", async () => {
-      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue({
-        ...foundCredential,
-        loginUrl: null,
-      });
+    it("returns 400 and starts nothing when neither the Login action nor the website has a login URL", async () => {
+      mockDbService.findLoginActionForWebsite.mockResolvedValue({ ...foundLoginAction, loginUrl: null });
+      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(foundCredential);
 
       const res = await request(createCrawlRunApp())
         .post(CRAWL_RUNS_PATH)
-        .send({ credentialId: "credential-id-from-request" });
+        .send({ credentialId: REQUESTED_CREDENTIAL_ID });
 
       expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: CREDENTIAL_HAS_NO_EFFECTIVE_LOGIN_URL_MESSAGE });
-      expect(mockDbService.findCredentialWithPasswordForWebsite).toHaveBeenCalledWith(
-        foundWebsite.id,
-        "credential-id-from-request",
-      );
+      expect(res.body).toEqual({ error: LOGIN_ACTION_HAS_NO_LOGIN_PAGE_MESSAGE });
       expect(mockCrawlRunService.startCrawlRun).not.toHaveBeenCalled();
     });
 
@@ -413,6 +434,25 @@ describe("Crawl run routes", () => {
 
       expect(res.status).toBe(404);
       expect(res.body).toEqual({ error: CREDENTIAL_NOT_FOUND_MESSAGE });
+      expect(mockDbService.findCredentialWithPasswordForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        "someone-elses-credential",
+      );
+      expect(mockDbService.findLoginActionForWebsite).not.toHaveBeenCalled();
+      expect(mockCrawlRunService.startCrawlRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 409 and starts nothing when a credential is chosen but the website has no Login action", async () => {
+      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(foundCredential);
+      mockDbService.findLoginActionForWebsite.mockResolvedValue(null);
+
+      const res = await request(createCrawlRunApp())
+        .post(CRAWL_RUNS_PATH)
+        .send({ credentialId: REQUESTED_CREDENTIAL_ID });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE });
+      expect(mockDbService.findLoginActionForWebsite).toHaveBeenCalledWith(foundWebsite.id);
       expect(mockCrawlRunService.startCrawlRun).not.toHaveBeenCalled();
     });
 
@@ -421,15 +461,30 @@ describe("Crawl run routes", () => {
 
       const res = await request(createCrawlRunApp())
         .post(CRAWL_RUNS_PATH)
-        .send({ credentialId: "credential-id-from-request" });
+        .send({ credentialId: REQUESTED_CREDENTIAL_ID });
 
       expect(res.status).toBe(503);
       expect(res.body.error).toMatch(/CREDENTIAL_ENCRYPTION_KEY is not set/);
+      expect(mockDbService.findLoginActionForWebsite).not.toHaveBeenCalled();
       expect(mockDbService.findCredentialWithPasswordForWebsite).not.toHaveBeenCalled();
       expect(mockCrawlRunService.startCrawlRun).not.toHaveBeenCalled();
     });
 
+    it("returns 500 with the error message when the website's Login action lookup fails", async () => {
+      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(foundCredential);
+      mockDbService.findLoginActionForWebsite.mockRejectedValue(new Error("login action lookup failed"));
+
+      const res = await request(createCrawlRunApp())
+        .post(CRAWL_RUNS_PATH)
+        .send({ credentialId: REQUESTED_CREDENTIAL_ID });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "login action lookup failed" });
+      expect(mockCrawlRunService.startCrawlRun).not.toHaveBeenCalled();
+    });
+
     it("returns 500 with the reason when the credential's password cannot be decrypted", async () => {
+      mockDbService.findLoginActionForWebsite.mockResolvedValue(foundLoginAction);
       mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(foundCredential);
       mockCrawlRunService.startCrawlRun.mockRejectedValue(
         new Error("The saved password could not be decrypted"),
@@ -437,7 +492,7 @@ describe("Crawl run routes", () => {
 
       const res = await request(createCrawlRunApp())
         .post(CRAWL_RUNS_PATH)
-        .send({ credentialId: "credential-id-from-request" });
+        .send({ credentialId: REQUESTED_CREDENTIAL_ID });
 
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: "The saved password could not be decrypted" });

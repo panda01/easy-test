@@ -11,6 +11,8 @@ import {
   MAX_REFINE_NOTE_LENGTH,
   validateCredentialInput,
   validateCrawlRunStartInput,
+  validateLoginRunStartInput,
+  LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE,
   validateWebObjectRenameInput,
   MAX_WEB_OBJECT_NAME_LENGTH,
   MAX_OBJECT_TYPE_KEY_LENGTH,
@@ -418,9 +420,20 @@ describe("validateTitleDescriptionInput", () => {
 /** What an action body leaves as "detect" when it names no object role choice. */
 const DETECT_EVERY_ROLE_CHOICE = { userActionKind: null, userObjectTypeKey: null, userNameParameterKey: null };
 
+/** The login fields of an action that runs logged out and is not the Login action (every one null). */
+const NO_LOGIN_CHOICES = {
+  credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+};
+
 describe("validateActionInput", () => {
   const CREDENTIAL_ID_INVALID_MESSAGE =
     "The credential id must be a non-blank string, or null to run logged out";
+  const LOGIN_PAGE_ONLY_ON_A_LOGIN_ACTION_MESSAGE =
+    "Only a login action has a login page URL or login form selectors";
 
   it.each(nonObjectBodies)("rejects a body that is $label", ({ body }) => {
     expect(validateActionInput(body)).toEqual({
@@ -430,14 +443,14 @@ describe("validateActionInput", () => {
   });
 
   it("checks the title exactly as validateTitleDescriptionInput does", () => {
-    expect(validateActionInput({ title: "  ", description: "Steps", credentialId: "c-1" })).toEqual({
+    expect(validateActionInput({ title: "  ", description: "Steps", credentialId: "credential-1" })).toEqual({
       isValid: false,
       errorMessage: TITLE_REQUIRED_MESSAGE,
     });
   });
 
   it("checks the description exactly as validateTitleDescriptionInput does", () => {
-    expect(validateActionInput({ title: "Log in", description: 7, credentialId: "c-1" })).toEqual({
+    expect(validateActionInput({ title: "Log in", description: 7, credentialId: "credential-1" })).toEqual({
       isValid: false,
       errorMessage: DESCRIPTION_REQUIRED_MESSAGE,
     });
@@ -455,23 +468,35 @@ describe("validateActionInput", () => {
     ["null", null],
   ])("runs logged out (credentialId null) when the credential id is %s", (_label, credentialId) => {
     expect(
-      validateActionInput({ title: " Log in ", description: " Enter credentials ", credentialId }),
+      validateActionInput({ title: " Add a project ", description: " Fill in the form ", credentialId }),
     ).toEqual({
       isValid: true,
-      input: { title: "Log in", description: "Enter credentials", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE },
+      input: { title: "Add a project", description: "Fill in the form", ...DETECT_EVERY_ROLE_CHOICE, ...NO_LOGIN_CHOICES },
     });
   });
 
-  it("takes a trimmed credential id", () => {
+  it.each([
+    ["is left on detect", undefined],
+    ["is Create", "create"],
+    ["is Parameters", "parameters"],
+  ])("takes a trimmed credential id to run as on an action whose kind %s, and nothing else to log in with", (_label, userActionKind) => {
     expect(
       validateActionInput({
-        title: "Log in",
-        description: "Enter credentials",
+        title: "Add a project",
+        description: "Fill in the form",
+        userActionKind,
         credentialId: "  credential-1  ",
       }),
     ).toEqual({
       isValid: true,
-      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1", ...DETECT_EVERY_ROLE_CHOICE },
+      input: {
+        title: "Add a project",
+        description: "Fill in the form",
+        ...DETECT_EVERY_ROLE_CHOICE,
+        userActionKind: userActionKind ?? null,
+        ...NO_LOGIN_CHOICES,
+        credentialId: "credential-1",
+      },
     });
   });
 
@@ -484,26 +509,182 @@ describe("validateActionInput", () => {
     ["an array", ["credential-1"]],
   ])("rejects a credential id that is %s", (_label, credentialId) => {
     expect(
-      validateActionInput({ title: "Log in", description: "Enter credentials", credentialId }),
+      validateActionInput({ title: "Add a project", description: "Fill in the form", credentialId }),
     ).toEqual({
       isValid: false,
       errorMessage: CREDENTIAL_ID_INVALID_MESSAGE,
     });
   });
 
-  it("drops fields that are not part of an action", () => {
+  it.each([
+    ["a login page URL", { loginUrl: "https://example.com/login" }],
+    ["a login page URL that is not text", { loginUrl: 42 }],
+    ["a username field selector", { usernameSelector: "#email" }],
+    ["a password field selector", { passwordSelector: "#password" }],
+    ["a submit button selector", { submitSelector: "button.go" }],
+    ["a selector that is not text", { submitSelector: true }],
+  ])("refuses %s on an action that is not a Login action", (_label, loginOnlyField) => {
+    expect(
+      validateActionInput({ title: "Add a project", description: "Fill in the form", ...loginOnlyField }),
+    ).toEqual({
+      isValid: false,
+      errorMessage: LOGIN_PAGE_ONLY_ON_A_LOGIN_ACTION_MESSAGE,
+    });
+  });
+
+  it("treats a blank login page URL or selector on an action that is not a Login action as left out", () => {
     expect(
       validateActionInput({
-        title: "Log in",
-        description: "Enter credentials",
+        title: "Add a project",
+        description: "Fill in the form",
+        loginUrl: "  ",
+        usernameSelector: "",
+        passwordSelector: null,
+        submitSelector: "   ",
+      }),
+    ).toEqual({
+      isValid: true,
+      input: { title: "Add a project", description: "Fill in the form", ...DETECT_EVERY_ROLE_CHOICE, ...NO_LOGIN_CHOICES },
+    });
+  });
+
+  it("checks the Login-only fields before the credential id on an action that is not a Login action", () => {
+    expect(
+      validateActionInput({ title: "Add a project", description: "Fill in the form", loginUrl: "https://example.com/login", credentialId: 5 }),
+    ).toEqual({
+      isValid: false,
+      errorMessage: LOGIN_PAGE_ONLY_ON_A_LOGIN_ACTION_MESSAGE,
+    });
+  });
+
+  it("drops fields that are not part of an action, the old loginActionId included", () => {
+    expect(
+      validateActionInput({
+        title: "Add a project",
+        description: "Fill in the form",
         credentialId: "credential-1",
+        loginActionId: "login-action-1",
         websiteId: "someone-elses-website",
         credential: { id: "credential-2", name: "Other" },
       }),
     ).toEqual({
       isValid: true,
-      input: { title: "Log in", description: "Enter credentials", credentialId: "credential-1", ...DETECT_EVERY_ROLE_CHOICE },
+      input: {
+        title: "Add a project",
+        description: "Fill in the form",
+        ...DETECT_EVERY_ROLE_CHOICE,
+        ...NO_LOGIN_CHOICES,
+        credentialId: "credential-1",
+      },
     });
+  });
+});
+
+describe("validateActionInput: Login actions", () => {
+  /** A complete, valid Login action body, with whitespace to trim. */
+  const validLoginActionBody = {
+    title: "  Log in  ",
+    description: "  Signs in with the picked account  ",
+    userActionKind: "login",
+    loginUrl: "  HTTPS://Example.com/login  ",
+    usernameSelector: "  #email  ",
+    passwordSelector: "  #password  ",
+    submitSelector: "  button.sign-in  ",
+  };
+
+  it("takes the normalized login page URL and the trimmed selectors, with no credential", () => {
+    expect(validateActionInput(validLoginActionBody)).toEqual({
+      isValid: true,
+      input: {
+        title: "Log in",
+        description: "Signs in with the picked account",
+        userActionKind: "login",
+        userObjectTypeKey: null,
+        userNameParameterKey: null,
+        credentialId: null,
+        loginUrl: "https://example.com/login",
+        usernameSelector: "#email",
+        passwordSelector: "#password",
+        submitSelector: "button.sign-in",
+      },
+    });
+  });
+
+  it("names the refusal of a Login action's credential in an exported message", () => {
+    expect(LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE).toBe(
+      "A login action logs in as whichever credential the action or crawl picks, so it has no credential of its own",
+    );
+  });
+
+  it.each([
+    ["left out", undefined],
+    ["null", null],
+    ["empty", ""],
+    ["blank", "   "],
+  ])("stores the login page URL as null (use the website's) when it is %s", (_label, loginUrl) => {
+    const validation = validateActionInput({ ...validLoginActionBody, loginUrl });
+
+    expect(validation.isValid).toBe(true);
+    expect(validation.isValid && validation.input.loginUrl).toBeNull();
+  });
+
+  it.each([
+    ["left out", undefined],
+    ["null", null],
+    ["blank", "   "],
+  ])("stores the selectors as null (find the field automatically) when they are %s", (_label, selector) => {
+    const validation = validateActionInput({
+      ...validLoginActionBody,
+      usernameSelector: selector,
+      passwordSelector: selector,
+      submitSelector: selector,
+    });
+
+    expect(validation).toMatchObject({
+      isValid: true,
+      input: { usernameSelector: null, passwordSelector: null, submitSelector: null },
+    });
+  });
+
+  it.each([
+    ["left out", undefined],
+    ["null", null],
+  ])("accepts a Login action whose credential is %s", (_label, credentialId) => {
+    expect(validateActionInput({ ...validLoginActionBody, credentialId })).toMatchObject({
+      isValid: true,
+      input: { credentialId: null },
+    });
+  });
+
+  it.each([
+    ["it names a credential", { credentialId: "credential-1" }, LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE],
+    ["its credential id is blank", { credentialId: "   " }, LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE],
+    ["its credential id is a number", { credentialId: 42 }, LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE],
+    ["the login page URL is not text", { loginUrl: 42 }, LOGIN_URL_INVALID_MESSAGE],
+    ["the login page URL is not http or https", { loginUrl: "ftp://example.com/login" }, LOGIN_URL_INVALID_MESSAGE],
+    ["the login page URL does not parse", { loginUrl: "not a url" }, LOGIN_URL_INVALID_MESSAGE],
+    ["the username selector is not text", { usernameSelector: ["#email"] }, "The username field selector must be text"],
+    ["the password selector is not text", { passwordSelector: 7 }, "The password field selector must be text"],
+    ["the submit selector is not text", { submitSelector: true }, "The submit button selector must be text"],
+  ])("rejects a Login action where %s", (_label, override, errorMessage) => {
+    expect(validateActionInput({ ...validLoginActionBody, ...override })).toEqual({
+      isValid: false,
+      errorMessage,
+    });
+  });
+
+  it("checks the credential before the login page URL", () => {
+    expect(validateActionInput({ ...validLoginActionBody, credentialId: "credential-1", loginUrl: 42 })).toEqual({
+      isValid: false,
+      errorMessage: LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE,
+    });
+  });
+
+  it("ignores an old loginActionId on a Login action", () => {
+    const validation = validateActionInput({ ...validLoginActionBody, loginActionId: "login-action-2" });
+
+    expect(validation.isValid).toBe(true);
+    expect(validation.isValid && "loginActionId" in validation.input).toBe(false);
   });
 });
 
@@ -767,13 +948,9 @@ describe("validateCredentialInput", () => {
     description: "  The site's admin account  ",
     username: "  admin@example.com  ",
     password: "  correct horse  ",
-    loginUrl: "  HTTPS://Example.com/login  ",
-    usernameSelector: "  #email  ",
-    passwordSelector: "  #password  ",
-    submitSelector: "  button.sign-in  ",
   };
 
-  it("trims every field except the password, and normalizes the login page URL", () => {
+  it("trims every field except the password", () => {
     expect(validateCredentialInput(validCredentialBody, { passwordIsRequired: true })).toEqual({
       isValid: true,
       input: {
@@ -781,10 +958,6 @@ describe("validateCredentialInput", () => {
           name: "Admin",
           description: "The site's admin account",
           username: "admin@example.com",
-          loginUrl: "https://example.com/login",
-          usernameSelector: "#email",
-          passwordSelector: "#password",
-          submitSelector: "button.sign-in",
         },
         password: "  correct horse  ",
       },
@@ -795,16 +968,12 @@ describe("validateCredentialInput", () => {
     ["left out", undefined],
     ["null", null],
     ["blank", "   "],
-  ])("stores the description and the selectors as null when they are %s", (_label, value) => {
+  ])("stores the description as null when it is %s", (_label, value) => {
     const body = {
       name: "Admin",
       username: "admin",
       password: "secret",
-      loginUrl: "https://example.com/login",
       description: value,
-      usernameSelector: value,
-      passwordSelector: value,
-      submitSelector: value,
     };
 
     const validation = validateCredentialInput(body, { passwordIsRequired: true });
@@ -816,32 +985,33 @@ describe("validateCredentialInput", () => {
           name: "Admin",
           description: null,
           username: "admin",
-          loginUrl: "https://example.com/login",
-          usernameSelector: null,
-          passwordSelector: null,
-          submitSelector: null,
         },
         password: "secret",
       },
     });
   });
 
-  it.each([
-    ["left out", undefined],
-    ["null", null],
-    ["empty", ""],
-    ["blank", "   "],
-  ])(
-    "stores the login page URL as null (use the website's) when it is %s",
-    (_label, loginUrl) => {
-      const body = { ...validCredentialBody, loginUrl };
+  it("ignores a login page URL and form selectors, which belong to Login actions now", () => {
+    const body = {
+      ...validCredentialBody,
+      loginUrl: "not a url",
+      usernameSelector: ["#email"],
+      passwordSelector: 7,
+      submitSelector: true,
+    };
 
-      const validation = validateCredentialInput(body, { passwordIsRequired: true });
-
-      expect(validation.isValid).toBe(true);
-      expect(validation.isValid && validation.input.credential.loginUrl).toBeNull();
-    },
-  );
+    expect(validateCredentialInput(body, { passwordIsRequired: true })).toEqual({
+      isValid: true,
+      input: {
+        credential: {
+          name: "Admin",
+          description: "The site's admin account",
+          username: "admin@example.com",
+        },
+        password: "  correct horse  ",
+      },
+    });
+  });
 
   it.each(nonObjectBodies)("rejects a body that is $label", ({ body }) => {
     expect(validateCredentialInput(body, { passwordIsRequired: true })).toEqual({
@@ -858,32 +1028,6 @@ describe("validateCredentialInput", () => {
     ["the username is blank", { username: " " }, "A username is required"],
     ["the password is not text", { password: 1234 }, "The password must be text"],
     ["the password is only spaces", { password: "   " }, "The password cannot be only spaces"],
-    ["the login page URL is not text", { loginUrl: 42 }, LOGIN_URL_INVALID_MESSAGE],
-    [
-      "the login page URL is not http or https",
-      { loginUrl: "ftp://example.com/login" },
-      LOGIN_URL_INVALID_MESSAGE,
-    ],
-    [
-      "the login page URL does not parse",
-      { loginUrl: "not a url" },
-      LOGIN_URL_INVALID_MESSAGE,
-    ],
-    [
-      "the username selector is not text",
-      { usernameSelector: ["#email"] },
-      "The username field selector must be text",
-    ],
-    [
-      "the password selector is not text",
-      { passwordSelector: 7 },
-      "The password field selector must be text",
-    ],
-    [
-      "the submit selector is not text",
-      { submitSelector: true },
-      "The submit button selector must be text",
-    ],
   ])("rejects a body where %s", (_label, override, errorMessage) => {
     const body = { ...validCredentialBody, ...override };
 
@@ -929,6 +1073,9 @@ describe("validateCredentialInput", () => {
 });
 
 describe("validateCrawlRunStartInput", () => {
+  const CRAWL_CREDENTIAL_ID_INVALID_MESSAGE =
+    "The credential id must be a non-blank string, or null to crawl logged out";
+
   it.each([
     ["no body at all (undefined)", undefined],
     ["a null body", null],
@@ -941,7 +1088,7 @@ describe("validateCrawlRunStartInput", () => {
     });
   });
 
-  it("takes a trimmed credential id", () => {
+  it("takes a trimmed credential id to log in as", () => {
     expect(validateCrawlRunStartInput({ credentialId: "  credential-1  " })).toEqual({
       isValid: true,
       input: { credentialId: "credential-1", buttonMode: "linksOnly" },
@@ -959,6 +1106,13 @@ describe("validateCrawlRunStartInput", () => {
     expect(validateCrawlRunStartInput({ credentialId: null, buttonMode: "openOnly" })).toEqual({
       isValid: true,
       input: { credentialId: null, buttonMode: "openOnly" },
+    });
+  });
+
+  it("ignores an old login action id, since a crawl logs in through the website's Login action", () => {
+    expect(validateCrawlRunStartInput({ loginActionId: "login-action-1" })).toEqual({
+      isValid: true,
+      input: { credentialId: null, buttonMode: "linksOnly" },
     });
   });
 
@@ -986,7 +1140,7 @@ describe("validateCrawlRunStartInput", () => {
   it("checks the credential id before the button mode", () => {
     expect(validateCrawlRunStartInput({ credentialId: "  ", buttonMode: "clickEverything" })).toEqual({
       isValid: false,
-      errorMessage: "The credential id must be a non-blank string, or null to crawl logged out",
+      errorMessage: CRAWL_CREDENTIAL_ID_INVALID_MESSAGE,
     });
   });
 
@@ -1007,7 +1161,52 @@ describe("validateCrawlRunStartInput", () => {
   ])("rejects a credential id that is %s", (_label, credentialId) => {
     expect(validateCrawlRunStartInput({ credentialId })).toEqual({
       isValid: false,
-      errorMessage: "The credential id must be a non-blank string, or null to crawl logged out",
+      errorMessage: CRAWL_CREDENTIAL_ID_INVALID_MESSAGE,
+    });
+  });
+});
+
+describe("validateLoginRunStartInput", () => {
+  it("takes the trimmed credential to log in as", () => {
+    expect(validateLoginRunStartInput({ credentialId: "  credential-1  " })).toEqual({
+      isValid: true,
+      input: { credentialId: "credential-1" },
+    });
+  });
+
+  it("drops every other field", () => {
+    expect(validateLoginRunStartInput({ credentialId: "credential-1", loginUrl: "https://example.com" })).toEqual({
+      isValid: true,
+      input: { credentialId: "credential-1" },
+    });
+  });
+
+  it.each(nonObjectBodies)("rejects a body that is $label", ({ body }) => {
+    expect(validateLoginRunStartInput(body)).toEqual({
+      isValid: false,
+      errorMessage: "The request body must be a JSON object with the credential to log in as",
+    });
+  });
+
+  it.each([
+    ["an empty object", {}],
+    ["a null credential id", { credentialId: null }],
+  ])("asks for the credential when the body is %s", (_label, body) => {
+    expect(validateLoginRunStartInput(body)).toEqual({
+      isValid: false,
+      errorMessage: "Pick the credential to log in as",
+    });
+  });
+
+  it.each([
+    ["blank", "   "],
+    ["an empty string", ""],
+    ["a number", 42],
+    ["an object", { id: "credential-1" }],
+  ])("rejects a credential id that is %s", (_label, credentialId) => {
+    expect(validateLoginRunStartInput({ credentialId })).toEqual({
+      isValid: false,
+      errorMessage: "The credential id must be a non-blank string",
     });
   });
 });
@@ -1072,7 +1271,7 @@ describe("validateActionInput: object role choices", () => {
       input: {
         title: "Create a project",
         description: "Adds one",
-        credentialId: null,
+        ...NO_LOGIN_CHOICES,
         userActionKind: "create",
         userObjectTypeKey: "/projects/{project}",
         userNameParameterKey: "projectName",
@@ -1084,6 +1283,10 @@ describe("validateActionInput: object role choices", () => {
         input: { userActionKind: kind },
       });
     }
+    expect(validateActionInput({ ...BASE_ACTION, userActionKind: "login" })).toMatchObject({
+      isValid: true,
+      input: { userActionKind: "login" },
+    });
     expect(validateActionInput({ ...BASE_ACTION, userActionKind: "detect", userObjectTypeKey: "  " })).toMatchObject({
       isValid: true,
       input: DETECT_EVERY_ROLE_CHOICE,
@@ -1091,7 +1294,7 @@ describe("validateActionInput: object role choices", () => {
   });
 
   it.each([
-    [{ userActionKind: "object" }, "The action kind must be one of: detect, parameters, create, read, update, delete"],
+    [{ userActionKind: "object" }, "The action kind must be one of: detect, parameters, create, read, update, delete, login"],
     [{ userObjectTypeKey: 5 }, "The object type must be text, or null"],
     [{ userObjectTypeKey: "k".repeat(MAX_OBJECT_TYPE_KEY_LENGTH + 1) }, "The object type must be at most 500 characters"],
     [{ userNameParameterKey: ["a"] }, "The name parameter must be text, or null"],

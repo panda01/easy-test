@@ -95,7 +95,7 @@ describe("WebsiteForm", () => {
     expect(getMinimumWaitField()).toHaveValue(1000);
   });
 
-  it("offers an optional login page URL field, explaining that blank means no login", () => {
+  it("offers an optional login page URL field, explaining that a blank one leaves a new website to be checked for a login form", () => {
     renderWebsiteForm();
 
     const loginUrlField = getLoginUrlField();
@@ -103,7 +103,7 @@ describe("WebsiteForm", () => {
     expect(loginUrlField).not.toBeRequired();
     expect(loginUrlField).toHaveAttribute("placeholder", "https://example.com/login");
     expect(loginUrlField).toHaveAccessibleDescription(
-      "Leave blank if the website doesn't require login",
+      "Where the website logs in, if you know it; otherwise leave it blank - a new website is checked for a login form",
     );
   });
 
@@ -242,6 +242,24 @@ describe("WebsiteForm", () => {
     expect(getSubmitButton()).toBeDisabled();
     fireEvent.submit(formElement);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("names the submit button by submittingLabel while a save is in flight", () => {
+    renderWebsiteForm({
+      initialValues: { ...BLANK_VALUES, url: "https://example.com", name: "Example" },
+      isSubmitting: true,
+      submittingLabel: "Creating… looking for a login form",
+    });
+
+    expect(screen.getByRole("button", { name: "Creating… looking for a login form" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Create website" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the usual submit text while no save is in flight, even with a submittingLabel", () => {
+    renderWebsiteForm({ submittingLabel: "Creating… looking for a login form" });
+
+    expect(screen.getByRole("button", { name: "Create website" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Creating… looking for a login form" })).not.toBeInTheDocument();
   });
 
   it("shows the save error in an alert", () => {

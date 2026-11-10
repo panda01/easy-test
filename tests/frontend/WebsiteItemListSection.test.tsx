@@ -7,6 +7,7 @@ import { type JsonResourceState } from "../../src/hooks/useJsonResource";
 import { type WebsiteItemRecord } from "../../src/hooks/useWebsiteItems";
 import { ACTION_KIND, USE_CASE_KIND, type WebsiteItemKind } from "../../src/utils/websiteItemKinds";
 import {
+  buildLoginActionItemRecord,
   buildNewestActionScriptRecord,
   buildWebsiteItemRecord,
   readProbeAfterLanding,
@@ -57,7 +58,10 @@ function loadedItems(items: WebsiteItemRecord[]): JsonResourceState<WebsiteItemR
   return { data: items, isLoading: false, errorMessage: null, reload: vi.fn() };
 }
 
-/** Four actions, one per status: passed 12 minutes ago, failed at step 9, timed out, and not run (no versions). */
+/**
+ * Four actions, one per status: passed 12 minutes ago (logging in as
+ * "Admin"), failed at step 9, timed out, and not run (no versions).
+ */
 const actionsOfEveryStatus: WebsiteItemRecord[] = [
   buildWebsiteItemRecord({
     id: "action-passing",
@@ -307,12 +311,12 @@ describe("WebsiteItemListSection (actions' status)", () => {
     expect(screen.queryByText(/passed ·/)).not.toBeInTheDocument();
   });
 
-  it("shows each action's status in words, who it runs as, its version, and its description on desktop", () => {
+  it("shows each action's status in words, how it logs in, its version, and its description on desktop", () => {
     renderSection(ACTION_KIND, loadedItems(actionsOfEveryStatus));
 
     const actionLinks = getItemLinks("Actions");
     expect(actionLinks[0]).toHaveTextContent("Sign in with a valid account");
-    expect(actionLinks[0]).toHaveTextContent("Admin");
+    expect(actionLinks[0]).toHaveTextContent("As Admin");
     expect(actionLinks[0]).toHaveTextContent("v6");
     expect(actionLinks[0]).toHaveTextContent("12 min ago");
     expect(actionLinks[1]).toHaveTextContent("Logged out");
@@ -341,6 +345,13 @@ describe("WebsiteItemListSection (actions' status)", () => {
         }),
         buildWebsiteItemRecord({ id: "action-up-to-date", title: "Log in", newestScript: buildNewestActionScriptRecord() }),
         buildWebsiteItemRecord({ id: "action-without-versions", title: "Search", newestScript: null }),
+        buildWebsiteItemRecord({
+          id: "action-same-credential",
+          title: "Log in",
+          credentialId: "credential-1",
+          credential: { id: "credential-1", name: "Admin" },
+          newestScript: buildNewestActionScriptRecord({ credentialId: "credential-1" }),
+        }),
       ]),
     );
 
@@ -349,13 +360,24 @@ describe("WebsiteItemListSection (actions' status)", () => {
     expect(within(actionLinks[1]).getByText("Out of date")).toBeInTheDocument();
     expect(within(actionLinks[2]).queryByText("Out of date")).not.toBeInTheDocument();
     expect(within(actionLinks[3]).queryByText("Out of date")).not.toBeInTheDocument();
+    // The credential it runs as is the one its newest version was generated as.
+    expect(within(actionLinks[4]).queryByText("Out of date")).not.toBeInTheDocument();
   });
 
-  it("shows the status, then who it runs as, on a phone - without the description or version", () => {
+  it("tags the website's Login action as Login rather than naming a credential", () => {
+    renderSection(ACTION_KIND, loadedItems([buildLoginActionItemRecord({ newestScript: null })]));
+
+    const actionLinks = getItemLinks("Actions");
+    expect(actionLinks[0]).toHaveTextContent("Login");
+    expect(actionLinks[0]).not.toHaveTextContent("Logged out");
+    expect(actionLinks[0]).not.toHaveTextContent(/As /);
+  });
+
+  it("shows the status, then how it logs in, on a phone - without the description or version", () => {
     renderSection(ACTION_KIND, loadedItems(actionsOfEveryStatus), true);
 
     const actionLinks = getItemLinks("Actions");
-    expect(actionLinks[0]).toHaveTextContent("Log in12 min ago · Admin");
+    expect(actionLinks[0]).toHaveTextContent("Log in12 min ago · As Admin");
     expect(actionLinks[1]).toHaveTextContent("Book a classFailed at step 9 · Logged out");
     expect(actionLinks[0]).not.toHaveTextContent("Sign in with a valid account");
     expect(actionLinks[0]).not.toHaveTextContent("v6");

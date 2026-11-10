@@ -26,19 +26,27 @@ export interface NewestActionScriptRecord {
 
 /**
  * A use case or an action as the API returns it - both have this same shape,
- * except that an action also names the credential it runs as, and the action
- * LIST also brings each action's newest script version. Dates arrive as ISO
- * strings because they travel as JSON.
+ * except that an action also says how it logs in (the Login action: its
+ * login page and selectors; any other action: the credential it runs as),
+ * and the action LIST also brings each action's newest script version. Dates arrive as ISO strings because they travel as JSON.
  */
 export interface WebsiteItemRecord {
   id: string;
   websiteId: string;
   title: string;
   description: string;
-  /** Actions only: the credential the action logs in as before each run, or null to run logged out. Undefined on use cases. */
+  /** Other actions only: the credential the action runs as, or null to run logged out (always null on the Login action). Undefined on use cases. */
   credentialId?: string | null;
-  /** Actions only: that credential's id and name, or null. Undefined on use cases. */
+  /** Other actions only: that credential's id and name, or null. Undefined on use cases. */
   credential?: { id: string; name: string } | null;
+  /** Login actions only: its own login page, or null to use the website's. Undefined on use cases. */
+  loginUrl?: string | null;
+  /** Login actions only: the CSS selector for the username field, or null to find it automatically. */
+  usernameSelector?: string | null;
+  /** Login actions only: the CSS selector for the password field, or null to find it automatically. */
+  passwordSelector?: string | null;
+  /** Login actions only: the CSS selector for the submit button, or null to find it automatically. */
+  submitSelector?: string | null;
   /** The action list only: the action's newest script version and its newest run, or null when it has no versions. Undefined on use cases and on a single action. */
   newestScript?: NewestActionScriptRecord | null;
   /** Actions only: the user's kind, or null to detect it. */
@@ -62,8 +70,16 @@ export interface WebsiteItemRecord {
 export interface WebsiteItemRequestBody {
   title: string;
   description: string;
-  /** Actions only: the credential to run as, or null for logged out. Left out for use cases. */
+  /** Other actions only: the credential to run as, or null to run logged out. Left out (or null) for the Login action and for use cases. */
   credentialId?: string | null;
+  /** Login actions only: its own login page, or null to use the website's. */
+  loginUrl?: string | null;
+  /** Login actions only: the CSS selector for the username field, or null to find it automatically. */
+  usernameSelector?: string | null;
+  /** Login actions only: the CSS selector for the password field, or null to find it automatically. */
+  passwordSelector?: string | null;
+  /** Login actions only: the CSS selector for the submit button, or null to find it automatically. */
+  submitSelector?: string | null;
   /** Actions only: the kind, or null to detect it. Left out for use cases. */
   userActionKind?: ActionKindRecord | null;
   /** Actions only: the object type key, or null to detect it. */

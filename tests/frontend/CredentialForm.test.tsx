@@ -4,23 +4,12 @@ import { userEvent } from "@testing-library/user-event";
 import CredentialForm, { type CredentialFormProps } from "../../src/components/CredentialForm";
 import { type CredentialRequestBody } from "../../src/hooks/useCredentials";
 
-/** The owning website's login page, which a credential with a blank login page URL uses. */
-const WEBSITE_LOGIN_URL = "https://example.com/login";
-
-/** The helper text of the login page URL field when the website has no login page. */
-const NO_WEBSITE_LOGIN_URL_HELPER_TEXT =
-  "This website has no login page URL yet - enter it here (a successful login will also save it to the website)";
-
-/** A new credential's starting values: every field blank, the login page URL included. */
+/** A new credential's starting values: every field blank. */
 const NEW_CREDENTIAL_VALUES: CredentialRequestBody = {
   name: "",
   description: "",
   username: "",
   password: "",
-  loginUrl: "",
-  usernameSelector: "",
-  passwordSelector: "",
-  submitSelector: "",
 };
 
 /** A saved credential's values, as the edit page seeds them (the password always starts blank). */
@@ -29,15 +18,11 @@ const SAVED_CREDENTIAL_VALUES: CredentialRequestBody = {
   description: "The admin account",
   username: "admin@example.com",
   password: "",
-  loginUrl: "https://example.com/login",
-  usernameSelector: "#email",
-  passwordSelector: "",
-  submitSelector: "button.sign-in",
 };
 
 /**
- * Renders the credential form for a NEW credential of a website with a login
- * page, with spy callbacks, letting a test override any prop.
+ * Renders the credential form for a NEW credential, with spy callbacks,
+ * letting a test override any prop.
  * @param overrides - Props to replace in the default create form
  * @returns The submit and cancel spies, and the rendered form element
  */
@@ -51,7 +36,6 @@ function renderCredentialForm(overrides: Partial<CredentialFormProps> = {}): {
   const { container } = render(
     <CredentialForm
       initialValues={NEW_CREDENTIAL_VALUES}
-      websiteLoginUrl={WEBSITE_LOGIN_URL}
       passwordIsSaved={false}
       submitLabel="Create credential"
       isSubmitting={false}
@@ -85,24 +69,25 @@ function getSubmitButton(label = "Create credential"): HTMLElement {
 }
 
 describe("CredentialForm", () => {
-  it("starts a new credential blank, the login page URL included, with a masked password field", () => {
+  it("starts a new credential blank, with a masked password field and no login page or selector fields (a Login action has those)", () => {
     renderCredentialForm();
 
     expect(getField("Name")).toHaveValue("");
-    expect(getField("Login page URL")).toHaveValue("");
+    expect(getField("Username")).toHaveValue("");
     expect(getField("Password")).toHaveAttribute("type", "password");
     expect(getField("Password")).toBeRequired();
     expect(screen.getByText("Stored encrypted. It is never shown again after you save.")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Login form selectors (optional)" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Login page URL/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Login form selectors (optional)" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/selector/)).not.toBeInTheDocument();
   });
 
-  it("keeps submit disabled until name, username, login page URL, and password are all filled when the website has no login page", async () => {
+  it("keeps submit disabled until name, username, and password are all filled", async () => {
     const user = userEvent.setup();
-    renderCredentialForm({ websiteLoginUrl: null });
+    renderCredentialForm();
 
     await user.type(getField("Name"), "Admin");
     await user.type(getField("Username"), "admin@example.com");
-    await user.type(getField("Login page URL"), "https://example.com/login");
     expect(getSubmitButton()).toBeDisabled();
 
     await user.type(getField("Password"), "   ");
@@ -112,11 +97,11 @@ describe("CredentialForm", () => {
     await user.type(getField("Password"), "correct horse");
     expect(getSubmitButton()).toBeEnabled();
 
-    await user.clear(getField("Login page URL"));
+    await user.clear(getField("Username"));
     expect(getSubmitButton()).toBeDisabled();
   });
 
-  it("sends every field, the selectors included, when submitted", async () => {
+  it("sends every field when submitted", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderCredentialForm();
 
@@ -124,9 +109,6 @@ describe("CredentialForm", () => {
     await user.type(getField("Description"), "The admin account");
     await user.type(getField("Username"), "admin@example.com");
     await user.type(getField("Password"), "correct horse");
-    await user.type(getField("Username field selector"), "#email");
-    await user.type(getField("Password field selector"), "#password");
-    await user.type(getField("Submit button selector"), "button.go");
     await user.click(getSubmitButton());
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -135,72 +117,7 @@ describe("CredentialForm", () => {
       description: "The admin account",
       username: "admin@example.com",
       password: "correct horse",
-      loginUrl: "",
-      usernameSelector: "#email",
-      passwordSelector: "#password",
-      submitSelector: "button.go",
     });
-  });
-
-  it("makes the login page URL optional when the website has one, offering it as the default", async () => {
-    const user = userEvent.setup();
-    const { onSubmit } = renderCredentialForm();
-
-    const loginUrlField = getField("Login page URL");
-    expect(loginUrlField).not.toBeRequired();
-    expect(loginUrlField).toHaveAttribute("placeholder", WEBSITE_LOGIN_URL);
-    expect(loginUrlField).toHaveAccessibleDescription(
-      "Leave blank to use the website's login page (https://example.com/login)",
-    );
-    await user.type(getField("Name"), "Admin");
-    await user.type(getField("Username"), "admin@example.com");
-    await user.type(getField("Password"), "correct horse");
-    expect(getSubmitButton()).toBeEnabled();
-    await user.click(getSubmitButton());
-
-    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ loginUrl: "" }));
-  });
-
-  it("sends a login page URL typed over the website's, overriding it", async () => {
-    const user = userEvent.setup();
-    const { onSubmit } = renderCredentialForm();
-
-    await user.type(getField("Name"), "Admin");
-    await user.type(getField("Username"), "admin@example.com");
-    await user.type(getField("Password"), "correct horse");
-    await user.type(getField("Login page URL"), "https://example.com/admin/login");
-    await user.click(getSubmitButton());
-
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ loginUrl: "https://example.com/admin/login" }),
-    );
-  });
-
-  it("requires the login page URL when the website has none, saying a login will save it to the website", async () => {
-    const user = userEvent.setup();
-    const { onSubmit, formElement } = renderCredentialForm({ websiteLoginUrl: null });
-
-    const loginUrlField = getField("Login page URL");
-    expect(loginUrlField).toBeRequired();
-    expect(loginUrlField).toHaveAttribute("placeholder", "https://example.com/login");
-    expect(loginUrlField).toHaveAccessibleDescription(NO_WEBSITE_LOGIN_URL_HELPER_TEXT);
-    await user.type(getField("Name"), "Admin");
-    await user.type(getField("Username"), "admin@example.com");
-    await user.type(getField("Password"), "correct horse");
-    expect(getSubmitButton()).toBeDisabled();
-    fireEvent.submit(formElement);
-    expect(onSubmit).not.toHaveBeenCalled();
-
-    await user.type(loginUrlField, "   ");
-    expect(getSubmitButton()).toBeDisabled();
-    await user.clear(loginUrlField);
-    await user.type(loginUrlField, "https://example.com/login");
-    expect(getSubmitButton()).toBeEnabled();
-    await user.click(getSubmitButton());
-
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ loginUrl: "https://example.com/login" }),
-    );
   });
 
   it("lets an edit be saved with the password left blank, saying the saved one is kept", async () => {
@@ -211,7 +128,7 @@ describe("CredentialForm", () => {
       submitLabel: "Save changes",
     });
 
-    expect(getField("Username field selector")).toHaveValue("#email");
+    expect(getField("Username")).toHaveValue("admin@example.com");
     expect(getField("Password")).toHaveValue("");
     expect(getField("Password")).not.toBeRequired();
     expect(
@@ -245,9 +162,9 @@ describe("CredentialForm", () => {
   });
 
   it("shows the save error in an alert, and none without one", () => {
-    const { formElement } = renderCredentialForm({ errorMessage: "A login page URL is required" });
+    const { formElement } = renderCredentialForm({ errorMessage: "A username is required" });
 
-    expect(screen.getByRole("alert")).toHaveTextContent("A login page URL is required");
+    expect(screen.getByRole("alert")).toHaveTextContent("A username is required");
     expect(formElement).toBeInTheDocument();
   });
 

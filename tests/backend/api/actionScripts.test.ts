@@ -25,6 +25,8 @@ const mockDbService = vi.hoisted(() => ({
   findActionCleanupForCreateAction: vi.fn(),
   findNewestActionScriptForAction: vi.fn(),
   recordActionScriptRunCleanup: vi.fn(),
+  /** The website's one Login action; answers null - the website has none - unless a test says otherwise. */
+  findLoginActionForWebsite: vi.fn(),
 }));
 
 /**
@@ -55,9 +57,12 @@ const mockActionPlanRunnerService = vi.hoisted(() => ({
   runActionPlan: vi.fn(),
 }));
 
-/** The login helper is replaced so no spec ever decrypts a password. */
+/**
+ * The login details builder is replaced so no spec ever decrypts a password;
+ * the login page and message helpers stay real.
+ */
 const mockCrawlerLoginService = vi.hoisted(() => ({
-  buildCrawlLoginDetails: vi.fn(),
+  buildLoginDetails: vi.fn(),
 }));
 
 /** The key check is replaced so each spec decides whether a key is configured. */
@@ -70,7 +75,10 @@ vi.mock("../../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
 vi.mock("../../../server/services/scriptModelService.js", () => mockScriptModelService);
 vi.mock("../../../server/services/actionPlanRunnerService.js", () => mockActionPlanRunnerService);
-vi.mock("../../../server/services/crawlerLoginService.js", () => mockCrawlerLoginService);
+vi.mock("../../../server/services/crawlerLoginService.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../server/services/crawlerLoginService.js")>()),
+  ...mockCrawlerLoginService,
+}));
 vi.mock("../../../server/utils/credentialEncryption.js", () => mockCredentialEncryption);
 vi.mock("../../../server/services/actionParameterService.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../server/services/actionParameterService.js")>()),
@@ -130,10 +138,16 @@ function createActionScriptsApp(): Express {
 
 const ACTION_ALREADY_RUNNING_MESSAGE =
   "This action is already running; wait for that run to finish before starting another";
+const WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE =
+  "This website has no login action yet - look for a login form on its Credentials tab, or add an action with the kind Login";
+const LOGIN_ACTION_HAS_NO_LOGIN_PAGE_MESSAGE =
+  'The login action "Log in" has no login page URL, and neither does its website; add one to log in';
+const LOGIN_ACTION_HAS_NO_STEPS_MESSAGE =
+  "A login action logs in by itself, so it has no steps to write, run, or refine; use Run login instead";
 const ACTION_CREDENTIAL_MISSING_MESSAGE =
   "This action's credential no longer exists; edit the action to pick another one";
 const PLAN_NEEDS_A_CREDENTIAL_MESSAGE =
-  "This plan types the credential's username or password, but the action runs logged out; edit the action to pick a credential";
+  "This plan types the credential's username or password, but the action runs logged out; edit the action to pick a credential to log in as";
 
 /** A valid plan that needs no credential: open the site, click Sign in, check the result. */
 const CLICK_SIGN_IN_PLAN = {
@@ -187,39 +201,65 @@ const foundAction = {
   id: "action-id-from-db",
   websiteId: foundWebsite.id,
   credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
   title: "Log in",
   description: "Click Sign in and log in",
+  userActionKind: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,
   credential: null,
 };
-/** The website's credential, without its password, as `findCredentialForWebsite` returns it. Its login page is on another host. */
+/**
+ * The website's credential, without its password, as `findCredentialForWebsite`
+ * returns it. The website's Login action says where to log in.
+ */
 const foundCredential = {
   id: "credential-id-from-db",
   websiteId: foundWebsite.id,
   name: "Admin",
   description: null,
   username: "admin@example.com",
-  loginUrl: "https://auth.example.com/login",
-  usernameSelector: null,
-  passwordSelector: null,
-  submitSelector: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,
 };
 /** The same credential with its encrypted password, as only the run route reads it. */
 const foundCredentialWithPassword = { ...foundCredential, encryptedPassword: "iv.tag.ciphertext" };
-/** The same action, linked to that credential. */
-const foundLinkedAction = {
+/**
+ * The website's one Login action, as `findLoginActionForWebsite` reads it: it
+ * logs in on its own login page on another host, as whichever credential the
+ * action runs as.
+ */
+const foundWebsiteLoginAction = {
+  id: "login-action-id-from-db",
+  websiteId: foundWebsite.id,
+  credentialId: null,
+  loginUrl: "https://auth.example.com/login",
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+  title: "Log in",
+  description: "Signs in with the picked account",
+  userActionKind: "login",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  deletedAt: null,
+};
+/** The same action as `foundAction`, running as that credential (it logs in through the website's Login action first). */
+const foundActionRunningAsCredential = {
   ...foundAction,
   credentialId: foundCredential.id,
   credential: { id: foundCredential.id, name: foundCredential.name },
 };
-/** What `buildCrawlLoginDetails` hands back for the credential (password decrypted). */
+/** The Login action itself, as an action read returns it: it logs in by itself and has no steps. */
+const foundLoginAction = { ...foundWebsiteLoginAction, credential: null };
+/** What `buildLoginDetails` hands back for the Login action (password decrypted). */
 const loginDetails = {
-  loginUrl: foundCredential.loginUrl,
+  loginUrl: foundWebsiteLoginAction.loginUrl,
   username: foundCredential.username,
   password: "decrypted-password",
   usernameSelector: null,
@@ -446,9 +486,23 @@ function createDeferred<TValue>(): Deferred<TValue> {
   return { promise, resolve: resolvePromise };
 }
 
+/**
+ * Makes the looked-up action the one that runs as the website's credential,
+ * and gives the website its Login action, so a route logs in through it.
+ * @param websiteLoginAction - The website's Login action as `findLoginActionForWebsite` answers it; `foundWebsiteLoginAction` by default
+ */
+function useActionRunningAsCredential(
+  websiteLoginAction: Omit<typeof foundWebsiteLoginAction, "loginUrl"> & { loginUrl: string | null } = foundWebsiteLoginAction,
+): void {
+  mockDbService.findActionForWebsite.mockResolvedValue(foundActionRunningAsCredential);
+  mockDbService.findLoginActionForWebsite.mockResolvedValue(websiteLoginAction);
+}
+
 describe("Action script routes", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    // The website has no Login action unless a test says otherwise.
+    mockDbService.findLoginActionForWebsite.mockResolvedValue(null);
     // Every route checks its parents first; they exist unless a test says not.
     mockDbService.findWebsiteById.mockResolvedValue(foundWebsite);
     mockDbService.findActionForWebsite.mockResolvedValue(foundAction);
@@ -461,7 +515,7 @@ describe("Action script routes", () => {
     mockDbService.findLatestCrawledPagesForWebsite.mockResolvedValue([]);
     mockScriptModelService.findScriptModel.mockResolvedValue(opusModel);
     mockCredentialEncryption.credentialEncryptionIsConfigured.mockReturnValue(true);
-    mockCrawlerLoginService.buildCrawlLoginDetails.mockReturnValue(loginDetails);
+    mockCrawlerLoginService.buildLoginDetails.mockReturnValue(loginDetails);
     // A version has no parameters, and a run's follow-up and a version's
     // sync succeed, unless a test says otherwise.
     mockActionParameterService.loadVersionParameters.mockResolvedValue(EMPTY_PARAMETERS_VIEW);
@@ -619,10 +673,10 @@ describe("Action script routes", () => {
       );
     });
 
-    it("converts a logged-in action with its credential's name, the login pages' origins, and a crawl done as that credential", async () => {
+    it("converts an action that runs as a credential with that credential's name, the login pages' origins (the website's and its Login action's), and a crawl done as that credential", async () => {
       const websiteWithLoginPage = { ...foundWebsite, loginUrl: "https://sso.example.org/sign-in" };
       mockDbService.findWebsiteById.mockResolvedValue(websiteWithLoginPage);
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
+      useActionRunningAsCredential();
       mockDbService.findLatestCrawledPagesForWebsite.mockResolvedValue([crawledStartPage]);
       mockScriptGenerationService.convertActionToPlan.mockResolvedValue(cleanConversion);
       mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
@@ -634,6 +688,7 @@ describe("Action script routes", () => {
         foundWebsite.id,
         foundCredential.id,
       );
+      expect(mockDbService.findLoginActionForWebsite).toHaveBeenCalledWith(foundWebsite.id);
       expect(mockDbService.findCredentialWithPasswordForWebsite).not.toHaveBeenCalled();
       expect(mockDbService.findLatestCrawledPagesForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
@@ -669,8 +724,8 @@ describe("Action script routes", () => {
       );
     });
 
-    it("converts logged out when the action's credential no longer exists", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
+    it("converts without a credential, reading a logged-out crawl, when the credential it runs as no longer exists - still allowing the Login action's login page", async () => {
+      useActionRunningAsCredential();
       mockDbService.findCredentialForWebsite.mockResolvedValue(null);
       mockScriptGenerationService.convertActionToPlan.mockResolvedValue(cleanConversion);
       mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
@@ -686,10 +741,37 @@ describe("Action script routes", () => {
         expect.objectContaining({
           credentialId: null,
           credentialName: null,
-          allowedOrigins: ["https://example.com"],
+          allowedOrigins: ["https://example.com", "https://auth.example.com"],
         }),
         { model: opusModel, effort: "high" },
       );
+    });
+
+    it("converts without a credential, looking none up, for an action that runs logged out on a website with a Login action", async () => {
+      mockDbService.findLoginActionForWebsite.mockResolvedValue(foundWebsiteLoginAction);
+      mockScriptGenerationService.convertActionToPlan.mockResolvedValue(cleanConversion);
+      mockDbService.createActionScriptForAction.mockResolvedValue(foundScript);
+
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
+
+      expect(res.status).toBe(201);
+      expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
+      expect(mockScriptGenerationService.convertActionToPlan).toHaveBeenCalledWith(
+        expect.objectContaining({ credentialId: null, credentialName: null }),
+        { model: opusModel, effort: "high" },
+      );
+    });
+
+    it("returns 409 and converts nothing for a Login action, which logs in by itself and has no steps", async () => {
+      mockDbService.findActionForWebsite.mockResolvedValue(foundLoginAction);
+
+      const res = await request(createActionScriptsApp()).post(SCRIPTS_PATH).send(OPUS_HIGH_CHOICE);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: LOGIN_ACTION_HAS_NO_STEPS_MESSAGE });
+      expect(mockScriptModelService.findScriptModel).not.toHaveBeenCalled();
+      expect(mockScriptGenerationService.convertActionToPlan).not.toHaveBeenCalled();
+      expect(mockDbService.createActionScriptForAction).not.toHaveBeenCalled();
     });
 
     it("converts with no context pages, and saves none, when the website was never crawled", async () => {
@@ -968,6 +1050,16 @@ describe("Action script routes", () => {
       mockDbService.findActionScriptForAction.mockResolvedValue(sourceScript);
     });
 
+    it("returns 409 and saves nothing for a Login action, even one that kept a version from before its kind changed", async () => {
+      mockDbService.findActionForWebsite.mockResolvedValue(foundLoginAction);
+
+      const res = await request(createActionScriptsApp()).post(EDITS_PATH).send({ plan: editedPlan });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: LOGIN_ACTION_HAS_NO_STEPS_MESSAGE });
+      expect(mockDbService.createActionScriptForAction).not.toHaveBeenCalled();
+    });
+
     it("saves the edited plan as a new version that copies its source's snapshots, and returns 201", async () => {
       mockDbService.createActionScriptForAction.mockResolvedValue(editedVersion);
 
@@ -1007,8 +1099,8 @@ describe("Action script routes", () => {
       expect(mockScriptGenerationService.convertActionToPlan).not.toHaveBeenCalled();
     });
 
-    it("lets a logged-in action's edited plan open its credential's login page", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
+    it("lets the edited plan of an action that logs in open the website's Login action's login page, looking up no credential", async () => {
+      useActionRunningAsCredential();
       mockDbService.createActionScriptForAction.mockResolvedValue(editedVersion);
       const planThatOpensTheLoginPage = {
         ...editedPlan,
@@ -1020,10 +1112,8 @@ describe("Action script routes", () => {
         .send({ plan: planThatOpensTheLoginPage });
 
       expect(res.status).toBe(201);
-      expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
-        foundWebsite.id,
-        foundCredential.id,
-      );
+      expect(mockDbService.findLoginActionForWebsite).toHaveBeenCalledWith(foundWebsite.id);
+      expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
       expect(mockDbService.createActionScriptForAction).toHaveBeenCalledWith(
         foundWebsite.id,
         foundAction.id,
@@ -1031,7 +1121,7 @@ describe("Action script routes", () => {
       );
     });
 
-    it("returns 400 for a logged-out action's plan that opens the credential's login host", async () => {
+    it("returns 400 for a logged-out action's plan that opens a Login action's login host", async () => {
       const planThatOpensTheLoginPage = {
         ...editedPlan,
         steps: [{ action: "goto", target: null, value: "https://auth.example.com/login" }],
@@ -1243,7 +1333,7 @@ describe("Action script routes", () => {
       // Logging out needs no credential, so neither the key nor the password is touched.
       expect(mockCredentialEncryption.credentialEncryptionIsConfigured).not.toHaveBeenCalled();
       expect(mockDbService.findCredentialWithPasswordForWebsite).not.toHaveBeenCalled();
-      expect(mockCrawlerLoginService.buildCrawlLoginDetails).not.toHaveBeenCalled();
+      expect(mockCrawlerLoginService.buildLoginDetails).not.toHaveBeenCalled();
       expect(mockDbService.createActionScriptRunForScript).toHaveBeenCalledWith(
         foundWebsite.id,
         foundAction.id,
@@ -1283,8 +1373,8 @@ describe("Action script routes", () => {
       expect(mockActionPlanRunnerService.runActionPlan).toHaveBeenCalledTimes(1);
     });
 
-    it("logs a logged-in action in as its credential first, and records the credential's name", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
+    it("logs an action in through the website's Login action first, as the credential it runs as, and records the credential's name", async () => {
+      useActionRunningAsCredential();
       mockDbService.findActionScriptForAction.mockResolvedValue({
         ...foundScript,
         plan: CREDENTIAL_PLAN,
@@ -1302,13 +1392,14 @@ describe("Action script routes", () => {
         foundWebsite.id,
         foundCredential.id,
       );
-      expect(mockCrawlerLoginService.buildCrawlLoginDetails).toHaveBeenCalledWith(
+      expect(mockCrawlerLoginService.buildLoginDetails).toHaveBeenCalledWith(
+        foundWebsiteLoginAction,
         foundCredentialWithPassword,
         foundWebsite,
       );
       expect(readRunRequestWithoutRunDirectory()).toEqual({
         plan: CREDENTIAL_PLAN,
-        login: { credentialName: foundCredential.name, details: loginDetails },
+        login: { loginActionTitle: foundWebsiteLoginAction.title, credentialName: foundCredential.name, details: loginDetails },
         timingSettings: { networkIdleTimeoutMs: 7000, screenshotMinimumWaitMs: 250 },
         allowedOrigins: ["https://example.com", "https://auth.example.com"],
         uploadsDirectory: path.join(FIXTURE_ACTION_SCRIPT_DIRECTORY, "uploads"),
@@ -1323,14 +1414,11 @@ describe("Action script routes", () => {
       );
     });
 
-    it("logs in through the website's login page when the credential has none of its own", async () => {
+    it("logs in through the website's login page when the Login action has none of its own", async () => {
       const websiteWithLoginPage = { ...foundWebsite, loginUrl: "https://example.com/login" };
+      const inheritingLoginAction = { ...foundWebsiteLoginAction, loginUrl: null };
       mockDbService.findWebsiteById.mockResolvedValue(websiteWithLoginPage);
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
-      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue({
-        ...foundCredentialWithPassword,
-        loginUrl: null,
-      });
+      useActionRunningAsCredential(inheritingLoginAction);
       mockActionPlanRunnerService.runActionPlan.mockResolvedValue(passingRunResult);
       mockDbService.createActionScriptRunForScript.mockResolvedValue(sampleRun);
 
@@ -1338,14 +1426,27 @@ describe("Action script routes", () => {
 
       expect(res.status).toBe(201);
       expect(readRunRequest().allowedOrigins).toEqual(["https://example.com"]);
-      expect(mockCrawlerLoginService.buildCrawlLoginDetails).toHaveBeenCalledWith(
-        { ...foundCredentialWithPassword, loginUrl: null },
+      expect(mockCrawlerLoginService.buildLoginDetails).toHaveBeenCalledWith(
+        inheritingLoginAction,
+        foundCredentialWithPassword,
         websiteWithLoginPage,
       );
     });
 
-    it("returns 503 and runs nothing when a logged-in action runs without a configured credential key", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
+    it("returns 409 and runs nothing for a Login action itself, which has no steps to run", async () => {
+      mockDbService.findActionForWebsite.mockResolvedValue(foundLoginAction);
+
+      const res = await request(createActionScriptsApp()).post(RUNS_PATH);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: LOGIN_ACTION_HAS_NO_STEPS_MESSAGE });
+      expect(mockDbService.findCredentialWithPasswordForWebsite).not.toHaveBeenCalled();
+      expect(mockActionPlanRunnerService.runActionPlan).not.toHaveBeenCalled();
+      expect(mockDbService.createActionScriptRunForScript).not.toHaveBeenCalled();
+    });
+
+    it("returns 503 and runs nothing when an action that logs in runs without a configured credential key", async () => {
+      useActionRunningAsCredential();
       mockCredentialEncryption.credentialEncryptionIsConfigured.mockReturnValue(false);
 
       const res = await request(createActionScriptsApp()).post(RUNS_PATH);
@@ -1359,8 +1460,21 @@ describe("Action script routes", () => {
       expect(mockDbService.createActionScriptRunForScript).not.toHaveBeenCalled();
     });
 
-    it("returns 409 and runs nothing when the action's credential no longer exists", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
+    it("returns 409 and runs nothing when the action runs as a credential but the website has no Login action", async () => {
+      useActionRunningAsCredential();
+      mockDbService.findLoginActionForWebsite.mockResolvedValue(null);
+
+      const res = await request(createActionScriptsApp()).post(RUNS_PATH);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE });
+      expect(mockCrawlerLoginService.buildLoginDetails).not.toHaveBeenCalled();
+      expect(mockActionPlanRunnerService.runActionPlan).not.toHaveBeenCalled();
+      expect(mockDbService.createActionScriptRunForScript).not.toHaveBeenCalled();
+    });
+
+    it("returns 409 and runs nothing when the credential it runs as no longer exists", async () => {
+      useActionRunningAsCredential();
       mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue(null);
 
       const res = await request(createActionScriptsApp()).post(RUNS_PATH);
@@ -1370,21 +1484,14 @@ describe("Action script routes", () => {
       expect(mockActionPlanRunnerService.runActionPlan).not.toHaveBeenCalled();
     });
 
-    it("returns 400 and runs nothing when neither the credential nor its website has a login page URL", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
-      mockDbService.findCredentialWithPasswordForWebsite.mockResolvedValue({
-        ...foundCredentialWithPassword,
-        loginUrl: null,
-      });
+    it("returns 400 and runs nothing when neither the website's Login action nor the website has a login page URL", async () => {
+      useActionRunningAsCredential({ ...foundWebsiteLoginAction, loginUrl: null });
 
       const res = await request(createActionScriptsApp()).post(RUNS_PATH);
 
       expect(res.status).toBe(400);
-      expect(res.body).toEqual({
-        error:
-          'The credential "Admin" has no login page URL, and neither does its website; add one to log in',
-      });
-      expect(mockCrawlerLoginService.buildCrawlLoginDetails).not.toHaveBeenCalled();
+      expect(res.body).toEqual({ error: LOGIN_ACTION_HAS_NO_LOGIN_PAGE_MESSAGE });
+      expect(mockCrawlerLoginService.buildLoginDetails).not.toHaveBeenCalled();
       expect(mockActionPlanRunnerService.runActionPlan).not.toHaveBeenCalled();
     });
 
@@ -1625,8 +1732,8 @@ describe("Action script routes", () => {
     });
 
     it("returns 500, runs nothing, and accepts the next run when the password cannot be decrypted", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
-      mockCrawlerLoginService.buildCrawlLoginDetails.mockImplementationOnce(() => {
+      useActionRunningAsCredential();
+      mockCrawlerLoginService.buildLoginDetails.mockImplementationOnce(() => {
         throw new Error("Unsupported state or unable to authenticate data");
       });
       mockActionPlanRunnerService.runActionPlan.mockResolvedValue(passingRunResult);
@@ -2161,20 +2268,33 @@ describe("Action script routes", () => {
       expect(readRefinementRequest(1).note).toBeNull();
     });
 
-    it("allows the origins of the action's CURRENT credential's login page", async () => {
-      mockDbService.findActionForWebsite.mockResolvedValue(foundLinkedAction);
+    it("allows the origin of the login page of the website's CURRENT Login action", async () => {
+      useActionRunningAsCredential();
 
       const res = await request(createActionScriptsApp()).post(REFINEMENTS_PATH).send({ note: NOTE });
 
       expect(res.status).toBe(201);
-      expect(mockDbService.findCredentialForWebsite).toHaveBeenCalledWith(
-        foundWebsite.id,
-        foundCredential.id,
-      );
+      expect(mockDbService.findLoginActionForWebsite).toHaveBeenCalledWith(foundWebsite.id);
+      expect(mockDbService.findCredentialForWebsite).not.toHaveBeenCalled();
       expect(readRefinementRequest().allowedOrigins).toEqual([
         "https://example.com",
         "https://auth.example.com",
       ]);
+    });
+
+    it("returns 409 and refines nothing for a Login action, which has no steps to refine", async () => {
+      mockDbService.findActionForWebsite.mockResolvedValue(foundLoginAction);
+
+      const res = await request(createActionScriptsApp()).post(REFINEMENTS_PATH).send({ note: NOTE });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: LOGIN_ACTION_HAS_NO_STEPS_MESSAGE });
+      expect(mockScriptGenerationService.refineActionPlan).not.toHaveBeenCalled();
+      expect(mockDbService.createRefinedActionScriptForAction).not.toHaveBeenCalled();
+
+      mockDbService.findActionForWebsite.mockResolvedValue(foundAction);
+      const nextRefineResponse = await request(createActionScriptsApp()).post(REFINEMENTS_PATH).send({ note: NOTE });
+      expect(nextRefineResponse.status).toBe(201);
     });
 
     it("reads the pages of a logged-out crawl for a version that ran logged out", async () => {
@@ -2917,6 +3037,7 @@ describe("Action script routes: cleanup", () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockDbService.findLoginActionForWebsite.mockResolvedValue(null);
     mockDbService.findWebsiteById.mockResolvedValue(foundWebsite);
     mockDbService.findActionForWebsite.mockResolvedValue(foundAction);
     mockDbService.findActionScriptForAction.mockResolvedValue(foundScript);

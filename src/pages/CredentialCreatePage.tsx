@@ -11,29 +11,19 @@ import { useReturnNavigation } from "../hooks/useReturnNavigation";
 import { useWebsite } from "../hooks/useWebsites";
 import { WEBSITE_LIST_PATH, credentialsApiUrl, websiteDetailPath } from "../utils/routePaths";
 
-/**
- * A new credential's starting values: every field blank. A blank login page
- * URL uses the website's login page; the form requires one only when the
- * website has none.
- */
+/** A new credential's starting values: every field blank. */
 const NEW_CREDENTIAL_VALUES: CredentialRequestBody = {
   name: "",
   description: "",
   username: "",
   password: "",
-  loginUrl: "",
-  usernameSelector: "",
-  passwordSelector: "",
-  submitSelector: "",
 };
 
 /**
  * The create-credential page (`/websites/:websiteId/credentials/new`).
  *
- * Loads the website first (for the breadcrumb and for its login page URL,
- * which the form offers as the default - or, when the website has none,
- * requires the credential to have its own), then mounts the form with every
- * field blank. Save and Cancel both
+ * Loads the website first (for the breadcrumb), then mounts the form with
+ * every field blank. Save and Cancel both
  * return to the website's page history-aware (see `useReturnNavigation`):
  * credentials are listed there, and have no page of their own to open. Its
  * "Create credential" button carries a plus, like every button that creates
@@ -98,7 +88,6 @@ export default function CredentialCreatePage(): ReactElement {
         <CredentialForm
           key={website.id}
           initialValues={NEW_CREDENTIAL_VALUES}
-          websiteLoginUrl={website.loginUrl}
           passwordIsSaved={false}
           submitLabel="Create credential"
           submitButtonShowsPlus

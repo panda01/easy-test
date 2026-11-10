@@ -1,4 +1,5 @@
 import {
+  LOGIN_ACTION_KIND,
   type ActionKindRecord,
   type ActionObjectRoleRecord,
   type CrudActionKindRecord,
@@ -15,24 +16,28 @@ export const ACTION_KIND_LABELS: Record<ActionKindRecord, string> = {
   read: "Read",
   update: "Update",
   delete: "Delete",
+  login: "Login",
 };
 
 /** What each action kind means, under the kind select. */
 export const ACTION_KIND_HELP: Record<ActionKindRecord, string> = {
-  parameters: "The action only takes typed values, like logging in; it touches no object.",
+  parameters: "The action only takes typed values; it touches no object.",
   create: "The action makes a new object, which each run records and its delete action cleans up.",
   read: "The action opens or checks an existing object without changing it.",
   update: "The action changes an existing object, which every run must name.",
   delete: "The action deletes the object its create action makes; it shares that action's parameters, and a passed run marks the object deleted.",
+  login: "The website's one login: it types the username and password of whichever credential an action or crawl runs as, before they start.",
 };
 
 /**
- * Says whether a kind can have an object type: every kind but Parameters.
+ * Says whether a kind can have an object type: every kind but Parameters and
+ * Login.
  * @param kind - The kind, or null before anything is detected (then yes)
  * @returns True for the four object kinds and for null
  */
 export function kindTakesAnObjectType(kind: ActionKindRecord | null): boolean {
-  return kind !== "parameters";
+  const kindTouchesNoObject = kind === "parameters" || kind === LOGIN_ACTION_KIND;
+  return !kindTouchesNoObject;
 }
 
 /**
@@ -86,7 +91,7 @@ const OBJECT_KIND_VERBS: Record<CrudActionKindRecord, string> = {
  * Describes an action's object role in one line for its page's header:
  * "Reads a Project (detected, High)", "Deletes a Project (you chose)",
  * "Creates a Project, named by School name, confirmed by step 7 (detected,
- * High)", or null for an action that only takes typed values. The cleanup
+ * High)", or null for an action that only takes typed values or logs in. The cleanup
  * links (which Delete action cleans up after a Create action) are shown
  * beside it by the page, not in this line.
  * @param role - The action's role
@@ -99,13 +104,15 @@ export function describeObjectRole(
   role: ActionObjectRoleRecord,
   createDetails: { nameParameterLabel: string | null; confirmStepNumber: number | null },
 ): string | null {
-  if (role.kind === "parameters") return null;
+  const { kind } = role;
+  const actionTouchesNoObject = kind === "parameters" || kind === LOGIN_ACTION_KIND;
+  if (actionTouchesNoObject) return null;
   const typeName = role.objectTypeName ?? "object";
   const article = /^[aeiou]/i.test(typeName) ? "an" : "a";
   const sourceText =
     role.kindSource === "you" ? "you chose" : `detected, ${describeConfidence(role.detectedKind.confidence)}`;
-  const verb = OBJECT_KIND_VERBS[role.kind];
-  if (role.kind !== "create") {
+  const verb = OBJECT_KIND_VERBS[kind];
+  if (kind !== "create") {
     return `${verb} ${article} ${typeName} (${sourceText})`;
   }
   const nameText =

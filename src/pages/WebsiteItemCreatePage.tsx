@@ -5,7 +5,7 @@ import DeleteActionStep from "../components/DeleteActionStep";
 import LoadStatusNotice from "../components/LoadStatusNotice";
 import PageBreadcrumbs from "../components/PageBreadcrumbs";
 import TitleDescriptionForm from "../components/TitleDescriptionForm";
-import { useCredentials } from "../hooks/useCredentials";
+import { useLoginChoices } from "../hooks/useLoginChoices";
 import { useWebObjects } from "../hooks/useWebObjects";
 import { useJsonMutation } from "../hooks/useJsonMutation";
 import { useRequiredRouteParam } from "../hooks/useRequiredRouteParam";
@@ -26,8 +26,9 @@ const EMPTY_ITEM_VALUES: WebsiteItemRequestBody = { title: "", description: "" }
 /**
  * The create page for a use case or an action
  * (`/websites/:websiteId/<use-cases|actions>/new`). An action's form also
- * asks which of the website's credentials it logs in as (or none), and what
- * it does with an object (Kind and Object type - each on "Detect" to start).
+ * asks what it does with an object (Kind and Object type - each on "Detect"
+ * to start) and how it logs in: the Login action's login page and
+ * selectors, or the credential any other action runs as (or none).
  *
  * Loads the owning website first - for the breadcrumb, and so a deleted or
  * unknown website shows "Website not found" instead of a form that cannot be
@@ -51,13 +52,12 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
   const { sendJsonRequest, isSubmitting, errorMessage } = useJsonMutation();
   const { returnTo, replaceKeepingReturnState } = useReturnNavigation();
   const websitePath = websiteDetailPath(websiteId);
-  const itemTakesACredential = itemKind.kindId === "action";
-  const credentialsResource = useCredentials(websiteId, itemTakesACredential);
-  const credentials = credentialsResource.data;
-  // An action's form waits for the credential list, so "Log in as" never
-  // starts out missing a credential the user could pick.
-  const formIsReady = !itemTakesACredential || credentials !== null;
-  const credentialOptions = itemTakesACredential ? (credentials ?? []) : undefined;
+  const itemTakesALogin = itemKind.kindId === "action";
+  const loginChoicesState = useLoginChoices(websiteId, itemTakesALogin, website?.loginUrl ?? null, null);
+  const { loginChoices } = loginChoicesState;
+  // An action's form waits for the credential and Login action lists, so its
+  // login selects never start out missing a choice the user could pick.
+  const formIsReady = !itemTakesALogin || loginChoices !== null;
   const webObjects = useWebObjects(websiteId).data ?? [];
   const objectTypes = webObjects.map((webObject) => ({
     key: webObject.instancePatternKey,
@@ -76,7 +76,7 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
     const result = await sendJsonRequest("POST", websiteItemsApiUrl(itemKind, websiteId), values);
     if (!result.succeeded) return;
     const createdItem = result.data as WebsiteItemRecord;
-    const itemIsACreateAction = itemTakesACredential && createdItem.objectRole?.kind === "create";
+    const itemIsACreateAction = itemTakesALogin && createdItem.objectRole?.kind === "create";
     if (itemIsACreateAction) {
       setCreatedCreateAction(createdItem);
       return;
@@ -123,11 +123,11 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
         loadingLabel="Loading website"
       />
 
-      {itemTakesACredential && (
+      {itemTakesALogin && (
         <LoadStatusNotice
-          isLoading={credentialsResource.isLoading}
-          errorMessage={credentialsResource.errorMessage}
-          loadingLabel="Loading credentials"
+          isLoading={loginChoicesState.isLoading}
+          errorMessage={loginChoicesState.errorMessage}
+          loadingLabel="Loading credentials and login actions"
         />
       )}
 
@@ -150,8 +150,8 @@ export default function WebsiteItemCreatePage(props: WebsiteItemPageProps): Reac
           errorMessage={errorMessage}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
-          credentialOptions={credentialOptions}
-          objectRoleChoices={itemTakesACredential ? { objectTypes, detectedRole: null } : undefined}
+          loginChoices={loginChoices ?? undefined}
+          objectRoleChoices={itemTakesALogin ? { objectTypes, detectedRole: null } : undefined}
         />
       )}
     </Container>

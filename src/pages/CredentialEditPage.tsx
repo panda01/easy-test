@@ -19,11 +19,9 @@ import { WEBSITE_LIST_PATH, credentialApiUrl, websiteDetailPath } from "../utils
  * which is also where a credential is deleted - it has no separate detail
  * page.
  *
- * Loads the credential and its website first and only then mounts the form,
- * keyed by the credential's id, so the fields start from the saved values and
- * the login page URL field knows the website's login page (the default when
- * the credential has no URL of its own, which then starts blank). The
- * password field always starts blank (the server never sends the password);
+ * Loads the credential and its website (for the breadcrumb) first and only
+ * then mounts the form, keyed by the credential's id, so the fields start
+ * from the saved values. The password field always starts blank (the server never sends the password);
  * leaving it blank keeps the saved one. Save, Cancel, and a successful Delete
  * all return to the
  * website's page history-aware (see `useReturnNavigation`).
@@ -144,12 +142,7 @@ export default function CredentialEditPage(): ReactElement {
             description: credential.description ?? "",
             username: credential.username,
             password: "",
-            loginUrl: credential.loginUrl ?? "",
-            usernameSelector: credential.usernameSelector ?? "",
-            passwordSelector: credential.passwordSelector ?? "",
-            submitSelector: credential.submitSelector ?? "",
           }}
-          websiteLoginUrl={website.loginUrl}
           passwordIsSaved={credential.hasPassword}
           submitLabel="Save changes"
           isSubmitting={isSubmitting}
@@ -163,7 +156,7 @@ export default function CredentialEditPage(): ReactElement {
         <ConfirmDeleteDialog
           isOpen={deleteDialogIsOpen}
           title="Delete credential?"
-          message={`"${credential.name}" will be deleted. Past crawls that logged in with it keep its name.`}
+          message={`"${credential.name}" will be deleted. Past crawls that logged in with it keep its name, and the login actions that log in as it will need another credential.`}
           isDeleting={isDeleting}
           errorMessage={deleteErrorMessage}
           onCancel={handleDeleteCancel}

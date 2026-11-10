@@ -6,11 +6,16 @@ import {
   listCrawledPageSummariesForRun,
   findCrawledPageForRun,
   findCredentialWithPasswordForWebsite,
+  findLoginActionForWebsite,
   findWebObjectNamesForCrawlRun,
-  type Credential,
   type CrawledPageSummary,
 } from "../services/dbService.js";
-import { startCrawlRun } from "../services/crawlRunService.js";
+import { startCrawlRun, type CrawlLoginChoice } from "../services/crawlRunService.js";
+import {
+  WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE,
+  describeLoginActionWithoutLoginPage,
+  findEffectiveLoginUrl,
+} from "../services/crawlerLoginService.js";
 import { buildCrawlPageGrouping } from "../services/webObjectService.js";
 import { describeError } from "../utils/describeError.js";
 import { readSendErrorStatus } from "../utils/readSendErrorStatus.js";
@@ -25,8 +30,6 @@ const CRAWL_RUN_NOT_FOUND_MESSAGE = "Crawl run not found";
 const CRAWLED_PAGE_NOT_FOUND_MESSAGE = "Crawled page not found";
 const CREDENTIAL_NOT_FOUND_MESSAGE = "Credential not found";
 const CRAWL_ALREADY_RUNNING_MESSAGE = "A crawl is already running for this website";
-const CREDENTIAL_HAS_NO_EFFECTIVE_LOGIN_URL_MESSAGE =
-  "This credential has no login page URL, and neither does the website";
 const RUN_HAS_NO_LOGIN_FAILURE_SCREENSHOT_MESSAGE =
   "This crawl has no login failure screenshot";
 const SCREENSHOT_FILE_NOT_FOUND_MESSAGE = "Screenshot file not found";
@@ -65,8 +68,8 @@ function omitStructureSkeleton(
 export function registerCrawlRunRoutes(app: Express, screenshotDirectory: string): void {
   /**
    * Lists a website's active crawl runs, newest first, without their pages.
-   * Each run carries `credential: { id, name }` (null for a logged-out crawl)
-   * and `isLoggedIn`.
+   * Each run carries `credential: { id, name }` (null for a logged-out
+   * crawl) and `isLoggedIn`.
    * @route GET /api/websites/:websiteId/crawl-runs
    * @param websiteId - Path parameter: the owning website's cuid
    * @returns 200 with an array of crawl runs; 404 with `{ error }` when the website does not exist or was deleted; 500 with `{ error }` when a query fails
@@ -98,10 +101,10 @@ export function registerCrawlRunRoutes(app: Express, screenshotDirectory: string
    * delete, update, logout, pay, confirm, ...), and `openOnly` clicks only
    * buttons that say "open".
    *
-   * With a `credentialId`, the crawler first logs in as that credential - on
-   * its EFFECTIVE login URL: its own `loginUrl`, or else the website's - and
-   * records no page until the login succeeds; the run's `isLoggedIn` then
-   * turns true. A failed login ends the run `failed`, with no pages, and with
+   * With a `credentialId`, the crawler first logs in as that credential the
+   * way the website's Login action does - on its EFFECTIVE login URL: its
+   * own `loginUrl`, or else the website's - and records no page until the
+   * login succeeds; the run's `isLoggedIn` then turns true. A failed login ends the run `failed`, with no pages, and with
    * a screenshot of what the browser showed (see
    * `GET .../login-failure-screenshot`). Without one (or with no body at all)
    * it crawls as a logged-out visitor.
@@ -111,7 +114,7 @@ export function registerCrawlRunRoutes(app: Express, screenshotDirectory: string
    * @route POST /api/websites/:websiteId/crawl-runs
    * @param websiteId - Path parameter: the website's cuid
    * @param body - Optional JSON `{ credentialId?, buttonMode? }`: `credentialId` is the cuid of one of the website's credentials to log in as, or null / left out to crawl logged out; `buttonMode` is `linksOnly`, `allButRisky`, or `openOnly`, or null / left out for `linksOnly`
-   * @returns 201 with the new crawl run; 400 with `{ error }` for an invalid body (including an unknown `buttonMode`), or when the chosen credential has no login URL and the website has none either; 404 with `{ error }` when the website or the credential does not exist or was deleted; 409 with `{ error }` when a crawl of it is already running; 503 with `{ error }` when a credential was chosen but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when a query fails or the credential's password cannot be decrypted
+   * @returns 201 with the new crawl run; 400 with `{ error }` for an invalid body (including an unknown `buttonMode`), or when the website's Login action has no login URL and the website has none either; 404 with `{ error }` when the website or the credential does not exist or was deleted; 409 with `{ error }` when a crawl of it is already running, or a credential was chosen but the website has no Login action; 503 with `{ error }` when a credential was chosen but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when a query fails or the credential's password cannot be decrypted
    */
   app.post("/api/websites/:websiteId/crawl-runs", async (req, res) => {
     const validation = validateCrawlRunStartInput(req.body);
@@ -128,30 +131,34 @@ export function registerCrawlRunRoutes(app: Express, screenshotDirectory: string
       }
 
       const { credentialId, buttonMode } = validation.input;
-      let credential: Credential | null = null;
+      let loginChoice: CrawlLoginChoice | null = null;
       const crawlIsLoggedIn = credentialId !== null;
       if (crawlIsLoggedIn) {
         if (!credentialEncryptionIsConfigured()) {
           res.status(503).json({ error: CREDENTIAL_KEY_NOT_CONFIGURED_MESSAGE });
           return;
         }
-        credential = await findCredentialWithPasswordForWebsite(website.id, credentialId);
+        const credential = await findCredentialWithPasswordForWebsite(website.id, credentialId);
         if (credential === null) {
           res.status(404).json({ error: CREDENTIAL_NOT_FOUND_MESSAGE });
           return;
         }
-        const credentialHasNoLoginUrl = credential.loginUrl === null;
-        const websiteHasNoLoginUrl = website.loginUrl === null;
-        const credentialHasNoEffectiveLoginUrl = credentialHasNoLoginUrl && websiteHasNoLoginUrl;
-        if (credentialHasNoEffectiveLoginUrl) {
-          res.status(400).json({ error: CREDENTIAL_HAS_NO_EFFECTIVE_LOGIN_URL_MESSAGE });
+        const loginAction = await findLoginActionForWebsite(website.id);
+        if (loginAction === null) {
+          res.status(409).json({ error: WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE });
           return;
         }
+        const loginActionHasNoLoginPage = findEffectiveLoginUrl(loginAction, website) === null;
+        if (loginActionHasNoLoginPage) {
+          res.status(400).json({ error: describeLoginActionWithoutLoginPage(loginAction.title) });
+          return;
+        }
+        loginChoice = { loginAction, credential };
       }
 
       const crawlRunStart = await startCrawlRun(
         website,
-        credential,
+        loginChoice,
         screenshotDirectory,
         buttonMode,
       );

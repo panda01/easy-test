@@ -15,7 +15,7 @@ import {
   waitOutMinimumWaitSince,
   type PageRequestTracker,
 } from "./pageActionService.js";
-import type { Credential, Website } from "./dbService.js";
+import type { Action, Credential, Website } from "./dbService.js";
 import { decryptCredentialPassword } from "../utils/credentialEncryption.js";
 
 /**
@@ -32,17 +32,17 @@ export const LOGIN_STEP_TIMEOUT_MS = 10_000;
  */
 export const LOGIN_RESULT_TIMEOUT_MS = 15_000;
 
-/** The password field, when the credential names no selector for it. */
+/** The password field, when the Login action names no selector for it. */
 export const DEFAULT_PASSWORD_FIELD_SELECTOR = 'input[type="password"]';
 
 /**
- * The username field, when the credential names no selector for it: the first
+ * The username field, when the Login action names no selector for it: the first
  * plain text-like input (no `type`, or text, email, or tel) in the login form.
  */
 export const DEFAULT_USERNAME_FIELD_SELECTOR =
   'input:not([type]), input[type="text"], input[type="email"], input[type="tel"]';
 
-/** The submit button, when the credential names no selector for it. */
+/** The submit button, when the Login action names no selector for it. */
 export const DEFAULT_SUBMIT_BUTTON_SELECTOR =
   'button[type="submit"], input[type="submit"], button:not([type])';
 
@@ -50,7 +50,7 @@ export const DEFAULT_SUBMIT_BUTTON_SELECTOR =
 export const STILL_ON_LOGIN_FORM_MESSAGE =
   "Still on the login form after submitting - check the username and password";
 
-/** Everything the crawler needs to log in: where, as whom, and (optionally) which form fields to use. */
+/** Everything a browser needs to log in: where, as whom, and (optionally) which form fields to use. */
 export interface CrawlLoginDetails {
   /** The page with the login form. */
   loginUrl: string;
@@ -66,30 +66,75 @@ export interface CrawlLoginDetails {
   submitSelector: string | null;
 }
 
+/** The parts of a Login action that say where and how it logs in. */
+export type LoginActionSettings = Pick<
+  Action,
+  "title" | "loginUrl" | "usernameSelector" | "passwordSelector" | "submitSelector"
+>;
+
+/**
+ * Picks the login page a Login action opens: its own `loginUrl` when it has
+ * one, otherwise its website's (the default).
+ * @param loginAction - The Login action
+ * @param loginAction.loginUrl - Its own login page, or null to use the website's
+ * @param website - Its website
+ * @param website.loginUrl - The website's default login page, or null
+ * @returns The effective login page, or null when neither has one
+ */
+export function findEffectiveLoginUrl(
+  loginAction: { loginUrl: string | null },
+  website: { loginUrl: string | null },
+): string | null {
+  return loginAction.loginUrl ?? website.loginUrl;
+}
+
+/**
+ * Why a logged-in run or crawl cannot log in: the website has no Login
+ * action (none was found by the login-form check, or it was deleted).
+ */
+export const WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE =
+  "This website has no login action yet - look for a login form on its Credentials tab, or add an action with the kind Login";
+
+/**
+ * Says why a Login action cannot log in: neither it nor its website has a
+ * login page.
+ * @param loginActionTitle - The Login action's title
+ * @returns The message, in plain words
+ */
+export function describeLoginActionWithoutLoginPage(loginActionTitle: string): string {
+  return `The login action "${loginActionTitle}" has no login page URL, and neither does its website; add one to log in`;
+}
+
 /**
  * Decrypts a credential's password and gathers what a browser needs to log in
- * with it - used by crawls and by action runs alike. The login page is the
- * credential's EFFECTIVE login URL: its own `loginUrl` when it has one,
- * otherwise the website's.
+ * as it the way the website's Login action does - used by "Run login", by
+ * the runs of actions that run as a credential, and by crawls alike. The login page is the
+ * Login action's EFFECTIVE login URL (see `findEffectiveLoginUrl`), and the
+ * three form-field selectors are the Login action's.
+ * @param loginAction - The Login action: its title, login page, and selectors
  * @param credential - The credential to log in as, with its encrypted password
- * @param website - The credential's website, for its login URL
+ * @param website - Its website, for the default login URL
  * @returns The login details, with the password decrypted (never log them)
- * @throws When neither the credential nor the website has a login URL; when the password cannot be decrypted (no key configured, or the key changed since it was saved)
+ * @throws When neither the Login action nor the website has a login URL; when the password cannot be decrypted (no key configured, or the key changed since it was saved)
  */
-export function buildCrawlLoginDetails(credential: Credential, website: Website): CrawlLoginDetails {
-  const effectiveLoginUrl = credential.loginUrl ?? website.loginUrl;
+export function buildLoginDetails(
+  loginAction: LoginActionSettings,
+  credential: Credential,
+  website: Website,
+): CrawlLoginDetails {
+  const effectiveLoginUrl = findEffectiveLoginUrl(loginAction, website);
   if (effectiveLoginUrl === null) {
     throw new Error(
-      `The credential "${credential.name}" has no login page URL, and neither does its website`,
+      `The login action "${loginAction.title}" has no login page URL, and neither does its website`,
     );
   }
   return {
     loginUrl: effectiveLoginUrl,
     username: credential.username,
     password: decryptCredentialPassword(credential.encryptedPassword),
-    usernameSelector: credential.usernameSelector,
-    passwordSelector: credential.passwordSelector,
-    submitSelector: credential.submitSelector,
+    usernameSelector: loginAction.usernameSelector,
+    passwordSelector: loginAction.passwordSelector,
+    submitSelector: loginAction.submitSelector,
   };
 }
 
@@ -176,9 +221,9 @@ function loginFailed(errorMessage: string): LoginAttempt {
 }
 
 /**
- * Names the selector a step used, for error messages: the credential's own
+ * Names the selector a step used, for error messages: the Login action's own
  * selector when it has one, otherwise the fact that the crawler guessed.
- * @param customSelector - The credential's selector for this field, or null
+ * @param customSelector - The Login action's selector for this field, or null
  * @returns A short parenthetical such as ` (selector "#user")`, or ` (found automatically)`
  */
 function describeSelectorSource(customSelector: string | null): string {
@@ -220,13 +265,13 @@ async function locateLoginFormScope(page: Page, passwordFieldSelector: string): 
 }
 
 /**
- * Submits the login form: clicks the credential's submit selector, or the
+ * Submits the login form: clicks the Login action's submit selector, or the
  * form's first visible submit button, or - when the form has none - presses
  * Enter in the password field, which submits a form the way a user would.
  * @param page - The login page
  * @param formScope - The login form (or the page's body)
  * @param passwordField - The filled-in password field
- * @param submitSelector - The credential's submit button selector, or null
+ * @param submitSelector - The Login action's submit button selector, or null
  * @returns Null once the form was submitted; otherwise why it could not be
  */
 async function submitLoginForm(
@@ -266,11 +311,11 @@ async function submitLoginForm(
  *
  * 1. Load `loginUrl` and wait until it is ready (the website's own timing
  *    settings, as for every crawled page).
- * 2. Find the password field (the credential's selector, or the first visible
- *    `input[type="password"]`), then the username field (the credential's
+ * 2. Find the password field (the Login action's selector, or the first visible
+ *    `input[type="password"]`), then the username field (the Login action's
  *    selector, or the first visible text, email, or tel input in the same
  *    form).
- * 3. Type the username and password, then submit (the credential's submit
+ * 3. Type the username and password, then submit (the Login action's submit
  *    selector, the form's first visible submit button, or Enter in the
  *    password field).
  * 4. Give the site time to answer (see `waitForLoginResult`): up to

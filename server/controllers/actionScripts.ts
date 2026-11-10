@@ -10,6 +10,7 @@ import {
   findActionScriptRunForScript,
   findActionScriptRunDetailForScript,
   findActionScriptRunScreenshotForRun,
+  findLoginActionForWebsite,
   type ActionScriptWithPlan,
   type ActionWithCredential,
   type Website,
@@ -21,6 +22,7 @@ import {
   ACTION_ALREADY_RUNNING_MESSAGE,
   CLEANUP_FAILURE_CANNOT_BE_REFINED_MESSAGE,
   EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE,
+  LOGIN_ACTION_HAS_NO_STEPS_MESSAGE,
   ONLY_A_FAILED_RUN_CAN_BE_REFINED_MESSAGE,
   RUN_ALREADY_BEING_REFINED_MESSAGE,
   runFailedOnlyInItsCleanup,
@@ -47,6 +49,7 @@ import {
   validateScriptModelChoiceInput,
 } from "../utils/validateRequestBodies.js";
 import { findWebsiteAndAction, findWebsiteActionAndScript } from "./actionLookups.js";
+import { isLoginAction } from "../utils/scoreActionObjectRole.js";
 
 const SCRIPT_RUN_NOT_FOUND_MESSAGE = "Script run not found";
 const RUN_HAS_NO_FAILURE_SCREENSHOT_MESSAGE = "This run did not capture a failure screenshot";
@@ -76,7 +79,7 @@ async function convertActionAndSaveVersion(
   choice: ScriptModelChoice,
 ): Promise<ActionScriptWithPlan> {
   const credential = await findActionCredential(website, action);
-  const allowedOrigins = allowedOriginsFor(website, credential);
+  const allowedOrigins = allowedOriginsFor(website, await findLoginActionForWebsite(website.id));
   const crawledPages = await findLatestCrawledPagesForWebsite(website.id, credential?.id ?? null);
   const searchTerms = extractActionSearchTerms(action.title, action.description);
   const contextPages = selectRelevantCrawledPages(crawledPages, searchTerms);
@@ -198,7 +201,7 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * @param websiteId - Path parameter: the owning website's cuid
    * @param actionId - Path parameter: the action to convert
    * @param body - JSON `{ modelId, effort }`; `modelId` required, `effort` a level the model offers or null for "Standard"
-   * @returns 201 with the saved version plus `deleteActionScript` and `deleteActionConversionError`; 400 with `{ error }` for an invalid body, a model not in the catalog, or an effort level the model does not offer; 404 with `{ error }` when the website or action does not exist or was deleted; 502 with `{ error }` when Claude declined, its reply was cut off, or the reply was not a valid plan; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call or a query fails
+   * @returns 201 with the saved version plus `deleteActionScript` and `deleteActionConversionError`; 400 with `{ error }` for an invalid body, a model not in the catalog, or an effort level the model does not offer; 404 with `{ error }` when the website or action does not exist or was deleted; 409 with `{ error }` when the action is a Login action (it logs in by itself and has no steps); 502 with `{ error }` when Claude declined, its reply was cut off, or the reply was not a valid plan; 503 with `{ error }` when ANTHROPIC_API_KEY is not configured; 500 with `{ error }` when the Anthropic API call or a query fails
    */
   app.post("/api/websites/:websiteId/actions/:actionId/scripts", async (req, res) => {
     const choiceValidation = validateScriptModelChoiceInput(req.body);
@@ -215,6 +218,10 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
         return;
       }
       const { website, action } = lookup.found;
+      if (isLoginAction(action)) {
+        res.status(409).json({ error: LOGIN_ACTION_HAS_NO_STEPS_MESSAGE });
+        return;
+      }
 
       const model = await findScriptModel(modelId);
       if (model === null) {
@@ -266,7 +273,7 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * @param actionId - Path parameter: the owning action's cuid
    * @param actionScriptId - Path parameter: the version that was edited
    * @param body - JSON `{ plan }`; the whole edited plan `{ name, startUrl, steps }`
-   * @returns 201 with the new version; 400 with `{ error }` listing every problem when the body or the plan is invalid; 404 with `{ error }` when the website, action, or source version does not exist or was deleted; 500 with `{ error }` when a query fails
+   * @returns 201 with the new version; 400 with `{ error }` listing every problem when the body or the plan is invalid; 404 with `{ error }` when the website, action, or source version does not exist or was deleted; 409 with `{ error }` when the action is a Login action (it logs in by itself and has no steps - even one that kept versions from before its kind changed); 500 with `{ error }` when a query fails
    */
   app.post(
     "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/edits",
@@ -282,11 +289,14 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
           return;
         }
         const { website, action, script: sourceScript } = lookup.found;
+        if (isLoginAction(action)) {
+          res.status(409).json({ error: LOGIN_ACTION_HAS_NO_STEPS_MESSAGE });
+          return;
+        }
 
-        const credential = await findActionCredential(website, action);
         const editValidation = validateActionPlanEditInput(
           req.body,
-          allowedOriginsFor(website, credential),
+          allowedOriginsFor(website, await findLoginActionForWebsite(website.id)),
         );
         if (!editValidation.isValid) {
           res.status(400).json({ error: editValidation.errorMessage });
@@ -433,7 +443,7 @@ export function registerActionScriptRoutes(app: Express, actionScriptDirectory: 
    * @param actionId - Path parameter: the owning action's cuid
    * @param actionScriptId - Path parameter: the version to run
    * @param body - Optional JSON `{ parameterValues, cleanUpAfterwards }`: the values by parameter key, each text of at most 1000 characters without `{{`; `cleanUpAfterwards` true (the default) or false
-   * @returns 201 with the recorded run (with `createdObject`, `deletedObjects`, `cleanupRun`, and `cleanedUpRun`); 400 with `{ error }` when the body is invalid, a key is not one of the version's parameters, a required value is blank, an object value has no known address for a version that opens it by address, the plan the values make breaks a plan rule, or the action's credential has no login URL and neither does the website; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the action is already running, its credential is gone, the plan no longer passes the plan rules, or the plan types a credential the action does not have; 503 with `{ error }` when the action has a credential but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when the password cannot be decrypted, the run folder cannot be written, the browser cannot start, or a query fails
+   * @returns 201 with the recorded run (with `createdObject`, `deletedObjects`, `cleanupRun`, and `cleanedUpRun`); 400 with `{ error }` when the body is invalid, a key is not one of the version's parameters, a required value is blank, an object value has no known address for a version that opens it by address, the plan the values make breaks a plan rule, or the website's Login action has no login URL and neither does the website; 404 with `{ error }` when the website, action, or version does not exist or was deleted; 409 with `{ error }` when the action is already running, it is a Login action, its credential no longer exists, it runs as a credential but the website has no Login action, the plan no longer passes the plan rules, or the plan types a credential the action does not have; 503 with `{ error }` when the action has a credential but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` when the password cannot be decrypted, the run folder cannot be written, the browser cannot start, or a query fails
    */
   app.post(
     "/api/websites/:websiteId/actions/:actionId/scripts/:actionScriptId/runs",

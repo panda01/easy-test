@@ -18,30 +18,12 @@ import {
 
 const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
 const CREDENTIAL_NOT_FOUND_MESSAGE = "Credential not found";
-const NO_LOGIN_URL_ANYWHERE_MESSAGE =
-  "A login page URL is required - this website doesn't have one yet";
 
 /** A credential as the API sends it: never the password, only the fact that one is saved. */
 type CredentialResponse = CredentialSummary & {
   /** Always true - every credential has a saved password - so the UI can say so without ever receiving it. */
   hasPassword: true;
 };
-
-/**
- * Checks whether a credential would have no login page to log in on: it has
- * no login URL of its own, and its website has none to inherit either.
- * @param credentialLoginUrl - The credential's own login URL, as validated (null to inherit the website's)
- * @param websiteLoginUrl - The website's login URL, or null when it has none
- * @returns True when neither has a login URL, so the credential could never log in
- */
-function credentialHasNoEffectiveLoginUrl(
-  credentialLoginUrl: string | null,
-  websiteLoginUrl: string | null,
-): boolean {
-  const credentialHasNoLoginUrl = credentialLoginUrl === null;
-  const websiteHasNoLoginUrl = websiteLoginUrl === null;
-  return credentialHasNoLoginUrl && websiteHasNoLoginUrl;
-}
 
 /**
  * Shapes a credential for a response. The row already lacks the encrypted
@@ -55,7 +37,8 @@ function toCredentialResponse(credential: CredentialSummary): CredentialResponse
 
 /**
  * Registers the credential CRUD routes on the given express app. A credential
- * is a username and password for one website, used to crawl it logged in.
+ * is a username and password for one website - the account a Login action
+ * logs in as (where and how it logs in belongs to the Login action).
  * Every path is nested under `/api/websites/:websiteId`, and every route first
  * confirms that website is active - a deleted or unknown website answers 404
  * "Website not found" before the credential is even looked up.
@@ -66,13 +49,9 @@ function toCredentialResponse(credential: CredentialSummary): CredentialResponse
  * `hasPassword: true`. Saving a password needs the key: without it POST, and
  * a PUT that sends a new password, answer 503.
  *
- * LOGIN URL: a credential's own `loginUrl` is an optional override. Left out
- * (null), the credential logs in on its website's `loginUrl`. POST and PUT
- * answer 400 when the credential has no login URL and its website has none
- * either, since it could never log in.
- *
  * Deletes are SOFT: `DELETE` stamps `deletedAt` and reads ignore such rows.
- * Crawl runs that used a deleted credential still name it.
+ * Crawl runs that used a deleted credential still name it; the actions that
+ * ran as it are unlinked from it (they run logged out).
  * @param app - The express application to attach the routes to
  */
 export function registerCredentialRoutes(app: Express): void {
@@ -101,8 +80,8 @@ export function registerCredentialRoutes(app: Express): void {
    * stored and is not part of the response.
    * @route POST /api/websites/:websiteId/credentials
    * @param websiteId - Path parameter: the owning website's cuid
-   * @param body - JSON `{ name, description?, username, password, loginUrl?, usernameSelector?, passwordSelector?, submitSelector? }`; `name`, `username`, and `password` are required; `loginUrl` is an optional http/https override - left out, null, or blank means "use the website's login URL"; the selectors are optional CSS selectors
-   * @returns 201 with the created credential (no password); 400 with `{ error }` for an invalid body, or when the body has no `loginUrl` and the website has no login URL either; 404 with `{ error }` when the website does not exist or was deleted; 503 with `{ error }` when CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` otherwise
+   * @param body - JSON `{ name, description?, username, password }`; `name`, `username`, and `password` are required
+   * @returns 201 with the created credential (no password); 400 with `{ error }` for an invalid body; 404 with `{ error }` when the website does not exist or was deleted; 503 with `{ error }` when CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` otherwise
    */
   app.post("/api/websites/:websiteId/credentials", async (req, res) => {
     const validation = validateCredentialInput(req.body, { passwordIsRequired: true });
@@ -118,10 +97,6 @@ export function registerCredentialRoutes(app: Express): void {
         return;
       }
       const { credential, password } = validation.input;
-      if (credentialHasNoEffectiveLoginUrl(credential.loginUrl, website.loginUrl)) {
-        res.status(400).json({ error: NO_LOGIN_URL_ANYWHERE_MESSAGE });
-        return;
-      }
       // The validator already requires a password on create; this check only
       // narrows its type for the encryption below.
       const passwordIsMissing = password === null;
@@ -176,8 +151,8 @@ export function registerCredentialRoutes(app: Express): void {
    * @route PUT /api/websites/:websiteId/credentials/:credentialId
    * @param websiteId - Path parameter: the owning website's cuid
    * @param credentialId - Path parameter: the credential's cuid
-   * @param body - JSON `{ name, description?, username, password?, loginUrl?, usernameSelector?, passwordSelector?, submitSelector? }`; same rules as POST (a left-out `loginUrl` clears the override, so the website's is used), except `password` may be left out to keep the saved one
-   * @returns 200 with the updated credential (no password); 400 with `{ error }` for an invalid body, or when the body has no `loginUrl` and the website has no login URL either; 404 with `{ error }` when the website or the credential does not exist or was deleted; 503 with `{ error }` when a new password was sent but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` otherwise
+   * @param body - JSON `{ name, description?, username, password? }`; same rules as POST, except `password` may be left out to keep the saved one
+   * @returns 200 with the updated credential (no password); 400 with `{ error }` for an invalid body; 404 with `{ error }` when the website or the credential does not exist or was deleted; 503 with `{ error }` when a new password was sent but CREDENTIAL_ENCRYPTION_KEY is not configured; 500 with `{ error }` otherwise
    */
   app.put("/api/websites/:websiteId/credentials/:credentialId", async (req, res) => {
     const validation = validateCredentialInput(req.body, { passwordIsRequired: false });
@@ -193,10 +168,6 @@ export function registerCredentialRoutes(app: Express): void {
         return;
       }
       const { credential, password } = validation.input;
-      if (credentialHasNoEffectiveLoginUrl(credential.loginUrl, website.loginUrl)) {
-        res.status(400).json({ error: NO_LOGIN_URL_ANYWHERE_MESSAGE });
-        return;
-      }
       const passwordIsBeingReplaced = password !== null;
       const newPasswordCannotBeEncrypted =
         passwordIsBeingReplaced && !credentialEncryptionIsConfigured();
@@ -225,7 +196,8 @@ export function registerCredentialRoutes(app: Express): void {
 
   /**
    * Soft deletes one active credential of a website. Crawl runs that used it
-   * keep naming it.
+   * keep naming it; the actions that ran as it are unlinked from it (they
+   * run logged out until they are given another).
    * @route DELETE /api/websites/:websiteId/credentials/:credentialId
    * @param websiteId - Path parameter: the owning website's cuid
    * @param credentialId - Path parameter: the credential's cuid

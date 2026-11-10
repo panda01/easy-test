@@ -39,8 +39,6 @@ function createCredentialApp(): Express {
 
 const WEBSITE_NOT_FOUND_MESSAGE = "Website not found";
 const CREDENTIAL_NOT_FOUND_MESSAGE = "Credential not found";
-const NO_LOGIN_URL_ANYWHERE_MESSAGE =
-  "A login page URL is required - this website doesn't have one yet";
 
 /** The key in the environment before this spec ran, restored after each test. */
 const originalEncryptionKey = process.env.CREDENTIAL_ENCRYPTION_KEY;
@@ -57,15 +55,12 @@ const foundWebsite = {
   description: null,
   networkIdleTimeoutMs: 5000,
   screenshotMinimumWaitMs: 1,
-  /** No login URL of its own: a credential must bring one (the other tests send one). */
+  /** No login URL: a credential does not need one (where to log in belongs to the website's Login action). */
   loginUrl: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,
 };
-
-/** The same website, with a login page its credentials inherit. */
-const websiteWithLoginUrl = { ...foundWebsite, loginUrl: "https://example.com/sign-in" };
 
 const CREDENTIALS_PATH = `/api/websites/${REQUESTED_WEBSITE_ID}/credentials`;
 const CREDENTIAL_PATH = `${CREDENTIALS_PATH}/${REQUESTED_CREDENTIAL_ID}`;
@@ -77,10 +72,6 @@ const savedCredential = {
   name: "Admin",
   description: "The admin account",
   username: "admin@example.com",
-  loginUrl: "https://example.com/login",
-  usernameSelector: null,
-  passwordSelector: null,
-  submitSelector: null,
   createdAt: "2026-01-02T00:00:00.000Z",
   updatedAt: "2026-01-02T00:00:00.000Z",
   deletedAt: null,
@@ -89,26 +80,32 @@ const savedCredential = {
 /** The credential as the API answers with it. */
 const credentialResponse = { ...savedCredential, hasPassword: true };
 
-/** A valid create body without a login URL of its own (it inherits the website's). */
-const createBodyWithoutLoginUrl = {
+/** A valid create body. */
+const createBody = {
   name: "Admin",
   description: "The admin account",
   username: "admin@example.com",
   password: "correct horse",
 };
 
-/** A valid create body. */
-const createBody = { ...createBodyWithoutLoginUrl, loginUrl: "https://example.com/login" };
+/**
+ * A create body that still sends the fields a credential used to have - its
+ * own login page and form selectors, which belong to the website's Login
+ * action now.
+ */
+const createBodyWithOldLoginFields = {
+  ...createBody,
+  loginUrl: "https://example.com/login",
+  usernameSelector: "#email",
+  passwordSelector: "#password",
+  submitSelector: "button.sign-in",
+};
 
 /** The fields dbService receives for `createBody`, password excluded. */
 const expectedCredentialInput = {
   name: "Admin",
   description: "The admin account",
   username: "admin@example.com",
-  loginUrl: "https://example.com/login",
-  usernameSelector: null,
-  passwordSelector: null,
-  submitSelector: null,
 };
 
 /**
@@ -227,53 +224,34 @@ describe("Credential routes", () => {
       expect(mockDbService.createCredentialForWebsite).not.toHaveBeenCalled();
     });
 
-    it("saves a credential's own login URL on a website that has none", async () => {
+    it("ignores a login URL and form selectors in the body, which belong to the website's Login action now", async () => {
+      mockDbService.createCredentialForWebsite.mockResolvedValue(savedCredential);
+
+      const res = await request(createCredentialApp())
+        .post(CREDENTIALS_PATH)
+        .send(createBodyWithOldLoginFields);
+
+      expect(res.status).toBe(201);
+      expect(mockDbService.createCredentialForWebsite).toHaveBeenCalledWith(
+        foundWebsite.id,
+        expectedCredentialInput,
+        expect.any(String),
+      );
+    });
+
+    it("saves a credential on a website that has no login URL, since a credential no longer needs one", async () => {
       mockDbService.createCredentialForWebsite.mockResolvedValue(savedCredential);
 
       const res = await request(createCredentialApp()).post(CREDENTIALS_PATH).send(createBody);
 
       expect(res.status).toBe(201);
+      expect(res.body).toEqual(credentialResponse);
+      expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
       expect(mockDbService.createCredentialForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
-        expect.objectContaining({ loginUrl: "https://example.com/login" }),
+        expectedCredentialInput,
         expect.any(String),
       );
-    });
-
-    it.each([
-      ["left out", undefined],
-      ["null", null],
-      ["blank", "   "],
-    ])(
-      "saves the login URL as null (inherit the website's) when it is %s and the website has one",
-      async (_label, loginUrl) => {
-        mockDbService.findWebsiteById.mockResolvedValue(websiteWithLoginUrl);
-        const inheritingCredential = { ...savedCredential, loginUrl: null };
-        mockDbService.createCredentialForWebsite.mockResolvedValue(inheritingCredential);
-
-        const res = await request(createCredentialApp())
-          .post(CREDENTIALS_PATH)
-          .send({ ...createBodyWithoutLoginUrl, loginUrl });
-
-        expect(res.status).toBe(201);
-        expect(res.body).toEqual({ ...inheritingCredential, hasPassword: true });
-        expect(mockDbService.createCredentialForWebsite).toHaveBeenCalledWith(
-          foundWebsite.id,
-          { ...expectedCredentialInput, loginUrl: null },
-          expect.any(String),
-        );
-      },
-    );
-
-    it("returns 400 and saves nothing when neither the body nor the website has a login URL", async () => {
-      const res = await request(createCredentialApp())
-        .post(CREDENTIALS_PATH)
-        .send(createBodyWithoutLoginUrl);
-
-      expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: NO_LOGIN_URL_ANYWHERE_MESSAGE });
-      expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(REQUESTED_WEBSITE_ID);
-      expect(mockDbService.createCredentialForWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 404 Website not found when the website does not exist or was deleted", async () => {
@@ -417,42 +395,29 @@ describe("Credential routes", () => {
     it("returns 400 for an invalid body and saves nothing", async () => {
       const res = await request(createCredentialApp())
         .put(CREDENTIAL_PATH)
-        .send({ ...createBody, loginUrl: "not a url" });
+        .send({ ...createBody, username: "   " });
 
       expect(res.status).toBe(400);
-      expect(res.body).toEqual({
-        error: "The login page URL must be a valid http:// or https:// address",
-      });
+      expect(res.body).toEqual({ error: "A username is required" });
+      expect(mockDbService.findWebsiteById).not.toHaveBeenCalled();
       expect(mockDbService.updateCredentialForWebsite).not.toHaveBeenCalled();
     });
 
-    it("clears the credential's own login URL, so it inherits the website's, when the body leaves it blank", async () => {
-      mockDbService.findWebsiteById.mockResolvedValue(websiteWithLoginUrl);
-      const inheritingCredential = { ...savedCredential, loginUrl: null };
-      mockDbService.updateCredentialForWebsite.mockResolvedValue(inheritingCredential);
+    it("replaces a credential on a website that has no login URL, ignoring any login URL or selectors sent", async () => {
+      mockDbService.updateCredentialForWebsite.mockResolvedValue(savedCredential);
 
       const res = await request(createCredentialApp())
         .put(CREDENTIAL_PATH)
-        .send({ ...createBodyWithoutLoginUrl, password: "", loginUrl: "" });
+        .send({ ...createBodyWithOldLoginFields, password: "" });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ...inheritingCredential, hasPassword: true });
+      expect(res.body).toEqual(credentialResponse);
       expect(mockDbService.updateCredentialForWebsite).toHaveBeenCalledWith(
         foundWebsite.id,
         REQUESTED_CREDENTIAL_ID,
-        { ...expectedCredentialInput, loginUrl: null },
+        expectedCredentialInput,
         null,
       );
-    });
-
-    it("returns 400 and saves nothing when neither the body nor the website has a login URL", async () => {
-      const res = await request(createCredentialApp())
-        .put(CREDENTIAL_PATH)
-        .send(createBodyWithoutLoginUrl);
-
-      expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: NO_LOGIN_URL_ANYWHERE_MESSAGE });
-      expect(mockDbService.updateCredentialForWebsite).not.toHaveBeenCalled();
     });
 
     it("returns 404 Website not found when the website does not exist or was deleted", async () => {

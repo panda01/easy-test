@@ -41,6 +41,7 @@ import {
 } from "../../../src/hooks/useScriptModels";
 import { type ScreenshotRunRecord } from "../../../src/hooks/useScreenshotRuns";
 import { type PagePatternRecord, type WebObjectRecord } from "../../../src/hooks/useWebObjects";
+import { type LoginRunRecord } from "../../../src/hooks/useLoginRuns";
 import {
   type NewestActionScriptRecord,
   type WebsiteItemRecord,
@@ -349,6 +350,57 @@ export function buildWebsiteItemRecord(
 }
 
 /**
+ * Builds the website's Login action as the API returns it: by default "Sign
+ * in" (login-action-1) of website-1, logging in at the website's login page
+ * with the form fields found automatically. It has no credential: whoever it
+ * logs in as is picked by the action or crawl that logs in through it.
+ * @param overrides - Fields to replace in the default Login action
+ * @returns A complete website item record of kind Login
+ */
+export function buildLoginActionItemRecord(overrides: Partial<WebsiteItemRecord> = {}): WebsiteItemRecord {
+  return buildWebsiteItemRecord({
+    id: "login-action-1",
+    title: "Sign in",
+    description: "Sign in through the website's login form",
+    userActionKind: "login",
+    credentialId: null,
+    credential: null,
+    loginUrl: null,
+    usernameSelector: null,
+    passwordSelector: null,
+    submitSelector: null,
+    ...overrides,
+  });
+}
+
+/**
+ * Builds one "Run login" of a Login action as the API returns it: by default
+ * a passing run of login-action-1 as "Admin" at the website's login page,
+ * with a screenshot and a two-line log.
+ * @param overrides - Fields to replace in the default login run
+ * @returns A complete login run record
+ */
+export function buildLoginRunRecord(overrides: Partial<LoginRunRecord> = {}): LoginRunRecord {
+  return {
+    id: "login-run-1",
+    websiteId: "website-1",
+    actionId: "login-action-1",
+    credentialName: "Admin",
+    loginUrl: "https://example.com/login",
+    succeeded: true,
+    errorMessage: null,
+    screenshotFileName: "website-1/login-run-1.png",
+    finalPageUrl: "https://example.com/dashboard",
+    output: "▶ Open the login page\n✔ Logged in\n",
+    durationMs: 3200,
+    createdAt: "2026-04-06T03:04:05.000Z",
+    updatedAt: "2026-04-06T03:04:05.000Z",
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+/**
  * Builds a screenshot run as the API returns it: by default a successful
  * HTTP 200 visit of website-1 that captured a screenshot.
  * @param overrides - Fields to replace in the default run
@@ -407,8 +459,8 @@ export function buildCrawlRunRecord(overrides: Partial<CrawlRunRecord> = {}): Cr
 
 /**
  * Builds a website credential as the API returns it (never with a password):
- * by default "Admin" on website-1, logging in at its /login page with the
- * fields found automatically.
+ * by default "Admin" on website-1. Where and how it logs in belongs to the
+ * website's Login action, not to the credential.
  * @param overrides - Fields to replace in the default credential
  * @returns The credential record
  */
@@ -419,10 +471,6 @@ export function buildCredentialRecord(overrides: Partial<CredentialRecord> = {})
     name: "Admin",
     description: "The admin account",
     username: "admin@example.com",
-    loginUrl: "https://example.com/login",
-    usernameSelector: null,
-    passwordSelector: null,
-    submitSelector: null,
     hasPassword: true,
     createdAt: "2026-03-01T00:00:00.000Z",
     updatedAt: "2026-03-01T00:00:00.000Z",
@@ -1010,10 +1058,10 @@ export const ITEM_KIND_TEST_CASES: ItemKindTestCase[] = [
 // === routing ===
 
 /**
- * Shows where the router currently is, so a test can assert where navigation
- * landed and HOW it got there: "PUSH", "REPLACE", or "POP" (a history
- * go(-1)). Its "Probe: go back" button steps back one entry, which reveals
- * the entry underneath.
+ * Shows where the router currently is (path and query string), so a test can
+ * assert where navigation landed and HOW it got there: "PUSH", "REPLACE", or
+ * "POP" (a history go(-1)). Its "Probe: go back" button steps back one entry,
+ * which reveals the entry underneath.
  * @returns The probe's readouts and its back button
  */
 export function LocationProbe(): ReactElement {
@@ -1030,6 +1078,7 @@ export function LocationProbe(): ReactElement {
   return (
     <div>
       <p data-testid="probe-pathname">{location.pathname}</p>
+      <p data-testid="probe-search">{location.search}</p>
       <p data-testid="probe-state">{JSON.stringify(locationState ?? null)}</p>
       <p data-testid="probe-navigation-type">{navigationType}</p>
       <button type="button" onClick={handleBackClick}>
@@ -1071,6 +1120,8 @@ export function renderPageRoutes(pageRoutes: ReactNode, routerStart: RouterStart
 export interface ProbeReading {
   /** The current pathname. */
   pathname: string;
+  /** The current query string, with its "?" ("" when there is none). */
+  search: string;
   /** The current entry's state, JSON-encoded ("null" when there is none). */
   state: string;
   /** How the router got here: "PUSH", "REPLACE", or "POP". */
@@ -1081,7 +1132,7 @@ export interface ProbeReading {
  * Waits for the `LocationProbe` to show `expectedPathname` and returns
  * everything it reports.
  * @param expectedPathname - The pathname navigation should land on
- * @returns The probe's pathname, state, and navigation type
+ * @returns The probe's pathname, query string, state, and navigation type
  */
 export async function readProbeAfterLanding(expectedPathname: string): Promise<ProbeReading> {
   await waitFor(() => {
@@ -1089,6 +1140,7 @@ export async function readProbeAfterLanding(expectedPathname: string): Promise<P
   });
   return {
     pathname: screen.getByTestId("probe-pathname").textContent,
+    search: screen.getByTestId("probe-search").textContent,
     state: screen.getByTestId("probe-state").textContent,
     navigationType: screen.getByTestId("probe-navigation-type").textContent,
   };

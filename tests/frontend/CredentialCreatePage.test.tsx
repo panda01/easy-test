@@ -79,18 +79,15 @@ describe("CredentialCreatePage", () => {
     expect(screen.queryByRole("button", { name: "Create credential" })).not.toBeInTheDocument();
   });
 
-  it("starts the login page URL blank, offering the website's login page, and names the website in the breadcrumbs", async () => {
+  it("starts every field blank, with no login page field (a Login action has it), and names the website in the breadcrumbs", async () => {
     stubLoadedWebsite();
 
     renderCredentialCreatePage(OPENED_FROM_DETAIL);
 
-    const loginUrlField = await findField("Login page URL");
-    expect(loginUrlField).toHaveValue("");
-    expect(loginUrlField).not.toBeRequired();
-    expect(loginUrlField).toHaveAttribute("placeholder", "https://example.com/login");
-    expect(loginUrlField).toHaveAccessibleDescription(
-      "Leave blank to use the website's login page (https://example.com/login)",
-    );
+    expect(await findField("Name")).toHaveValue("");
+    expect(await findField("Username")).toHaveValue("");
+    expect(await findField("Password")).toHaveValue("");
+    expect(screen.queryByLabelText(/^Login page URL/)).not.toBeInTheDocument();
     expect(readBreadcrumbTrail()).toEqual([
       { label: "Websites", href: "/" },
       { label: "Example", href: DETAIL_PATH },
@@ -129,15 +126,11 @@ describe("CredentialCreatePage", () => {
         description: "",
         username: "admin@example.com",
         password: "correct horse",
-        loginUrl: "",
-        usernameSelector: "",
-        passwordSelector: "",
-        submitSelector: "",
       }),
     });
   });
 
-  it("requires a login page URL when the website has none, and POSTs the typed one", async () => {
+  it("creates a credential of a website with no login page too: only its Login actions need one", async () => {
     const user = userEvent.setup();
     const fetchStub = stubLoadedWebsite({
       [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
@@ -145,17 +138,10 @@ describe("CredentialCreatePage", () => {
     });
     renderCredentialCreatePage(OPENED_FROM_DETAIL);
 
-    const loginUrlField = await findField("Login page URL");
-    expect(loginUrlField).toHaveValue("");
-    expect(loginUrlField).toBeRequired();
-    expect(loginUrlField).toHaveAccessibleDescription(
-      "This website has no login page URL yet - enter it here (a successful login will also save it to the website)",
-    );
     await user.type(await findField("Name"), "Admin");
     await user.type(await findField("Username"), "admin@example.com");
     await user.type(await findField("Password"), "correct horse");
-    expect(screen.getByRole("button", { name: "Create credential" })).toBeDisabled();
-    await user.type(loginUrlField, "https://example.com/sign-in");
+    expect(screen.getByRole("button", { name: "Create credential" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Create credential" }));
 
     await readProbeAfterLanding(DETAIL_PATH);
@@ -167,10 +153,6 @@ describe("CredentialCreatePage", () => {
         description: "",
         username: "admin@example.com",
         password: "correct horse",
-        loginUrl: "https://example.com/sign-in",
-        usernameSelector: "",
-        passwordSelector: "",
-        submitSelector: "",
       }),
     });
   });

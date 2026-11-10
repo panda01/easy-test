@@ -30,11 +30,8 @@ const OPENED_FROM_DETAIL: RouterStart = {
 /** History after opening the form directly (deep link or reload): no state. */
 const OPENED_BY_DEEP_LINK: RouterStart = { initialEntries: [EDIT_PATH] };
 
-/** The saved credential, with selectors for two of the three form parts. */
-const savedCredential = buildCredentialRecord({
-  usernameSelector: "#email",
-  submitSelector: "button.sign-in",
-});
+/** The saved credential: "Admin", with a description. */
+const savedCredential = buildCredentialRecord();
 
 /**
  * Renders the edit page on its real route.
@@ -129,11 +126,10 @@ describe("CredentialEditPage", () => {
     expect(await findField("Name")).toHaveValue("Admin");
     expect(await findField("Description")).toHaveValue("The admin account");
     expect(await findField("Username")).toHaveValue("admin@example.com");
-    expect(await findField("Login page URL")).toHaveValue("https://example.com/login");
     expect(await findField("Password")).toHaveValue("");
-    expect(await findField("Username field selector")).toHaveValue("#email");
-    expect(await findField("Password field selector")).toHaveValue("");
-    expect(await findField("Submit button selector")).toHaveValue("button.sign-in");
+    // Where and how it logs in belongs to its Login actions now.
+    expect(screen.queryByLabelText(/^Login page URL/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/selector/)).not.toBeInTheDocument();
     expect(readBreadcrumbTrail()).toEqual([
       { label: "Websites", href: "/" },
       { label: "Example", href: DETAIL_PATH },
@@ -142,7 +138,7 @@ describe("CredentialEditPage", () => {
     ]);
   });
 
-  it("pre-fills blanks for a credential with no description or selectors", async () => {
+  it("pre-fills a blank description for a credential without one", async () => {
     stubLoadedCredential({
       [`GET ${CREDENTIAL_API_URL}`]: {
         status: 200,
@@ -153,25 +149,19 @@ describe("CredentialEditPage", () => {
     renderCredentialEditPage(OPENED_FROM_DETAIL);
 
     expect(await findField("Description")).toHaveValue("");
-    expect(await findField("Username field selector")).toHaveValue("");
   });
 
-  it("starts the login page URL blank for a credential that uses the website's, and PUTs it blank", async () => {
+  it("saves a credential of a website with no login page too: only its Login actions need one", async () => {
     const user = userEvent.setup();
     const fetchStub = stubLoadedCredential({
-      [`GET ${CREDENTIAL_API_URL}`]: {
-        status: 200,
-        body: buildCredentialRecord({ loginUrl: null }),
-      },
+      [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
       [`PUT ${CREDENTIAL_API_URL}`]: { status: 200, body: savedCredential },
     });
     renderCredentialEditPage(OPENED_FROM_DETAIL);
 
-    const loginUrlField = await findField("Login page URL");
-    expect(loginUrlField).toHaveValue("");
-    expect(loginUrlField).not.toBeRequired();
-    expect(loginUrlField).toHaveAttribute("placeholder", "https://example.com/login");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    const saveButton = await screen.findByRole("button", { name: "Save changes" });
+    expect(saveButton).toBeEnabled();
+    await user.click(saveButton);
 
     await readProbeAfterLanding(DETAIL_PATH);
     expect(fetchStub).toHaveBeenCalledWith(CREDENTIAL_API_URL, {
@@ -182,30 +172,8 @@ describe("CredentialEditPage", () => {
         description: "The admin account",
         username: "admin@example.com",
         password: "",
-        loginUrl: "",
-        usernameSelector: "",
-        passwordSelector: "",
-        submitSelector: "",
       }),
     });
-  });
-
-  it("requires the credential's own login page URL when the website has none", async () => {
-    const user = userEvent.setup();
-    stubLoadedCredential({
-      [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) },
-    });
-    renderCredentialEditPage(OPENED_FROM_DETAIL);
-
-    const loginUrlField = await findField("Login page URL");
-    expect(loginUrlField).toHaveValue("https://example.com/login");
-    expect(loginUrlField).toBeRequired();
-    expect(loginUrlField).toHaveAccessibleDescription(
-      "This website has no login page URL yet - enter it here (a successful login will also save it to the website)",
-    );
-    await user.clear(loginUrlField);
-
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
   it("PUTs the edits with a blank password (keeping the saved one) and goes back to the website's page", async () => {
@@ -230,10 +198,6 @@ describe("CredentialEditPage", () => {
         description: "Edited",
         username: "admin@example.com",
         password: "",
-        loginUrl: "https://example.com/login",
-        usernameSelector: "#email",
-        passwordSelector: "",
-        submitSelector: "button.sign-in",
       }),
     });
   });
@@ -243,16 +207,14 @@ describe("CredentialEditPage", () => {
     stubLoadedCredential({
       [`PUT ${CREDENTIAL_API_URL}`]: {
         status: 400,
-        body: { error: "The login page URL must be a valid http:// or https:// address" },
+        body: { error: "username is required" },
       },
     });
     renderCredentialEditPage(OPENED_FROM_DETAIL);
 
     await user.click(await screen.findByRole("button", { name: "Save changes" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The login page URL must be a valid http:// or https:// address",
-    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("username is required");
     expect(screen.queryByTestId("probe-pathname")).not.toBeInTheDocument();
   });
 
@@ -278,7 +240,7 @@ describe("CredentialEditPage", () => {
     await user.click(await screen.findByRole("button", { name: "Delete" }));
     const dialog = await screen.findByRole("dialog", { name: "Delete credential?" });
     expect(dialog).toHaveTextContent(
-      '"Admin" will be deleted. Past crawls that logged in with it keep its name.',
+      '"Admin" will be deleted. Past crawls that logged in with it keep its name, and the login actions that log in as it will need another credential.',
     );
     await user.click(screen.getByRole("button", { name: "Delete" }));
 

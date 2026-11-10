@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor, within, type RenderResult } from "@tes
 import { userEvent, type UserEvent } from "@testing-library/user-event";
 import { type ReactElement } from "react";
 import { Route, useLocation, useNavigationType } from "react-router-dom";
+import { type WebsiteItemRecord } from "../../src/hooks/useWebsiteItems";
 import ActionDetailPage from "../../src/pages/ActionDetailPage";
 import { type ActionPlan } from "../../src/utils/actionPlanSteps";
 import {
@@ -10,7 +11,10 @@ import {
   buildActionScriptRefinementRecord,
   buildActionScriptRunRecord,
   buildAutoRefineJobRecord,
+  buildCredentialRecord,
   buildJsonResponse,
+  buildLoginActionItemRecord,
+  buildLoginRunRecord,
   buildScriptModelCatalog,
   buildActionObjectRoleRecord,
   buildVersionParameterRecord,
@@ -38,6 +42,36 @@ const ACTION_API_URL = `${WEBSITE_API_URL}/actions/item-1`;
 const SCRIPTS_API_URL = `${ACTION_API_URL}/scripts`;
 const AUTO_REFINE_JOBS_API_URL = `${ACTION_API_URL}/auto-refine-jobs`;
 const SCRIPT_MODELS_API_URL = "/api/script-models";
+const CREDENTIALS_API_URL = `${WEBSITE_API_URL}/credentials`;
+const ACTIONS_API_URL = `${WEBSITE_API_URL}/actions`;
+
+/** The website's two credentials, as its credential list returns them: Admin first. */
+const WEBSITE_CREDENTIALS = [
+  buildCredentialRecord({ id: "credential-1", name: "Admin" }),
+  buildCredentialRecord({ id: "credential-2", name: "Editor" }),
+];
+
+/** The website's Login action ("Sign in"), which every other action logs in through. */
+const WEBSITE_LOGIN_ACTION = buildLoginActionItemRecord({ id: "login-action-1", title: "Sign in" });
+
+/** An action (item-1) that runs as the Admin credential. */
+const actionRunningAsAdmin = buildWebsiteItemRecord({
+  credentialId: "credential-1",
+  credential: { id: "credential-1", name: "Admin" },
+});
+
+/**
+ * Stubs the website's credential and action lists, which the page reads to
+ * say how the action logs in.
+ * @param websiteActions - What the action list answers with
+ * @returns The two routes
+ */
+function buildLoginChoicesRoutes(websiteActions: WebsiteItemRecord[]): StubbedRouteTable {
+  return {
+    [`GET ${CREDENTIALS_API_URL}`]: { status: 200, body: WEBSITE_CREDENTIALS },
+    [`GET ${ACTIONS_API_URL}`]: { status: 200, body: websiteActions },
+  };
+}
 
 /** Matches the Model dropdown, whose accessible name may also carry the chosen model. */
 const MODEL_SELECT_NAME = /^Model/;
@@ -396,21 +430,62 @@ describe("ActionDetailPage", () => {
       });
     });
 
-    it("says an action with a credential runs as it", async () => {
+    it("says an action that runs as a credential logs in as it with the website's Login action", async () => {
       stubLoadedAction([], {
-        [`GET ${ACTION_API_URL}`]: {
-          status: 200,
-          body: buildWebsiteItemRecord({
-            credentialId: "credential-1",
-            credential: { id: "credential-1", name: "Admin" },
-          }),
-        },
+        [`GET ${ACTION_API_URL}`]: { status: 200, body: actionRunningAsAdmin },
+        ...buildLoginChoicesRoutes([actionRunningAsAdmin, WEBSITE_LOGIN_ACTION]),
       });
 
       renderActionDetailPage();
 
       await screen.findByRole("heading", { level: 1, name: "Log in" });
-      expect(getElementByWholeText("P", "Sign in with a valid account Runs as Admin.")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(getElementByWholeText("P", "Sign in with a valid account Logs in as Admin with Sign in.")).toBeInTheDocument();
+      });
+      // Both names are emphasised, each in a span of its own.
+      expect(screen.getByText("Admin")).toBeInTheDocument();
+      expect(screen.getByText("Sign in")).toBeInTheDocument();
+    });
+
+    it("names only the credential while the website's actions are still loading", async () => {
+      const pendingActions = createDeferred<Response>();
+      stubLoadedAction([], {
+        [`GET ${ACTION_API_URL}`]: { status: 200, body: actionRunningAsAdmin },
+        ...buildLoginChoicesRoutes([]),
+        [`GET ${ACTIONS_API_URL}`]: () => pendingActions.promise,
+      });
+
+      renderActionDetailPage();
+
+      await screen.findByRole("heading", { level: 1, name: "Log in" });
+      expect(getElementByWholeText("P", "Sign in with a valid account Logs in as Admin.")).toBeInTheDocument();
+
+      await act(async () => {
+        pendingActions.resolve(buildJsonResponse(200, [actionRunningAsAdmin, WEBSITE_LOGIN_ACTION]));
+        await pendingActions.promise;
+      });
+      await waitFor(() => {
+        expect(getElementByWholeText("P", "Sign in with a valid account Logs in as Admin with Sign in.")).toBeInTheDocument();
+      });
+    });
+
+    it("warns that an action running as a credential cannot log in while the website has no Login action", async () => {
+      stubLoadedAction([], {
+        [`GET ${ACTION_API_URL}`]: { status: 200, body: actionRunningAsAdmin },
+        ...buildLoginChoicesRoutes([actionRunningAsAdmin]),
+      });
+
+      renderActionDetailPage();
+
+      await screen.findByRole("heading", { level: 1, name: "Log in" });
+      await waitFor(() => {
+        expect(
+          getElementByWholeText(
+            "P",
+            "Sign in with a valid account Logs in as Admin - but this website has no login action yet, so its runs cannot log in.",
+          ),
+        ).toBeInTheDocument();
+      });
     });
 
     it("still shows the action when only the website (used for the breadcrumb) fails", async () => {
@@ -1207,15 +1282,9 @@ describe("ActionDetailPage", () => {
       expect(screen.queryByText("Old text")).not.toBeInTheDocument();
     });
 
-    it("tags a version generated logged out once the action runs as a credential", async () => {
+    it("tags a version generated logged out once the action logs in as a credential", async () => {
       stubLoadedAction([olderScript], {
-        [`GET ${ACTION_API_URL}`]: {
-          status: 200,
-          body: buildWebsiteItemRecord({
-            credentialId: "credential-1",
-            credential: { id: "credential-1", name: "Admin" },
-          }),
-        },
+        [`GET ${ACTION_API_URL}`]: { status: 200, body: actionRunningAsAdmin },
         [`GET ${runsApiUrl("script-1")}`]: { status: 200, body: [] },
       });
 
@@ -1261,22 +1330,19 @@ describe("ActionDetailPage", () => {
     /** Two runs of script-1, the failed one newest. */
     const olderScriptRuns = [failedRunOfOlderScript, buildActionScriptRunRecord({ id: "run-a" })];
 
-    it("puts Edit and Delete behind a ⋯ menu, keeps only who the action runs as, and backs up to the website", async () => {
+    it("puts Edit and Delete behind a ⋯ menu, keeps only how the action logs in, and backs up to the website", async () => {
       const user = userEvent.setup();
       removeWidthStub = stubWindowWidth(390);
       stubLoadedAction([], {
-        [`GET ${ACTION_API_URL}`]: {
-          status: 200,
-          body: buildWebsiteItemRecord({
-            credentialId: "credential-1",
-            credential: { id: "credential-1", name: "Admin" },
-          }),
-        },
+        [`GET ${ACTION_API_URL}`]: { status: 200, body: actionRunningAsAdmin },
+        ...buildLoginChoicesRoutes([actionRunningAsAdmin, WEBSITE_LOGIN_ACTION]),
       });
       renderActionDetailPage(OPENED_FROM_WEBSITE);
 
       expect(await screen.findByRole("heading", { level: 1, name: "Log in" })).toBeInTheDocument();
-      expect(getElementByWholeText("P", "Runs as Admin.")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(getElementByWholeText("P", "Logs in as Admin with Sign in.")).toBeInTheDocument();
+      });
       expect(screen.queryByText(/Sign in with a valid account/)).not.toBeInTheDocument();
       expect(screen.queryByRole("link", { name: "Edit" })).not.toBeInTheDocument();
       const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
@@ -1642,9 +1708,10 @@ describe("ActionDetailPage", () => {
       });
     });
 
-    it("picks which parameter names the new object", async () => {
+    it("picks which parameter names the new object, keeping how the action logs in", async () => {
       const user = userEvent.setup();
       const fetchStub = stubCreateAction({
+        [`GET ${ACTION_API_URL}`]: { status: 200, body: actionRunningAsAdmin },
         [`PUT ${ACTION_API_URL}`]: {
           status: 200,
           body: buildWebsiteItemRecord({ userNameParameterKey: "projectName", objectRole: createRole }),
@@ -1662,7 +1729,11 @@ describe("ActionDetailPage", () => {
           body: JSON.stringify({
             title: "Log in",
             description: "Sign in with a valid account",
-            credentialId: null,
+            credentialId: "credential-1",
+            loginUrl: null,
+            usernameSelector: null,
+            passwordSelector: null,
+            submitSelector: null,
             userActionKind: null,
             userObjectTypeKey: null,
             userNameParameterKey: "projectName",
@@ -2155,5 +2226,253 @@ describe("ActionDetailPage: cleanup links and control", () => {
     expect(
       await screen.findByText("Its delete action was converted too, so the first run can clean up after itself."),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ActionDetailPage: a Login action", () => {
+  const LOGIN_RUNS_API_URL = `${ACTION_API_URL}/login-runs`;
+
+  /** The Login action under test (item-1): "Sign in", at the website's login page, with no credential of its own. */
+  const loginAction = buildLoginActionItemRecord({ id: "item-1" });
+
+  /** A passing "Run login" of the Login action. */
+  const passedLoginRun = buildLoginRunRecord({ id: "login-run-1", actionId: "item-1" });
+
+  /**
+   * Stubs the website, the Login action, its login runs, and the website's
+   * credentials and actions (the Login action the only one), plus any extra
+   * or replacement routes.
+   * @param loginActionOverrides - Fields to replace in the Login action
+   * @param extraRoutes - More replies, e.g. for the "Run login" POST
+   * @returns The installed fetch stub
+   */
+  function stubLoadedLoginAction(
+    loginActionOverrides: Partial<WebsiteItemRecord> = {},
+    extraRoutes: StubbedRouteTable = {},
+  ): FetchStub {
+    const servedLoginAction = { ...loginAction, ...loginActionOverrides };
+    return stubLoadedAction([], {
+      [`GET ${ACTION_API_URL}`]: { status: 200, body: servedLoginAction },
+      [`GET ${LOGIN_RUNS_API_URL}`]: { status: 200, body: [] },
+      ...buildLoginChoicesRoutes([servedLoginAction]),
+      ...extraRoutes,
+    });
+  }
+
+  /**
+   * Builds what `useJsonMutation` sends for "Run login" as one credential.
+   * @param credentialId - The credential picked in "Log in as"
+   * @returns The fetch init the stub should have received
+   */
+  function buildRunLoginRequestInit(credentialId: string): RequestInit {
+    return {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credentialId }),
+    };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("shows only the header, saying where it logs in, and its login runs - no versions, steps, or runs", async () => {
+    stubLoadedLoginAction();
+
+    renderActionDetailPage();
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        getElementByWholeText(
+          "P",
+          "Sign in through the website's login form Logs in at https://example.com/login, as whichever credential an action or crawl picks.",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(await screen.findByText("Not run yet. Run the login to check it works.")).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "Log in as" })).toHaveTextContent("Admin");
+    expect(screen.getByRole("button", { name: "Run login" })).toBeEnabled();
+    expect(screen.queryByRole("heading", { name: "Versions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Convert to new version" })).not.toBeInTheDocument();
+  });
+
+  it("asks for a credential on the Credentials tab, and blocks Run login, while the website has none", async () => {
+    stubLoadedLoginAction({}, { [`GET ${CREDENTIALS_API_URL}`]: { status: 200, body: [] } });
+
+    renderActionDetailPage();
+
+    expect(await screen.findByText("Save a credential on the website's Credentials tab first")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run login" })).toBeDisabled();
+    expect(screen.queryByRole("combobox", { name: "Log in as" })).not.toBeInTheDocument();
+  });
+
+  it("says it is loading the credentials, and blocks Run login, while their list loads", async () => {
+    const pendingCredentials = createDeferred<Response>();
+    stubLoadedLoginAction({}, { [`GET ${CREDENTIALS_API_URL}`]: () => pendingCredentials.promise });
+
+    renderActionDetailPage();
+
+    expect(await screen.findByText("Loading the website and its credentials")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run login" })).toBeDisabled();
+
+    await act(async () => {
+      pendingCredentials.resolve(buildJsonResponse(200, WEBSITE_CREDENTIALS));
+      await pendingCredentials.promise;
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run login" })).toBeEnabled();
+    });
+    expect(screen.queryByText("Loading the website and its credentials")).not.toBeInTheDocument();
+  });
+
+  it("says it is loading, not that it has no login page, while the website loads", async () => {
+    const pendingWebsite = createDeferred<Response>();
+    stubLoadedLoginAction({}, { [`GET ${WEBSITE_API_URL}`]: () => pendingWebsite.promise });
+
+    renderActionDetailPage();
+
+    expect(await screen.findByText("Loading the website and its credentials")).toBeInTheDocument();
+    expect(screen.queryByText("Edit this login action to give it a login page URL")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run login" })).toBeDisabled();
+
+    await act(async () => {
+      pendingWebsite.resolve(buildJsonResponse(200, buildWebsiteRecord()));
+      await pendingWebsite.promise;
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run login" })).toBeEnabled();
+    });
+  });
+
+  it("says it has no login page yet, and blocks Run login, when neither it nor the website has one", async () => {
+    stubLoadedLoginAction(
+      {},
+      { [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) } },
+    );
+
+    renderActionDetailPage();
+
+    expect(await screen.findByText("Edit this login action to give it a login page URL")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run login" })).toBeDisabled();
+    expect(
+      getElementByWholeText(
+        "P",
+        "Sign in through the website's login form Has no login page yet - edit it to add one. Logs in as whichever credential an action or crawl picks.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("lets its own login page stand in for the website's missing one", async () => {
+    stubLoadedLoginAction(
+      { loginUrl: "https://example.com/admin/login" },
+      { [`GET ${WEBSITE_API_URL}`]: { status: 200, body: buildWebsiteRecord({ loginUrl: null }) } },
+    );
+
+    renderActionDetailPage();
+
+    await screen.findByText("Not run yet. Run the login to check it works.");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run login" })).toBeEnabled();
+    });
+    expect(screen.queryByText(/Edit this login action/)).not.toBeInTheDocument();
+    expect(
+      getElementByWholeText(
+        "P",
+        "Sign in through the website's login form Logs in at https://example.com/admin/login, as whichever credential an action or crawl picks.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("POSTs Run login as the first credential by default, then fetches the run list again to show the new run first", async () => {
+    const user = userEvent.setup();
+    let loginRunsOnTheServer: unknown[] = [];
+    const fetchStub = stubLoadedLoginAction(
+      {},
+      {
+        [`GET ${LOGIN_RUNS_API_URL}`]: () => Promise.resolve(buildJsonResponse(200, loginRunsOnTheServer)),
+        [`POST ${LOGIN_RUNS_API_URL}`]: () => {
+          loginRunsOnTheServer = [passedLoginRun];
+          return Promise.resolve(buildJsonResponse(201, passedLoginRun));
+        },
+      },
+    );
+    renderActionDetailPage();
+    await screen.findByText("Not run yet. Run the login to check it works.");
+
+    await user.click(await screen.findByRole("button", { name: "Run login" }));
+
+    expect(await screen.findByRole("heading", { name: "Latest run" })).toBeInTheDocument();
+    expect(screen.getByText("Logged in as “Admin”")).toBeInTheDocument();
+    expect(fetchStub).toHaveBeenCalledWith(LOGIN_RUNS_API_URL, buildRunLoginRequestInit("credential-1"));
+    expect(countRequests(fetchStub, "POST", LOGIN_RUNS_API_URL)).toBe(1);
+    expect(countRequests(fetchStub, "GET", LOGIN_RUNS_API_URL)).toBe(2);
+  });
+
+  it("POSTs Run login as the credential picked in Log in as", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedLoginAction(
+      {},
+      {
+        [`POST ${LOGIN_RUNS_API_URL}`]: {
+          status: 201,
+          body: buildLoginRunRecord({ id: "login-run-2", actionId: "item-1", credentialName: "Editor" }),
+        },
+      },
+    );
+    renderActionDetailPage();
+    await screen.findByText("Not run yet. Run the login to check it works.");
+
+    await pickFromSelect(user, /^Log in as/, "Editor");
+    expect(screen.getByRole("combobox", { name: "Log in as" })).toHaveTextContent("Editor");
+    await user.click(screen.getByRole("button", { name: "Run login" }));
+
+    await waitFor(() => {
+      expect(fetchStub).toHaveBeenCalledWith(LOGIN_RUNS_API_URL, buildRunLoginRequestInit("credential-2"));
+    });
+  });
+
+  it("shows Logging in… while the login runs", async () => {
+    const user = userEvent.setup();
+    const pendingLoginRun = createDeferred<Response>();
+    stubLoadedLoginAction({}, { [`POST ${LOGIN_RUNS_API_URL}`]: () => pendingLoginRun.promise });
+    renderActionDetailPage();
+    await screen.findByText("Not run yet. Run the login to check it works.");
+
+    await user.click(await screen.findByRole("button", { name: "Run login" }));
+
+    expect(screen.getByRole("button", { name: "Logging in…" })).toBeDisabled();
+    expect(screen.getByRole("progressbar", { name: "Logging in" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Log in as" })).toHaveAttribute("aria-disabled", "true");
+    await act(async () => {
+      pendingLoginRun.resolve(buildJsonResponse(201, passedLoginRun));
+      await pendingLoginRun.promise;
+    });
+    expect(await screen.findByRole("button", { name: "Run login" })).toBeInTheDocument();
+  });
+
+  it("shows why a refused Run login could not run, without fetching the runs again", async () => {
+    const user = userEvent.setup();
+    const fetchStub = stubLoadedLoginAction(
+      {},
+      { [`POST ${LOGIN_RUNS_API_URL}`]: { status: 409, body: { error: "A login is already running" } } },
+    );
+    renderActionDetailPage();
+    await screen.findByText("Not run yet. Run the login to check it works.");
+
+    await user.click(await screen.findByRole("button", { name: "Run login" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("A login is already running");
+    expect(countRequests(fetchStub, "GET", LOGIN_RUNS_API_URL)).toBe(1);
+  });
+
+  it("never fetches login runs for any other action", async () => {
+    const fetchStub = stubLoadedAction([]);
+
+    renderActionDetailPage();
+
+    await screen.findByRole("heading", { level: 1, name: "Log in" });
+    expect(screen.queryByRole("button", { name: "Run login" })).not.toBeInTheDocument();
+    expect(countRequests(fetchStub, "GET", LOGIN_RUNS_API_URL)).toBe(0);
   });
 });

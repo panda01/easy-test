@@ -101,8 +101,8 @@ export interface CrawlRunsSectionProps {
   /** Called when the user clicks "Crawl website". */
   onCrawlClick: () => void;
   /**
-   * True when the "Crawl as" picker is shown: the website or one of its
-   * credentials has a login page URL. False hides it, for a website that is
+   * True when the "Crawl as" picker is shown: the website has a credential
+   * and a Login action to log in with. False hides it, for a website that is
    * only ever crawled logged out. While it is shown, the picked option also
    * filters the History; while it is hidden, the History lists every ended run.
    */
@@ -132,8 +132,9 @@ export interface CrawlRunsSectionProps {
 
 /**
  * The "Crawls" tab of a website's page, as a column:
- * - "Crawl as" (logged out, or one of the website's credentials; hidden for
- *   a website without any login page URL) on its own line;
+ * - "Crawl as" (logged out, or one of the website's credentials, which the
+ *   website's Login action logs in as; hidden for a website without a
+ *   credential or a Login action) on its own line;
  * - "Buttons" (links only - the default -, buttons except risky ones, or only
  *   "Open" buttons) on its own line;
  * - the "Crawl website" button below them, which is disabled while a crawl

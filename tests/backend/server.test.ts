@@ -5,7 +5,7 @@ import path from "node:path";
 
 /**
  * server.ts registers the website, use case, action, Playwright, action
- * script, auto-refine job, crawl run, and credential controllers, and each of them imports dbService - whose module body
+ * script, auto-refine job, crawl run, credential, and login run controllers, and each of them imports dbService - whose module body
  * constructs a real PrismaClient. Every exported dbService function is
  * replaced so loading the full app never builds a client, and the wiring
  * tests below can choose what a query returns.
@@ -61,6 +61,10 @@ const mockDbService = vi.hoisted(() => ({
   listAutoRefineJobsForAction: vi.fn(),
   findAutoRefineJobForAction: vi.fn(),
   requestAutoRefineJobStop: vi.fn(),
+  findLoginActionForWebsite: vi.fn(),
+  createLoginRunForAction: vi.fn(),
+  listLoginRunsForAction: vi.fn(),
+  findLoginRunForAction: vi.fn(),
 }));
 
 /**
@@ -111,9 +115,15 @@ const mockAutoRefineService = vi.hoisted(() => ({
   markUnfinishedAutoRefineJobsInterrupted: vi.fn(),
 }));
 
+/** The login-form check is replaced so creating a website through the full app can never launch a browser. */
+const mockLoginFormCheckService = vi.hoisted(() => ({
+  checkWebsiteForLoginForm: vi.fn(),
+}));
+
 vi.mock("../../server/services/dbService.js", () => mockDbService);
 vi.mock("../../server/services/crawlRunService.js", () => mockCrawlRunService);
 vi.mock("../../server/services/autoRefineService.js", () => mockAutoRefineService);
+vi.mock("../../server/services/loginFormCheckService.js", () => mockLoginFormCheckService);
 vi.mock("../../server/services/playwrightService.js", () => mockPlaywrightService);
 vi.mock("../../server/services/scriptGenerationService.js", () => mockScriptGenerationService);
 vi.mock("../../server/services/actionPlanRunnerService.js", () => mockActionPlanRunnerService);
@@ -162,12 +172,18 @@ const sampleUseCase = {
   deletedAt: null,
 };
 
+/** An action that runs logged out (it runs as no credential). */
 const sampleAction = {
   id: "action-1",
   websiteId: sampleWebsite.id,
   credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
   title: "Log in",
   description: "Enter credentials and submit",
+  userActionKind: null,
   createdAt: "2026-01-03T00:00:00.000Z",
   updatedAt: "2026-01-03T00:00:00.000Z",
   deletedAt: null,
@@ -395,6 +411,7 @@ describe("server.ts", () => {
     mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
     mockDbService.findActionForWebsite.mockResolvedValue(sampleAction);
     mockDbService.findActionScriptForAction.mockResolvedValue(sampleScript);
+    mockDbService.findLoginActionForWebsite.mockResolvedValue(null);
     mockActionPlanRunnerService.runActionPlan.mockResolvedValue({
       succeeded: true,
       timedOut: false,
@@ -433,6 +450,20 @@ describe("server.ts", () => {
     const configuredActionScriptDirectory = resolveActionScriptDirectory();
     expect(runDirectory.startsWith(configuredActionScriptDirectory + path.sep)).toBe(true);
     expect(uploadsDirectory).toBe(path.join(configuredActionScriptDirectory, "uploads"));
+  });
+
+  it("wires the login run routes into the full app", async () => {
+    const loginAction = { ...sampleAction, id: "login-action-1", userActionKind: "login" };
+    const sampleLoginRun = { id: "login-run-1", actionId: loginAction.id, succeeded: true };
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockDbService.findActionForWebsite.mockResolvedValue(loginAction);
+    mockDbService.listLoginRunsForAction.mockResolvedValue([sampleLoginRun]);
+
+    const res = await request(app).get(`/api/websites/${sampleWebsite.id}/actions/${loginAction.id}/login-runs`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([sampleLoginRun]);
+    expect(mockDbService.listLoginRunsForAction).toHaveBeenCalledWith(sampleWebsite.id, loginAction.id);
   });
 
   it("wires the parameters and created objects routes into the full app", async () => {
@@ -479,14 +510,19 @@ describe("server.ts", () => {
     expect(mockScriptGenerationService.refineActionPlan).not.toHaveBeenCalled();
   });
 
-  it("parses a JSON body before it reaches the website routes", async () => {
+  it("parses a JSON body before it reaches the website routes, and answers the created website with its login-form check", async () => {
+    const notFoundLoginCheck = { outcome: "notFound", loginUrl: null, loginActionId: null, message: null };
     mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+    mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+    mockLoginFormCheckService.checkWebsiteForLoginForm.mockResolvedValue(notFoundLoginCheck);
 
     const res = await request(app)
       .post("/api/websites")
       .send({ url: "https://Example.com", name: "Example" });
 
     expect(res.status).toBe(201);
+    expect(res.body).toEqual({ ...sampleWebsite, loginCheck: notFoundLoginCheck });
+    expect(mockLoginFormCheckService.checkWebsiteForLoginForm).toHaveBeenCalledWith(sampleWebsite);
     expect(mockDbService.createWebsite).toHaveBeenCalledWith({
       url: "https://example.com/",
       name: "Example",

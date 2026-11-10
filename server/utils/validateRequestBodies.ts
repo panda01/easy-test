@@ -11,7 +11,7 @@ import {
   type PlanTarget,
   validateActionPlan,
 } from "./actionPlanSchema.js";
-import { ACTION_KINDS, type ActionKind } from "./scoreActionObjectRole.js";
+import { ACTION_KINDS, LOGIN_ACTION_KIND, type ActionKind } from "./scoreActionObjectRole.js";
 import { REQUIRED_CHOICES, type RequiredChoice } from "./actionParameters.js";
 import {
   CRAWL_BUTTON_MODES,
@@ -35,7 +35,7 @@ export const DEFAULT_SCREENSHOT_MINIMUM_WAIT_MS = 1;
 /** The largest value either screenshot timing setting may have, in milliseconds. */
 export const MAX_TIMING_SETTING_MS = 30_000;
 
-/** Why a website's or a credential's login page URL was rejected. */
+/** Why a website's or a Login action's login page URL was rejected. */
 const LOGIN_URL_INVALID_MESSAGE = "The login page URL must be a valid http:// or https:// address";
 
 /**
@@ -188,8 +188,8 @@ function readOptionalHttpUrl(
  *   minimum must already have passed by then.
  * - `loginUrl` is optional: a missing, null, or blank value is stored as null
  *   (the website doesn't require login); anything else must be an http/https
- *   address, and is normalized like `url`. Credentials without a login URL of
- *   their own log in there.
+ *   address, and is normalized like `url`. It is the default login page:
+ *   the website's Login action logs in there unless it has its own.
  * @param body - The parsed request body
  * @returns The cleaned input, or the first problem found as a message
  */
@@ -341,8 +341,8 @@ function readOptionalLimitedText(
  * Reads the action's object role choices. Each is optional, and a missing or
  * null value means "detect" - so a PUT that leaves one out goes back to
  * detecting it:
- * - `userActionKind`: `parameters`, `create`, `read`, `update`, or `delete`
- *   (`detect` is also accepted, as null);
+ * - `userActionKind`: `parameters`, `create`, `read`, `update`, `delete`, or
+ *   `login` (`detect` is also accepted, as null);
  * - `userObjectTypeKey`: a web object's key, text of at most
  *   `MAX_OBJECT_TYPE_KEY_LENGTH` characters;
  * - `userNameParameterKey`: a parameter key, text of at most
@@ -379,17 +379,142 @@ function readActionRoleChoices(body: Record<string, unknown>): ValidationResult<
   };
 }
 
+/** The three optional CSS selector fields of a Login action, with the names used in error messages. */
+const LOGIN_SELECTOR_FIELDS = [
+  { fieldName: "usernameSelector", label: "username field selector" },
+  { fieldName: "passwordSelector", label: "password field selector" },
+  { fieldName: "submitSelector", label: "submit button selector" },
+] as const;
+
+/** The names of a Login action's three selector fields. */
+type LoginSelectorFieldName = (typeof LOGIN_SELECTOR_FIELDS)[number]["fieldName"];
+
+/** What an action body says about how the action logs in (see `ActionInput`). */
+type ActionLoginChoices = Pick<
+  ActionInput,
+  "credentialId" | "loginUrl" | "usernameSelector" | "passwordSelector" | "submitSelector"
+>;
+
+/** A body that logs in no way at all: every login field null. */
+const NO_LOGIN_CHOICES: ActionLoginChoices = {
+  credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+};
+
+/**
+ * Reads an optional id field: a missing or null value is null; anything else
+ * must be a non-blank string, and is trimmed. Whether the row exists is
+ * checked by the controller.
+ * @param body - The request body object
+ * @param fieldName - The property to read
+ * @param problemMessage - The error message when it is not a non-blank string
+ * @returns The trimmed id (or null), or the problem
+ */
+function readOptionalId(
+  body: Record<string, unknown>,
+  fieldName: string,
+  problemMessage: string,
+): ValidationResult<string | null> {
+  const rawId = body[fieldName];
+  const idWasLeftOut = rawId === undefined || rawId === null;
+  if (idWasLeftOut) {
+    return { isValid: true, input: null };
+  }
+  const trimmedId = readTrimmedString(body, fieldName);
+  const idIsNotANonBlankString = trimmedId === null || trimmedId === "";
+  if (idIsNotANonBlankString) {
+    return { isValid: false, errorMessage: problemMessage };
+  }
+  return { isValid: true, input: trimmedId };
+}
+
+/** Why a Login action body that names a credential is refused. */
+export const LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE =
+  "A login action logs in as whichever credential the action or crawl picks, so it has no credential of its own";
+
+/**
+ * Reads how the LOGIN action logs in: its own login page (optional: blank
+ * means the website's) and its three optional form-field selectors. It has
+ * no credential: it logs in as whichever credential the action, crawl, or
+ * "Run login" picks.
+ * @param body - The request body object
+ * @returns The choices, or the first problem found
+ */
+function readLoginActionChoices(body: Record<string, unknown>): ValidationResult<ActionLoginChoices> {
+  const rawCredentialId = body.credentialId;
+  const credentialWasSent = rawCredentialId !== undefined && rawCredentialId !== null;
+  if (credentialWasSent) {
+    return { isValid: false, errorMessage: LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE };
+  }
+  const loginUrl = readOptionalHttpUrl(body, "loginUrl");
+  if (!loginUrl.isUrl) {
+    return { isValid: false, errorMessage: LOGIN_URL_INVALID_MESSAGE };
+  }
+  const selectors: Record<LoginSelectorFieldName, string | null> = {
+    usernameSelector: null,
+    passwordSelector: null,
+    submitSelector: null,
+  };
+  for (const { fieldName, label } of LOGIN_SELECTOR_FIELDS) {
+    const selector = readOptionalTrimmedText(body, fieldName);
+    if (!selector.isText) {
+      return { isValid: false, errorMessage: `The ${label} must be text` };
+    }
+    selectors[fieldName] = selector.value;
+  }
+  return {
+    isValid: true,
+    input: { credentialId: null, loginUrl: loginUrl.value, ...selectors },
+  };
+}
+
+/**
+ * Reads how any OTHER action (not the Login action) logs in: as the
+ * credential it names (`credentialId`, null to run logged out), through the
+ * website's Login action. The fields only the Login action has - a login
+ * page and form selectors - must be left out (or null).
+ * @param body - The request body object
+ * @returns The choices, or the first problem found
+ */
+function readOtherActionLoginChoices(body: Record<string, unknown>): ValidationResult<ActionLoginChoices> {
+  const loginOnlyFieldNames = ["loginUrl", ...LOGIN_SELECTOR_FIELDS.map((field) => field.fieldName)];
+  for (const fieldName of loginOnlyFieldNames) {
+    const loginOnlyText = readOptionalTrimmedText(body, fieldName);
+    const loginOnlyFieldWasSent = !loginOnlyText.isText || loginOnlyText.value !== null;
+    if (loginOnlyFieldWasSent) {
+      return { isValid: false, errorMessage: "Only a login action has a login page URL or login form selectors" };
+    }
+  }
+  const credentialId = readOptionalId(
+    body,
+    "credentialId",
+    "The credential id must be a non-blank string, or null to run logged out",
+  );
+  if (!credentialId.isValid) return credentialId;
+  return { isValid: true, input: { ...NO_LOGIN_CHOICES, credentialId: credentialId.input } };
+}
+
 /**
  * Validates the body of an action create or replace request: `title` and
- * `description` exactly as `validateTitleDescriptionInput` checks them, the
- * credential the action runs as, and its object role choices (see
- * `readActionRoleChoices`).
+ * `description` exactly as `validateTitleDescriptionInput` checks them, its
+ * object role choices (see `readActionRoleChoices`), and how it logs in.
  *
- * `credentialId` is optional: a missing or null value means the action runs
- * logged out - so a PUT that leaves it out UNLINKS the credential, because a
- * PUT replaces the whole action. Otherwise it must be a non-blank string,
- * and is trimmed. Whether that credential exists (and belongs to the same
- * website) is checked by the controller.
+ * How it logs in depends on the kind:
+ * - the LOGIN action (`userActionKind: "login"`) may have a `loginUrl`
+ *   (blank or left out means "use the website's") and the three optional
+ *   selectors (`usernameSelector`, `passwordSelector`, `submitSelector`),
+ *   and may NOT have a `credentialId` (it logs in as whichever credential
+ *   is picked); see `readLoginActionChoices`;
+ * - every other action may name the credential it runs AS (`credentialId`;
+ *   a missing or null value means it runs logged out - so a PUT that leaves
+ *   it out UNLINKS it, because a PUT replaces the whole action), and must
+ *   leave the Login-only fields out; see `readOtherActionLoginChoices`.
+ * Whether the credential exists (and belongs to the same website), whether
+ * the website already has another Login action, and whether the Login
+ * action has a login page to open, is checked by the controller.
  * @param body - The parsed request body
  * @returns The cleaned input, or the first problem found as a message
  */
@@ -404,21 +529,14 @@ export function validateActionInput(body: unknown): ValidationResult<ActionInput
   if (!roleChoices.isValid) {
     return roleChoices;
   }
-
-  const rawCredentialId = bodyObject.credentialId;
-  const credentialIdWasLeftOut = rawCredentialId === undefined || rawCredentialId === null;
-  if (credentialIdWasLeftOut) {
-    return { isValid: true, input: { ...titleDescription.input, credentialId: null, ...roleChoices.input } };
+  const actionIsALoginAction = roleChoices.input.userActionKind === LOGIN_ACTION_KIND;
+  const loginChoices = actionIsALoginAction
+    ? readLoginActionChoices(bodyObject)
+    : readOtherActionLoginChoices(bodyObject);
+  if (!loginChoices.isValid) {
+    return loginChoices;
   }
-  const credentialId = readTrimmedString(bodyObject, "credentialId");
-  const credentialIdIsNotANonBlankString = credentialId === null || credentialId === "";
-  if (credentialIdIsNotANonBlankString) {
-    return {
-      isValid: false,
-      errorMessage: "The credential id must be a non-blank string, or null to run logged out",
-    };
-  }
-  return { isValid: true, input: { ...titleDescription.input, credentialId, ...roleChoices.input } };
+  return { isValid: true, input: { ...titleDescription.input, ...roleChoices.input, ...loginChoices.input } };
 }
 
 /** The most parameter values one run request may carry. */
@@ -817,13 +935,6 @@ export interface CredentialRequestInput {
   password: string | null;
 }
 
-/** The three optional CSS selector fields of a credential, with the names used in error messages. */
-const CREDENTIAL_SELECTOR_FIELDS = [
-  { fieldName: "usernameSelector", label: "username field selector" },
-  { fieldName: "passwordSelector", label: "password field selector" },
-  { fieldName: "submitSelector", label: "submit button selector" },
-] as const;
-
 /**
  * Validates the body of a credential create or replace request.
  *
@@ -832,13 +943,9 @@ const CREDENTIAL_SELECTOR_FIELDS = [
  * - `password` is required when creating. When replacing, a missing, null, or
  *   empty value means "keep the saved password". It is NOT trimmed - spaces
  *   can be part of a password - but a password of only spaces is rejected.
- * - `loginUrl` is optional: a missing, null, or blank value is stored as null,
- *   meaning "use the website's login URL"; anything else must be an
- *   http/https address, and is normalized. Whether the website has a login
- *   URL to fall back on is checked by the controller.
- * - `usernameSelector`, `passwordSelector`, and `submitSelector` are optional
- *   CSS selectors; a missing, null, or blank value is stored as null (the
- *   crawler then finds that part of the form on its own).
+ *
+ * Where and how the credential logs in (the login page and form selectors)
+ * belongs to the website's Login action, not to the credential.
  * @param body - The parsed request body
  * @param options - Whether a password must be sent
  * @param options.passwordIsRequired - True when creating; false when replacing, where a left-out password keeps the saved one
@@ -886,21 +993,6 @@ export function validateCredentialInput(
     return { isValid: false, errorMessage: "The password cannot be only spaces" };
   }
 
-  const loginUrl = readOptionalHttpUrl(body, "loginUrl");
-  if (!loginUrl.isUrl) {
-    return { isValid: false, errorMessage: LOGIN_URL_INVALID_MESSAGE };
-  }
-
-  const selectors: Record<(typeof CREDENTIAL_SELECTOR_FIELDS)[number]["fieldName"], string | null> =
-    { usernameSelector: null, passwordSelector: null, submitSelector: null };
-  for (const { fieldName, label } of CREDENTIAL_SELECTOR_FIELDS) {
-    const selector = readOptionalTrimmedText(body, fieldName);
-    if (!selector.isText) {
-      return { isValid: false, errorMessage: `The ${label} must be text` };
-    }
-    selectors[fieldName] = selector.value;
-  }
-
   return {
     isValid: true,
     input: {
@@ -908,8 +1000,6 @@ export function validateCredentialInput(
         name,
         description: description.value,
         username,
-        loginUrl: loginUrl.value,
-        ...selectors,
       },
       password,
     },
@@ -918,7 +1008,7 @@ export function validateCredentialInput(
 
 /** What a "start a crawl" request asks for, as validated. */
 export interface CrawlRunStartInput {
-  /** The credential to log in as before crawling, or null to crawl as a logged-out visitor. */
+  /** The credential to log in as (through the website's Login action) before crawling, or null to crawl as a logged-out visitor. */
   credentialId: string | null;
   /** Which buttons the crawl clicks on each page, on top of following its links. */
   buttonMode: CrawlButtonMode;
@@ -947,7 +1037,8 @@ function readOptionalCrawlButtonMode(rawValue: unknown): CrawlButtonMode | null 
  *
  * - `credentialId` is optional: a missing or null value crawls logged out;
  *   otherwise it must be a non-blank string, and is trimmed. Whether that
- *   credential exists is checked by the controller.
+ *   credential exists, and whether the website has a Login action to log in
+ *   with, is checked by the controller.
  * - `buttonMode` is optional: a missing or null value becomes
  *   `DEFAULT_CRAWL_BUTTON_MODE` (`linksOnly`); otherwise it must be exactly one
  *   of `CRAWL_BUTTON_MODES`.
@@ -966,20 +1057,13 @@ export function validateCrawlRunStartInput(body: unknown): ValidationResult<Craw
     return { isValid: false, errorMessage: "The request body must be a JSON object" };
   }
 
-  let credentialId: string | null = null;
-  const rawCredentialId = body.credentialId;
-  const credentialIdWasLeftOut = rawCredentialId === undefined || rawCredentialId === null;
-  if (!credentialIdWasLeftOut) {
-    const trimmedCredentialId = readTrimmedString(body, "credentialId");
-    const credentialIdIsNotANonBlankString =
-      trimmedCredentialId === null || trimmedCredentialId === "";
-    if (credentialIdIsNotANonBlankString) {
-      return {
-        isValid: false,
-        errorMessage: "The credential id must be a non-blank string, or null to crawl logged out",
-      };
-    }
-    credentialId = trimmedCredentialId;
+  const credentialId = readOptionalId(
+    body,
+    "credentialId",
+    "The credential id must be a non-blank string, or null to crawl logged out",
+  );
+  if (!credentialId.isValid) {
+    return credentialId;
   }
 
   const buttonMode = readOptionalCrawlButtonMode(body.buttonMode);
@@ -987,7 +1071,36 @@ export function validateCrawlRunStartInput(body: unknown): ValidationResult<Craw
     return { isValid: false, errorMessage: BUTTON_MODE_INVALID_MESSAGE };
   }
 
-  return { isValid: true, input: { credentialId, buttonMode } };
+  return { isValid: true, input: { credentialId: credentialId.input, buttonMode } };
+}
+
+/** What a "Run login" request asks for, as validated. */
+export interface LoginRunStartInput {
+  /** The credential to log in as. */
+  credentialId: string;
+}
+
+/**
+ * Validates the body of a "Run login" request: `{ credentialId }`, the
+ * credential the Login action logs in as this time - required, a non-blank
+ * string, trimmed. Whether it is one of the website's credentials is checked
+ * by the controller.
+ * @param body - The parsed request body, or undefined when none was sent
+ * @returns The cleaned input, or the first problem found as a message
+ */
+export function validateLoginRunStartInput(body: unknown): ValidationResult<LoginRunStartInput> {
+  if (!isJsonObject(body)) {
+    return { isValid: false, errorMessage: "The request body must be a JSON object with the credential to log in as" };
+  }
+  const credentialId = readOptionalId(body, "credentialId", "The credential id must be a non-blank string");
+  if (!credentialId.isValid) {
+    return credentialId;
+  }
+  const pickedCredentialId = credentialId.input;
+  if (pickedCredentialId === null) {
+    return { isValid: false, errorMessage: "Pick the credential to log in as" };
+  }
+  return { isValid: true, input: { credentialId: pickedCredentialId } };
 }
 
 /** The longest name a web object may be given. */

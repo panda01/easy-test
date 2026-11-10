@@ -25,6 +25,9 @@ const {
   mockCreatedObjectDelegate,
   mockAutoRefineJobDelegate,
   mockActionCleanupDelegate,
+  mockLoginRunDelegate,
+  mockQueryRaw,
+  mockExecuteRaw,
   mockTransaction,
 } = vi.hoisted(
   () => {
@@ -37,8 +40,8 @@ const {
      * `prisma.actionScriptRunScreenshot`, `prisma.actionScriptRefinement`,
      * `prisma.crawlRun`,
      * `prisma.crawledPage`, `prisma.credential`, `prisma.webObject`,
-     * `prisma.pagePattern`, `prisma.autoRefineJob`) carrying every method
-     * dbService calls.
+     * `prisma.pagePattern`, `prisma.autoRefineJob`, `prisma.loginRun`)
+     * carrying every method dbService calls.
      * @returns An object whose query methods are bare vitest mocks
      */
     function createMockModelDelegate() {
@@ -49,6 +52,7 @@ const {
         update: vi.fn(),
         updateMany: vi.fn(),
         createMany: vi.fn(),
+        count: vi.fn(),
       };
     }
 
@@ -69,6 +73,11 @@ const {
     const createdObjectDelegate = createMockModelDelegate();
     const autoRefineJobDelegate = createMockModelDelegate();
     const actionCleanupDelegate = createMockModelDelegate();
+    const loginRunDelegate = createMockModelDelegate();
+    /** The raw SQL reads (`$queryRaw`, called as a tagged template) the login conversion makes. */
+    const queryRaw = vi.fn();
+    /** The raw SQL write (`$executeRaw`, called as a tagged template) the login conversion makes. */
+    const executeRaw = vi.fn();
     // The transaction-scoped client exposes the same delegates, so assertions
     // on a delegate hold whether a query ran inside or outside `$transaction`.
     const transactionClient = {
@@ -89,6 +98,9 @@ const {
       createdObject: createdObjectDelegate,
       autoRefineJob: autoRefineJobDelegate,
       actionCleanup: actionCleanupDelegate,
+      loginRun: loginRunDelegate,
+      $queryRaw: queryRaw,
+      $executeRaw: executeRaw,
     };
 
     return {
@@ -109,6 +121,9 @@ const {
       mockCreatedObjectDelegate: createdObjectDelegate,
       mockAutoRefineJobDelegate: autoRefineJobDelegate,
       mockActionCleanupDelegate: actionCleanupDelegate,
+      mockLoginRunDelegate: loginRunDelegate,
+      mockQueryRaw: queryRaw,
+      mockExecuteRaw: executeRaw,
       // Interactive-transaction form only: run the callback against the
       // transaction-scoped client and resolve with whatever it returns.
       mockTransaction: vi.fn(
@@ -147,6 +162,7 @@ vi.mock("../../../server/generated/prisma/client.js", () => ({
     createdObject = mockCreatedObjectDelegate;
     autoRefineJob = mockAutoRefineJobDelegate;
     actionCleanup = mockActionCleanupDelegate;
+    loginRun = mockLoginRunDelegate;
     $transaction = mockTransaction;
   },
   // dbService writes Prisma.DbNull to clear a JSON column; a stand-in proves it was used.
@@ -241,6 +257,16 @@ import {
   recordActionScriptRunCleanup,
   appendAutoRefineJobCleanupRun,
   appendAutoRefineJobCleanupScript,
+  findLoginActionForWebsite,
+  createDefaultLoginActionForWebsite,
+  convertLoginsToOneLoginActionPerWebsite,
+  fillBlankLoginSettings,
+  wasMadePerCredential,
+  DEFAULT_LOGIN_ACTION_TITLE,
+  DEFAULT_LOGIN_ACTION_DESCRIPTION,
+  createLoginRunForAction,
+  listLoginRunsForAction,
+  findLoginRunForAction,
   type ActionParameter,
   type WebObjectInput,
 } from "../../../server/services/dbService.js";
@@ -271,6 +297,10 @@ const sampleAction = {
   id: "action-1",
   websiteId: "cuid-1",
   credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
   title: "Log in",
   description: "Enter credentials and submit",
   createdAt: new Date("2026-01-03T00:00:00.000Z"),
@@ -279,15 +309,29 @@ const sampleAction = {
   credential: null,
 };
 
-/** The same action linked to a credential, carrying that credential's id and name. */
-const sampleLinkedAction = {
+/**
+ * The same action running as a credential (it logs in as it through the
+ * website's Login action first), carrying that credential's id and name.
+ */
+const sampleActionRunningAsCredential = {
   ...sampleAction,
   credentialId: "credential-1",
   credential: { id: "credential-1", name: "Admin" },
 };
 
 /** What every action read includes: the id and name of the credential it runs as. */
-const ACTION_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true } } };
+const ACTION_CREDENTIAL_INCLUDE = {
+  credential: { select: { id: true, name: true } },
+};
+
+/** The login fields of an action that runs logged out and is not the Login action, as an action write carries them. */
+const NO_LOGIN_SETTINGS = {
+  credentialId: null,
+  loginUrl: null,
+  usernameSelector: null,
+  passwordSelector: null,
+  submitSelector: null,
+};
 
 /** An action's object role choices all left on "detect", as every action write carries them. */
 const DETECT_EVERY_ROLE_CHOICE = {
@@ -677,8 +721,10 @@ const ACTION_SCRIPT_RUN_OBJECTS_INCLUDE = {
   },
 };
 
-/** What every crawl run read includes: the credential's id and name, deleted or not. */
-const CRAWL_RUN_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true } } };
+/** What every crawl run read includes: the id and name of the credential it logged in as, deleted or not. */
+const CRAWL_RUN_CREDENTIAL_INCLUDE = {
+  credential: { select: { id: true, name: true } },
+};
 
 /** What every credential read that can reach the API leaves out. */
 const OMIT_ENCRYPTED_PASSWORD = { encryptedPassword: true };
@@ -688,13 +734,13 @@ const sampleCredentialInput = {
   name: "Admin",
   description: null,
   username: "admin@example.com",
-  loginUrl: "https://example.com/login",
-  usernameSelector: null,
-  passwordSelector: "#password",
-  submitSelector: null,
 };
 
-/** A credential without its encrypted password, as the summary reads return it. */
+/**
+ * A credential without its encrypted password, as the summary reads return
+ * it. It holds no login page or selectors: those are on the website's Login
+ * action.
+ */
 const sampleCredentialSummary = {
   ...sampleCredentialInput,
   id: "credential-1",
@@ -983,7 +1029,7 @@ describe("dbService", () => {
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script run screenshots, action script refinements, crawl runs, crawled pages, credentials, page patterns, web objects, and auto-refine jobs inside one transaction", async () => {
+    it("softDeleteWebsite stamps the website, its use cases, actions, screenshot runs, action scripts, action script runs, action script run screenshots, action script refinements, crawl runs, crawled pages, credentials, page patterns, web objects, auto-refine jobs, and login runs inside one transaction", async () => {
       mockWebsiteDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockUseCaseDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionDelegate.updateMany.mockResolvedValue({ count: 2 });
@@ -999,6 +1045,7 @@ describe("dbService", () => {
       mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 4 });
       mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionCleanupDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockLoginRunDelegate.updateMany.mockResolvedValue({ count: 3 });
 
       const websiteWasDeleted = await softDeleteWebsite("cuid-1");
 
@@ -1065,6 +1112,10 @@ describe("dbService", () => {
         where: { websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
+      expect(mockLoginRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", deletedAt: null },
+        data: { deletedAt: expect.any(Date) as Date },
+      });
     });
 
     it("softDeleteWebsite writes one shared deletedAt timestamp to every table it stamps", async () => {
@@ -1083,6 +1134,7 @@ describe("dbService", () => {
       mockWebObjectDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionCleanupDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockLoginRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       const millisecondsBeforeCall = Date.now();
 
       await softDeleteWebsite("cuid-1");
@@ -1108,6 +1160,7 @@ describe("dbService", () => {
       const pagePatternDeletedAt = readDeletedAtWrittenBy(mockPagePatternDelegate.updateMany);
       const webObjectDeletedAt = readDeletedAtWrittenBy(mockWebObjectDelegate.updateMany);
       const autoRefineJobDeletedAt = readDeletedAtWrittenBy(mockAutoRefineJobDelegate.updateMany);
+      const loginRunDeletedAt = readDeletedAtWrittenBy(mockLoginRunDelegate.updateMany);
 
       expect(websiteDeletedAt).toBeInstanceOf(Date);
       expect(useCaseDeletedAt).toBe(websiteDeletedAt);
@@ -1123,6 +1176,7 @@ describe("dbService", () => {
       expect(pagePatternDeletedAt).toBe(websiteDeletedAt);
       expect(webObjectDeletedAt).toBe(websiteDeletedAt);
       expect(autoRefineJobDeletedAt).toBe(websiteDeletedAt);
+      expect(loginRunDeletedAt).toBe(websiteDeletedAt);
       const deletedAtMilliseconds = (websiteDeletedAt as Date).getTime();
       expect(deletedAtMilliseconds).toBeGreaterThanOrEqual(millisecondsBeforeCall);
       expect(deletedAtMilliseconds).toBeLessThanOrEqual(millisecondsAfterCall);
@@ -1147,6 +1201,7 @@ describe("dbService", () => {
       expect(mockPagePatternDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockWebObjectDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockAutoRefineJobDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockLoginRunDelegate.updateMany).not.toHaveBeenCalled();
     });
 
     it("adoptWebsiteLoginUrl saves a learned login URL only on an active website that has none", async () => {
@@ -1276,9 +1331,9 @@ describe("dbService", () => {
   });
 
   describe("actions", () => {
-    it("listActionsForWebsite returns the website's active actions, newest first, each with its credential's id and name", async () => {
+    it("listActionsForWebsite returns the website's active actions, newest first, each with the credential it runs as", async () => {
       mockActionDelegate.findMany.mockResolvedValue([
-        { ...sampleLinkedAction, scripts: [], _count: { scripts: 0 } },
+        { ...sampleActionRunningAsCredential, scripts: [], _count: { scripts: 0 } },
         { ...sampleAction, scripts: [], _count: { scripts: 0 } },
       ]);
 
@@ -1290,7 +1345,7 @@ describe("dbService", () => {
         include: ACTION_LIST_INCLUDE,
       });
       expect(actions).toEqual([
-        { ...sampleLinkedAction, newestScript: null },
+        { ...sampleActionRunningAsCredential, newestScript: null },
         { ...sampleAction, newestScript: null },
       ]);
     });
@@ -1332,8 +1387,8 @@ describe("dbService", () => {
       }
     });
 
-    it("findActionForWebsite scopes the lookup to the website and to active rows, bringing the credential's id and name", async () => {
-      mockActionDelegate.findFirst.mockResolvedValue(sampleLinkedAction);
+    it("findActionForWebsite scopes the lookup to the website and to active rows, bringing the credential it runs as", async () => {
+      mockActionDelegate.findFirst.mockResolvedValue(sampleActionRunningAsCredential);
 
       const found = await findActionForWebsite("cuid-1", "action-1");
 
@@ -1341,7 +1396,7 @@ describe("dbService", () => {
         where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
         include: ACTION_CREDENTIAL_INCLUDE,
       });
-      expect(found).toBe(sampleLinkedAction);
+      expect(found).toBe(sampleActionRunningAsCredential);
     });
 
     it("findActionForWebsite returns null when no active action of that website matches", async () => {
@@ -1350,12 +1405,42 @@ describe("dbService", () => {
       expect(await findActionForWebsite("cuid-1", "action-of-another-site")).toBeNull();
     });
 
-    it("createActionForWebsite inserts the title, description, and credential under the website, answering with the credential's id and name", async () => {
-      mockActionDelegate.create.mockResolvedValue(sampleLinkedAction);
+    it("createActionForWebsite inserts a Login action's login page and selectors under the website, with no credential", async () => {
+      const createdLoginAction = {
+        ...sampleAction,
+        id: "login-action-1",
+        title: "Log in",
+        userActionKind: "login",
+        loginUrl: "https://example.com/login",
+        usernameSelector: "#email",
+      };
+      mockActionDelegate.create.mockResolvedValue(createdLoginAction);
+      const loginActionInput = {
+        title: "Log in",
+        description: "Signs in with the picked credential",
+        ...NO_LOGIN_SETTINGS,
+        loginUrl: "https://example.com/login",
+        usernameSelector: "#email",
+        ...DETECT_EVERY_ROLE_CHOICE,
+        userActionKind: "login",
+      };
+
+      const created = await createActionForWebsite("cuid-1", loginActionInput);
+
+      expect(mockActionDelegate.create).toHaveBeenCalledWith({
+        data: { ...loginActionInput, websiteId: "cuid-1" },
+        include: ACTION_CREDENTIAL_INCLUDE,
+      });
+      expect(created).toBe(createdLoginAction);
+    });
+
+    it("createActionForWebsite inserts an action that runs as a credential, answering with that credential", async () => {
+      mockActionDelegate.create.mockResolvedValue(sampleActionRunningAsCredential);
 
       const created = await createActionForWebsite("cuid-1", {
         title: "Log in",
         description: "Enter credentials and submit",
+        ...NO_LOGIN_SETTINGS,
         credentialId: "credential-1",
         ...DETECT_EVERY_ROLE_CHOICE,
       });
@@ -1364,13 +1449,14 @@ describe("dbService", () => {
         data: {
           title: "Log in",
           description: "Enter credentials and submit",
+          ...NO_LOGIN_SETTINGS,
           credentialId: "credential-1",
           ...DETECT_EVERY_ROLE_CHOICE,
           websiteId: "cuid-1",
         },
         include: ACTION_CREDENTIAL_INCLUDE,
       });
-      expect(created).toBe(sampleLinkedAction);
+      expect(created).toBe(sampleActionRunningAsCredential);
     });
 
     it("createActionForWebsite inserts an action that runs logged out with a null credential", async () => {
@@ -1379,7 +1465,7 @@ describe("dbService", () => {
       const created = await createActionForWebsite("cuid-1", {
         title: "Log in",
         description: "Enter credentials and submit",
-        credentialId: null,
+        ...NO_LOGIN_SETTINGS,
         ...DETECT_EVERY_ROLE_CHOICE,
       });
 
@@ -1387,7 +1473,7 @@ describe("dbService", () => {
         data: {
           title: "Log in",
           description: "Enter credentials and submit",
-          credentialId: null,
+          ...NO_LOGIN_SETTINGS,
           ...DETECT_EVERY_ROLE_CHOICE,
           websiteId: "cuid-1",
         },
@@ -1396,12 +1482,13 @@ describe("dbService", () => {
       expect(created).toBe(sampleAction);
     });
 
-    it("updateActionForWebsite updates only an active action of that website, credential included", async () => {
-      const updatedAction = { ...sampleLinkedAction, title: "Log out" };
+    it("updateActionForWebsite updates only an active action of that website, its credential included", async () => {
+      const updatedAction = { ...sampleActionRunningAsCredential, title: "Log out" };
       mockActionDelegate.update.mockResolvedValue(updatedAction);
       const replacement = {
         title: "Log out",
         description: "Open the menu and log out",
+        ...NO_LOGIN_SETTINGS,
         credentialId: "credential-1",
         ...DETECT_EVERY_ROLE_CHOICE,
       };
@@ -1418,13 +1505,13 @@ describe("dbService", () => {
 
     it("updateActionForWebsite writes a null credential to unlink it", async () => {
       mockActionDelegate.update.mockResolvedValue(sampleAction);
-      const replacement = { title: "Log in", description: "Enter credentials", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE };
+      const replacement = { title: "Log in", description: "Enter credentials", ...NO_LOGIN_SETTINGS, ...DETECT_EVERY_ROLE_CHOICE };
 
       await updateActionForWebsite("cuid-1", "action-1", replacement);
 
       expect(mockActionDelegate.update).toHaveBeenCalledWith({
         where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
-        data: { title: "Log in", description: "Enter credentials", credentialId: null, ...DETECT_EVERY_ROLE_CHOICE },
+        data: { title: "Log in", description: "Enter credentials", ...NO_LOGIN_SETTINGS, ...DETECT_EVERY_ROLE_CHOICE },
         include: ACTION_CREDENTIAL_INCLUDE,
       });
     });
@@ -1435,7 +1522,7 @@ describe("dbService", () => {
       const updated = await updateActionForWebsite("cuid-1", "missing", {
         title: "t",
         description: "d",
-        credentialId: null,
+        ...NO_LOGIN_SETTINGS,
         ...DETECT_EVERY_ROLE_CHOICE,
       });
 
@@ -1450,19 +1537,22 @@ describe("dbService", () => {
         updateActionForWebsite("cuid-1", "action-1", {
           title: "t",
           description: "d",
-          credentialId: null,
+          ...NO_LOGIN_SETTINGS,
           ...DETECT_EVERY_ROLE_CHOICE,
         }),
       ).rejects.toBe(connectionError);
     });
 
-    it("softDeleteActionForWebsite stamps the active action and its scripts, script runs, script run screenshots, script refinements, and cleanup links inside one transaction", async () => {
+    it("softDeleteActionForWebsite stamps the active action and its scripts, script runs, script run screenshots, script refinements, parameters, auto-refine jobs, login runs, and cleanup links inside one transaction, leaving every other action alone", async () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 2 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 3 });
       mockActionScriptRunScreenshotDelegate.updateMany.mockResolvedValue({ count: 9 });
       mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockActionParameterDelegate.updateMany.mockResolvedValue({ count: 2 });
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionCleanupDelegate.updateMany.mockResolvedValue({ count: 1 });
+      mockLoginRunDelegate.updateMany.mockResolvedValue({ count: 4 });
 
       const actionWasDeleted = await softDeleteActionForWebsite("cuid-1", "action-1");
 
@@ -1477,41 +1567,48 @@ describe("dbService", () => {
         where: { id: "action-1", websiteId: "cuid-1", deletedAt: null },
         data: { deletedAt: expect.any(Date) },
       });
-      expect(mockActionScriptDelegate.updateMany).toHaveBeenCalledWith({
-        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
-        data: { deletedAt: expect.any(Date) },
-      });
-      expect(mockActionScriptRunDelegate.updateMany).toHaveBeenCalledWith({
-        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
-        data: { deletedAt: expect.any(Date) },
-      });
-      expect(mockActionScriptRunScreenshotDelegate.updateMany).toHaveBeenCalledWith({
-        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
-        data: { deletedAt: expect.any(Date) },
-      });
-      expect(mockActionScriptRefinementDelegate.updateMany).toHaveBeenCalledWith({
-        where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
-        data: { deletedAt: expect.any(Date) },
-      });
+      for (const belongingDelegate of [
+        mockActionScriptDelegate,
+        mockActionScriptRunDelegate,
+        mockActionScriptRunScreenshotDelegate,
+        mockActionScriptRefinementDelegate,
+        mockActionParameterDelegate,
+        mockAutoRefineJobDelegate,
+        mockLoginRunDelegate,
+      ]) {
+        expect(belongingDelegate.updateMany).toHaveBeenCalledWith({
+          where: { actionId: "action-1", websiteId: "cuid-1", deletedAt: null },
+          data: { deletedAt: expect.any(Date) as Date },
+        });
+      }
+      // Deleting the website's Login action leaves the other actions'
+      // credentials alone: only the action itself is stamped.
+      expect(mockActionDelegate.updateMany).toHaveBeenCalledTimes(1);
     });
 
-    it("softDeleteActionForWebsite writes one shared deletedAt timestamp to the action, its scripts, their runs and run screenshots, and their refinements", async () => {
+    it("softDeleteActionForWebsite writes one shared deletedAt timestamp to the action, its scripts, their runs and run screenshots, their refinements, its parameters, its auto-refine jobs, and its login runs", async () => {
       mockActionDelegate.updateMany.mockResolvedValue({ count: 1 });
       mockActionScriptDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRunDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRunScreenshotDelegate.updateMany.mockResolvedValue({ count: 0 });
       mockActionScriptRefinementDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockActionParameterDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockAutoRefineJobDelegate.updateMany.mockResolvedValue({ count: 0 });
+      mockLoginRunDelegate.updateMany.mockResolvedValue({ count: 0 });
 
       await softDeleteActionForWebsite("cuid-1", "action-1");
 
       const actionDeletedAt = readDeletedAtWrittenBy(mockActionDelegate.updateMany);
       expect(actionDeletedAt).toBeInstanceOf(Date);
+      expect(readDeletedAtWrittenBy(mockLoginRunDelegate.updateMany)).toBe(actionDeletedAt);
       expect(readDeletedAtWrittenBy(mockActionScriptDelegate.updateMany)).toBe(actionDeletedAt);
       expect(readDeletedAtWrittenBy(mockActionScriptRunDelegate.updateMany)).toBe(actionDeletedAt);
       expect(readDeletedAtWrittenBy(mockActionScriptRunScreenshotDelegate.updateMany)).toBe(actionDeletedAt);
       expect(readDeletedAtWrittenBy(mockActionScriptRefinementDelegate.updateMany)).toBe(
         actionDeletedAt,
       );
+      expect(readDeletedAtWrittenBy(mockActionParameterDelegate.updateMany)).toBe(actionDeletedAt);
+      expect(readDeletedAtWrittenBy(mockAutoRefineJobDelegate.updateMany)).toBe(actionDeletedAt);
     });
 
     it("softDeleteActionForWebsite returns false and touches no scripts when no active action matched", async () => {
@@ -1523,6 +1620,618 @@ describe("dbService", () => {
       expect(mockActionScriptRunScreenshotDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionCleanupDelegate.updateMany).not.toHaveBeenCalled();
       expect(mockActionScriptRefinementDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockActionParameterDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockAutoRefineJobDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockLoginRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockActionDelegate.updateMany).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("the website's Login action", () => {
+    /** The website's Login action, as the database returns it (a plain row: no credential is brought along). */
+    const sampleLoginActionRow = {
+      id: "login-action-1",
+      websiteId: "cuid-1",
+      credentialId: null,
+      loginUrl: null,
+      usernameSelector: null,
+      passwordSelector: null,
+      submitSelector: null,
+      title: "Log in",
+      description: "Logs in with the username and password of the credential each action or crawl picks.",
+      userActionKind: "login",
+      createdAt: new Date("2026-01-03T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-03T00:00:00.000Z"),
+      deletedAt: null,
+    };
+
+    it("findLoginActionForWebsite reads the website's oldest active Login action", async () => {
+      mockActionDelegate.findFirst.mockResolvedValue(sampleLoginActionRow);
+
+      const loginAction = await findLoginActionForWebsite("cuid-1");
+
+      expect(mockActionDelegate.findFirst).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", userActionKind: "login", deletedAt: null },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(loginAction).toBe(sampleLoginActionRow);
+    });
+
+    it("findLoginActionForWebsite answers null when the website has no Login action", async () => {
+      mockActionDelegate.findFirst.mockResolvedValue(null);
+
+      expect(await findLoginActionForWebsite("cuid-1")).toBeNull();
+    });
+
+    it("the default Login action is titled \"Log in\" and says it logs in as the credential each action or crawl picks", () => {
+      expect(DEFAULT_LOGIN_ACTION_TITLE).toBe("Log in");
+      expect(DEFAULT_LOGIN_ACTION_DESCRIPTION).toBe(
+        "Logs in with the username and password of the credential each action or crawl picks.",
+      );
+    });
+
+    it("createDefaultLoginActionForWebsite makes \"Log in\" with its own login page and no selectors or credential", async () => {
+      const createdLoginAction = { ...sampleLoginActionRow, loginUrl: "https://auth.example.com/login" };
+      mockActionDelegate.create.mockResolvedValue(createdLoginAction);
+
+      const loginAction = await createDefaultLoginActionForWebsite("cuid-1", "https://auth.example.com/login");
+
+      expect(mockActionDelegate.create).toHaveBeenCalledWith({
+        data: {
+          websiteId: "cuid-1",
+          title: DEFAULT_LOGIN_ACTION_TITLE,
+          description: DEFAULT_LOGIN_ACTION_DESCRIPTION,
+          userActionKind: "login",
+          loginUrl: "https://auth.example.com/login",
+        },
+      });
+      expect(loginAction).toBe(createdLoginAction);
+    });
+
+    it("createDefaultLoginActionForWebsite writes a null login page to use the website's", async () => {
+      mockActionDelegate.create.mockResolvedValue(sampleLoginActionRow);
+
+      await createDefaultLoginActionForWebsite("cuid-1", null);
+
+      expect(mockActionDelegate.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ websiteId: "cuid-1", userActionKind: "login", loginUrl: null }) as object,
+      });
+    });
+  });
+
+  describe("fillBlankLoginSettings", () => {
+    /** Login settings with nothing set. */
+    const blankSettings = { loginUrl: null, usernameSelector: null, passwordSelector: null, submitSelector: null };
+
+    it("keeps every setting the kept Login action already has", () => {
+      const keptSettings = {
+        loginUrl: "https://example.com/login",
+        usernameSelector: "#email",
+        passwordSelector: "#password",
+        submitSelector: "button.go",
+      };
+      const otherSettings = {
+        loginUrl: "https://other.example.com/login",
+        usernameSelector: "#user",
+        passwordSelector: "#pw",
+        submitSelector: "#submit",
+      };
+
+      expect(fillBlankLoginSettings(keptSettings, [otherSettings])).toEqual(keptSettings);
+    });
+
+    it("fills each blank from the first source that has it, in order", () => {
+      const firstSource = { ...blankSettings, usernameSelector: "#first-user" };
+      const secondSource = {
+        loginUrl: "https://second.example.com/login",
+        usernameSelector: "#second-user",
+        passwordSelector: "#second-password",
+        submitSelector: null,
+      };
+
+      expect(fillBlankLoginSettings({ ...blankSettings, passwordSelector: "#kept-password" }, [firstSource, secondSource])).toEqual({
+        loginUrl: "https://second.example.com/login",
+        usernameSelector: "#first-user",
+        passwordSelector: "#kept-password",
+        submitSelector: null,
+      });
+    });
+
+    it("answers only the four login settings, all null when nothing has them", () => {
+      const keptLoginActionRow = { ...blankSettings, id: "login-action-1", title: "Log in" };
+
+      expect(fillBlankLoginSettings(keptLoginActionRow, [])).toEqual(blankSettings);
+    });
+  });
+
+  describe("wasMadePerCredential", () => {
+    it("is true for a generated \"Log in as <name>\" Login action with the generated description", () => {
+      expect(
+        wasMadePerCredential({
+          title: "Log in as Admin",
+          description: 'Logs in as the credential "Admin" with its username and password.',
+        }),
+      ).toBe(true);
+    });
+
+    it("is false once the user changed the title or the description", () => {
+      expect(
+        wasMadePerCredential({
+          title: "Log in as Admin",
+          description: "Signs in with the admin account",
+        }),
+      ).toBe(false);
+      expect(
+        wasMadePerCredential({
+          title: "Sign in",
+          description: 'Logs in as the credential "Admin" with its username and password.',
+        }),
+      ).toBe(false);
+    });
+
+    it("is false for the plain \"Log in\" Login action and for a title that names no credential", () => {
+      expect(
+        wasMadePerCredential({ title: DEFAULT_LOGIN_ACTION_TITLE, description: DEFAULT_LOGIN_ACTION_DESCRIPTION }),
+      ).toBe(false);
+      expect(
+        wasMadePerCredential({
+          title: "Log in as ",
+          description: 'Logs in as the credential "" with its username and password.',
+        }),
+      ).toBe(false);
+    });
+  });
+
+  describe("convertLoginsToOneLoginActionPerWebsite", () => {
+    /** A website that logs in, as the conversion reads it. */
+    const websiteThatLogsIn = { ...sampleWebsite, id: "cuid-1", name: "Example" };
+
+    /** A second website that logs in, created after the first. */
+    const secondWebsiteThatLogsIn = { ...sampleWebsite, id: "cuid-2", name: "Second" };
+
+    /** The column check's answer while `credentials` still has its login columns (shape 1). */
+    const credentialLoginColumnRow = { table_name: "credentials", column_name: "loginUrl" };
+
+    /** The column check's answer while `actions` still has `loginActionId` (shape 2). */
+    const actionLoginActionIdColumnRow = { table_name: "actions", column_name: "loginActionId" };
+
+    /** Login settings with nothing set. */
+    const blankSettings = { loginUrl: null, usernameSelector: null, passwordSelector: null, submitSelector: null };
+
+    /**
+     * Builds a Login action row as the conversion reads it.
+     * @param overrides - The fields to change
+     * @returns The Login action row
+     */
+    function buildLoginActionRow(overrides: Record<string, unknown>): Record<string, unknown> {
+      return {
+        id: "login-action-1",
+        websiteId: "cuid-1",
+        title: DEFAULT_LOGIN_ACTION_TITLE,
+        description: DEFAULT_LOGIN_ACTION_DESCRIPTION,
+        userActionKind: "login",
+        credentialId: null,
+        ...blankSettings,
+        createdAt: new Date("2026-01-03T00:00:00.000Z"),
+        deletedAt: null,
+        ...overrides,
+      };
+    }
+
+    /**
+     * Joins the SQL text of one raw call (a tagged template hands over its
+     * literal parts as the first argument).
+     * @param rawMock - The `$queryRaw` or `$executeRaw` mock
+     * @param callIndex - Which recorded call to read
+     * @returns The call's SQL text, with `?` where each value went
+     */
+    function readRawSqlText(rawMock: typeof mockQueryRaw, callIndex: number): string {
+      const [sqlParts] = rawMock.mock.calls[callIndex] as [readonly string[]];
+      return sqlParts.join("?");
+    }
+
+    /**
+     * Reads the values one raw call interpolated into its SQL.
+     * @param rawMock - The `$queryRaw` or `$executeRaw` mock
+     * @param callIndex - Which recorded call to read
+     * @returns The interpolated values, in order
+     */
+    function readRawSqlValues(rawMock: typeof mockQueryRaw, callIndex: number): unknown[] {
+      const [, ...sqlValues] = rawMock.mock.calls[callIndex] as unknown[];
+      return sqlValues;
+    }
+
+    it("checks which old login columns still exist, then reads the active websites with an active credential or Login action, oldest first, inside one transaction", async () => {
+      mockQueryRaw.mockResolvedValueOnce([]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([]);
+
+      const conversions = await convertLoginsToOneLoginActionPerWebsite();
+
+      expect(conversions).toEqual([]);
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+      expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+      const columnCheckSql = readRawSqlText(mockQueryRaw, 0);
+      expect(columnCheckSql).toContain("from information_schema.columns");
+      expect(columnCheckSql).toContain("table_schema = current_schema()");
+      expect(columnCheckSql).toContain("table_name = 'credentials' and column_name = 'loginUrl'");
+      expect(columnCheckSql).toContain("table_name = 'actions' and column_name = 'loginActionId'");
+      expect(mockWebsiteDelegate.findMany).toHaveBeenCalledWith({
+        where: {
+          deletedAt: null,
+          OR: [
+            { credentials: { some: { deletedAt: null } } },
+            { actions: { some: { deletedAt: null, userActionKind: "login" } } },
+          ],
+        },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(mockExecuteRaw).not.toHaveBeenCalled();
+      expect(mockActionDelegate.create).not.toHaveBeenCalled();
+    });
+
+    it("from logins on credentials (shape 1): makes the website's \"Log in\" and fills its login page and selectors from the credentials' old columns, oldest credential first", async () => {
+      mockQueryRaw
+        .mockResolvedValueOnce([credentialLoginColumnRow])
+        .mockResolvedValueOnce([
+          { ...blankSettings, loginUrl: "https://auth.example.com/login", usernameSelector: "#email", submitSelector: "button.go" },
+          { ...blankSettings, usernameSelector: "#user", passwordSelector: "#password" },
+        ]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([websiteThatLogsIn]);
+      mockActionDelegate.findMany.mockResolvedValue([]);
+      mockActionDelegate.create.mockResolvedValue(buildLoginActionRow({ id: "login-action-new" }));
+      mockActionDelegate.update.mockResolvedValue({});
+
+      const conversions = await convertLoginsToOneLoginActionPerWebsite();
+
+      // Without `actions.loginActionId` there is nothing to give back.
+      expect(mockExecuteRaw).not.toHaveBeenCalled();
+      expect(mockActionDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", userActionKind: "login", deletedAt: null },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(mockActionDelegate.create).toHaveBeenCalledWith({
+        data: {
+          websiteId: "cuid-1",
+          title: DEFAULT_LOGIN_ACTION_TITLE,
+          description: DEFAULT_LOGIN_ACTION_DESCRIPTION,
+          userActionKind: "login",
+        },
+      });
+      const credentialReadSql = readRawSqlText(mockQueryRaw, 1);
+      expect(credentialReadSql).toContain('select "loginUrl", "usernameSelector", "passwordSelector", "submitSelector"');
+      expect(credentialReadSql).toContain("from credentials");
+      expect(credentialReadSql).toContain('where "websiteId" = ? and "deletedAt" is null');
+      expect(credentialReadSql).toContain('order by "createdAt" asc');
+      expect(readRawSqlValues(mockQueryRaw, 1)).toEqual(["cuid-1"]);
+      expect(mockActionDelegate.update).toHaveBeenCalledTimes(1);
+      expect(mockActionDelegate.update).toHaveBeenCalledWith({
+        where: { id: "login-action-new" },
+        data: {
+          loginUrl: "https://auth.example.com/login",
+          usernameSelector: "#email",
+          passwordSelector: "#password",
+          submitSelector: "button.go",
+          credentialId: null,
+        },
+      });
+      expect(mockLoginRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(conversions).toEqual([
+        {
+          websiteId: "cuid-1",
+          websiteName: "Example",
+          loginActionId: "login-action-new",
+          loginActionWasCreated: true,
+          mergedLoginActionCount: 0,
+          restoredCredentialActionCount: 0,
+        },
+      ]);
+    });
+
+    it("from the earlier design (shape 2): gives the actions that logged in with a Login action its credential back, keeps the oldest Login action, merges the others into it, and renames it to \"Log in\"", async () => {
+      const oldestLoginAction = buildLoginActionRow({
+        id: "login-action-admin",
+        title: "Log in as Admin",
+        description: 'Logs in as the credential "Admin" with its username and password.',
+        credentialId: "credential-admin",
+        usernameSelector: "#email",
+      });
+      const viewerLoginAction = buildLoginActionRow({
+        id: "login-action-viewer",
+        title: "Log in as Viewer",
+        description: 'Logs in as the credential "Viewer" with its username and password.',
+        credentialId: "credential-viewer",
+        loginUrl: "https://auth.example.com/login",
+        usernameSelector: "#viewer-email",
+      });
+      const editorLoginAction = buildLoginActionRow({
+        id: "login-action-editor",
+        title: "Log in as Editor",
+        description: 'Logs in as the credential "Editor" with its username and password.',
+        credentialId: "credential-editor",
+        passwordSelector: "#password",
+      });
+      mockQueryRaw
+        .mockResolvedValueOnce([credentialLoginColumnRow, actionLoginActionIdColumnRow])
+        .mockResolvedValueOnce([{ ...blankSettings, loginUrl: "https://old.example.com/login", submitSelector: "button.go" }]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([websiteThatLogsIn]);
+      mockExecuteRaw.mockResolvedValue(3);
+      mockActionDelegate.findMany.mockResolvedValue([oldestLoginAction, viewerLoginAction, editorLoginAction]);
+      mockActionDelegate.update.mockResolvedValue({});
+      mockLoginRunDelegate.updateMany.mockResolvedValue({ count: 1 });
+
+      const conversions = await convertLoginsToOneLoginActionPerWebsite();
+
+      // 1. The actions that named a Login action get its credential (unless they had their own) and lose the link.
+      expect(mockExecuteRaw).toHaveBeenCalledTimes(1);
+      const restoreSql = readRawSqlText(mockExecuteRaw, 0);
+      expect(restoreSql).toContain('set "credentialId" = coalesce(action."credentialId", login_action."credentialId")');
+      expect(restoreSql).toContain('"loginActionId" = null');
+      expect(restoreSql).toContain('where action."loginActionId" = login_action.id');
+      expect(restoreSql).toContain('and action."websiteId" = ?');
+      expect(restoreSql).toContain('(action."userActionKind" is null or action."userActionKind" <> ?)');
+      expect(readRawSqlValues(mockExecuteRaw, 0)).toEqual(["cuid-1", "login"]);
+      // 2. The oldest Login action is kept: nothing is made.
+      expect(mockActionDelegate.create).not.toHaveBeenCalled();
+      // 3. The other two hand their login runs to it, then are soft deleted with what belongs to them.
+      expect(mockLoginRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { actionId: "login-action-viewer", websiteId: "cuid-1", deletedAt: null },
+        data: { actionId: "login-action-admin" },
+      });
+      expect(mockLoginRunDelegate.updateMany).toHaveBeenCalledWith({
+        where: { actionId: "login-action-editor", websiteId: "cuid-1", deletedAt: null },
+        data: { actionId: "login-action-admin" },
+      });
+      expect(mockActionDelegate.update).toHaveBeenCalledWith({
+        where: { id: "login-action-viewer" },
+        data: { deletedAt: expect.any(Date) as Date },
+      });
+      expect(mockActionDelegate.update).toHaveBeenCalledWith({
+        where: { id: "login-action-editor" },
+        data: { deletedAt: expect.any(Date) as Date },
+      });
+      for (const mergedLoginActionId of ["login-action-viewer", "login-action-editor"]) {
+        expect(mockActionScriptDelegate.updateMany).toHaveBeenCalledWith({
+          where: { actionId: mergedLoginActionId, websiteId: "cuid-1", deletedAt: null },
+          data: { deletedAt: expect.any(Date) as Date },
+        });
+        expect(mockActionCleanupDelegate.updateMany).toHaveBeenCalledWith({
+          where: {
+            websiteId: "cuid-1",
+            deletedAt: null,
+            OR: [{ createActionId: mergedLoginActionId }, { deleteActionId: mergedLoginActionId }],
+          },
+          data: { deletedAt: expect.any(Date) as Date },
+        });
+      }
+      const viewerDeletedAt = (mockActionDelegate.update.mock.calls[0] as [{ data: { deletedAt: unknown } }])[0].data
+        .deletedAt;
+      const editorDeletedAt = (mockActionDelegate.update.mock.calls[1] as [{ data: { deletedAt: unknown } }])[0].data
+        .deletedAt;
+      expect(viewerDeletedAt).toBe(editorDeletedAt);
+      expect(readDeletedAtWrittenBy(mockActionScriptDelegate.updateMany)).toBe(viewerDeletedAt);
+      // 4. Its blanks are filled from the merged Login actions first, then the credentials' old columns;
+      //    it is renamed, and it loses its credential.
+      expect(mockActionDelegate.update).toHaveBeenLastCalledWith({
+        where: { id: "login-action-admin" },
+        data: {
+          loginUrl: "https://auth.example.com/login",
+          usernameSelector: "#email",
+          passwordSelector: "#password",
+          submitSelector: "button.go",
+          title: DEFAULT_LOGIN_ACTION_TITLE,
+          description: DEFAULT_LOGIN_ACTION_DESCRIPTION,
+          credentialId: null,
+        },
+      });
+      expect(conversions).toEqual([
+        {
+          websiteId: "cuid-1",
+          websiteName: "Example",
+          loginActionId: "login-action-admin",
+          loginActionWasCreated: false,
+          mergedLoginActionCount: 2,
+          restoredCredentialActionCount: 3,
+        },
+      ]);
+    });
+
+    it("keeps the title and description of a Login action the user named, and still clears its credential", async () => {
+      const namedLoginAction = buildLoginActionRow({
+        id: "login-action-named",
+        title: "Sign in to the portal",
+        description: "Uses the portal's sign-in page",
+        credentialId: "credential-1",
+        loginUrl: "https://portal.example.com/sign-in",
+      });
+      mockQueryRaw.mockResolvedValueOnce([actionLoginActionIdColumnRow]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([websiteThatLogsIn]);
+      mockExecuteRaw.mockResolvedValue(0);
+      mockActionDelegate.findMany.mockResolvedValue([namedLoginAction]);
+      mockActionDelegate.update.mockResolvedValue({});
+
+      const conversions = await convertLoginsToOneLoginActionPerWebsite();
+
+      // Without the credentials' old columns, they are not read.
+      expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+      expect(mockActionDelegate.update).toHaveBeenCalledTimes(1);
+      expect(mockActionDelegate.update).toHaveBeenCalledWith({
+        where: { id: "login-action-named" },
+        data: { ...blankSettings, loginUrl: "https://portal.example.com/sign-in", credentialId: null },
+      });
+      expect(conversions).toEqual([
+        expect.objectContaining({
+          loginActionId: "login-action-named",
+          loginActionWasCreated: false,
+          mergedLoginActionCount: 0,
+          restoredCredentialActionCount: 0,
+        }),
+      ]);
+    });
+
+    it("after the old columns are dropped: still makes a missing Login action, touching no raw column", async () => {
+      mockQueryRaw.mockResolvedValueOnce([]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([websiteThatLogsIn]);
+      mockActionDelegate.findMany.mockResolvedValue([]);
+      mockActionDelegate.create.mockResolvedValue(buildLoginActionRow({ id: "login-action-new" }));
+      mockActionDelegate.update.mockResolvedValue({});
+
+      const conversions = await convertLoginsToOneLoginActionPerWebsite();
+
+      expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+      expect(mockExecuteRaw).not.toHaveBeenCalled();
+      expect(mockActionDelegate.update).toHaveBeenCalledWith({
+        where: { id: "login-action-new" },
+        data: { ...blankSettings, credentialId: null },
+      });
+      expect(conversions).toEqual([
+        {
+          websiteId: "cuid-1",
+          websiteName: "Example",
+          loginActionId: "login-action-new",
+          loginActionWasCreated: true,
+          mergedLoginActionCount: 0,
+          restoredCredentialActionCount: 0,
+        },
+      ]);
+    });
+
+    it("is safe to run twice: a website with one Login action keeps it, merging and making nothing", async () => {
+      const convertedLoginAction = buildLoginActionRow({
+        id: "login-action-1",
+        loginUrl: "https://example.com/login",
+        usernameSelector: "#email",
+      });
+      mockQueryRaw.mockResolvedValueOnce([]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([websiteThatLogsIn]);
+      mockActionDelegate.findMany.mockResolvedValue([convertedLoginAction]);
+      mockActionDelegate.update.mockResolvedValue({});
+
+      const conversions = await convertLoginsToOneLoginActionPerWebsite();
+
+      expect(mockActionDelegate.create).not.toHaveBeenCalled();
+      expect(mockLoginRunDelegate.updateMany).not.toHaveBeenCalled();
+      expect(mockActionDelegate.update).toHaveBeenCalledWith({
+        where: { id: "login-action-1" },
+        data: { ...blankSettings, loginUrl: "https://example.com/login", usernameSelector: "#email", credentialId: null },
+      });
+      expect(conversions).toEqual([
+        {
+          websiteId: "cuid-1",
+          websiteName: "Example",
+          loginActionId: "login-action-1",
+          loginActionWasCreated: false,
+          mergedLoginActionCount: 0,
+          restoredCredentialActionCount: 0,
+        },
+      ]);
+    });
+
+    it("answers one entry per website, in the order they were read, giving back credentials per website", async () => {
+      mockQueryRaw
+        .mockResolvedValueOnce([actionLoginActionIdColumnRow])
+        .mockResolvedValue([]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([websiteThatLogsIn, secondWebsiteThatLogsIn]);
+      mockExecuteRaw.mockResolvedValueOnce(2).mockResolvedValueOnce(0);
+      mockActionDelegate.findMany
+        .mockResolvedValueOnce([buildLoginActionRow({ id: "login-action-1" })])
+        .mockResolvedValueOnce([]);
+      mockActionDelegate.create.mockResolvedValue(buildLoginActionRow({ id: "login-action-2", websiteId: "cuid-2" }));
+      mockActionDelegate.update.mockResolvedValue({});
+
+      const conversions = await convertLoginsToOneLoginActionPerWebsite();
+
+      expect(readRawSqlValues(mockExecuteRaw, 0)).toEqual(["cuid-1", "login"]);
+      expect(readRawSqlValues(mockExecuteRaw, 1)).toEqual(["cuid-2", "login"]);
+      expect(mockActionDelegate.create).toHaveBeenCalledTimes(1);
+      expect(mockActionDelegate.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ websiteId: "cuid-2" }) as object,
+      });
+      expect(
+        conversions.map((conversion) => [
+          conversion.websiteName,
+          conversion.loginActionId,
+          conversion.loginActionWasCreated,
+          conversion.restoredCredentialActionCount,
+        ]),
+      ).toEqual([
+        ["Example", "login-action-1", false, 2],
+        ["Second", "login-action-2", true, 0],
+      ]);
+    });
+
+    it("rejects with a failed query's error, so the transaction rolls back", async () => {
+      const deadlockError = new Error("deadlock detected");
+      mockQueryRaw.mockResolvedValueOnce([]);
+      mockWebsiteDelegate.findMany.mockResolvedValue([websiteThatLogsIn]);
+      mockActionDelegate.findMany.mockRejectedValue(deadlockError);
+
+      await expect(convertLoginsToOneLoginActionPerWebsite()).rejects.toBe(deadlockError);
+      expect(mockActionDelegate.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("login runs", () => {
+    /** What one login run did, as the "Run login" route records it. */
+    const sampleLoginRunInput = {
+      credentialName: "Admin",
+      loginUrl: "https://example.com/login",
+      succeeded: true,
+      errorMessage: null,
+      screenshotFileName: "cuid-1/run-folder/logged-in.png",
+      finalPageUrl: "https://example.com/dashboard",
+      output: "Log in with \"Log in as Admin\" as \"Admin\" on https://example.com/login\n✔ Logged in",
+      durationMs: 2100,
+    };
+
+    /** The recorded login run, as the database returns it. */
+    const sampleLoginRun = {
+      ...sampleLoginRunInput,
+      id: "login-run-1",
+      websiteId: "cuid-1",
+      actionId: "login-action-1",
+      createdAt: new Date("2026-01-09T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-09T00:00:00.000Z"),
+      deletedAt: null,
+    };
+
+    it("createLoginRunForAction records the run under its Login action and website", async () => {
+      mockLoginRunDelegate.create.mockResolvedValue(sampleLoginRun);
+
+      const created = await createLoginRunForAction("cuid-1", "login-action-1", sampleLoginRunInput);
+
+      expect(mockLoginRunDelegate.create).toHaveBeenCalledWith({
+        data: { ...sampleLoginRunInput, websiteId: "cuid-1", actionId: "login-action-1" },
+      });
+      expect(created).toBe(sampleLoginRun);
+    });
+
+    it("listLoginRunsForAction returns the Login action's active runs, newest first", async () => {
+      mockLoginRunDelegate.findMany.mockResolvedValue([sampleLoginRun]);
+
+      const loginRuns = await listLoginRunsForAction("cuid-1", "login-action-1");
+
+      expect(mockLoginRunDelegate.findMany).toHaveBeenCalledWith({
+        where: { websiteId: "cuid-1", actionId: "login-action-1", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(loginRuns).toEqual([sampleLoginRun]);
+    });
+
+    it("findLoginRunForAction scopes the lookup to the run's Login action, its website, and active rows", async () => {
+      mockLoginRunDelegate.findFirst.mockResolvedValue(sampleLoginRun);
+
+      const found = await findLoginRunForAction("cuid-1", "login-action-1", "login-run-1");
+
+      expect(mockLoginRunDelegate.findFirst).toHaveBeenCalledWith({
+        where: { id: "login-run-1", websiteId: "cuid-1", actionId: "login-action-1", deletedAt: null },
+      });
+      expect(found).toBe(sampleLoginRun);
+    });
+
+    it("findLoginRunForAction returns null when no active run of that Login action matches", async () => {
+      mockLoginRunDelegate.findFirst.mockResolvedValue(null);
+
+      expect(await findLoginRunForAction("cuid-1", "login-action-1", "other-run")).toBeNull();
     });
   });
 
@@ -2105,7 +2814,7 @@ describe("dbService", () => {
       expect(await findCrawlRunForWebsite("cuid-1", "other-run")).toBeNull();
     });
 
-    it("createCrawlRunForWebsite inserts a running run under the website, with its credential", async () => {
+    it("createCrawlRunForWebsite inserts a running run under the website, with the credential it logs in as", async () => {
       mockCrawlRunDelegate.create.mockResolvedValue(sampleCrawlRun);
 
       const created = await createCrawlRunForWebsite("cuid-1", {
@@ -3058,6 +3767,7 @@ describe("dbService", () => {
         mockWebObjectDelegate,
         mockActionParameterDelegate,
         mockCreatedObjectDelegate,
+        mockLoginRunDelegate,
       ]) {
         delegate.updateMany.mockResolvedValue({ count: 0 });
       }
@@ -3076,7 +3786,7 @@ describe("dbService", () => {
     });
 
     it("softDeleteActionForWebsite also stamps the action's parameters and auto-refine jobs, but keeps its created objects", async () => {
-      for (const delegate of [mockActionDelegate, mockActionScriptDelegate, mockActionScriptRunDelegate, mockActionScriptRefinementDelegate, mockActionParameterDelegate, mockAutoRefineJobDelegate]) {
+      for (const delegate of [mockActionDelegate, mockActionScriptDelegate, mockActionScriptRunDelegate, mockActionScriptRefinementDelegate, mockActionParameterDelegate, mockAutoRefineJobDelegate, mockLoginRunDelegate]) {
         delegate.updateMany.mockResolvedValue({ count: 1 });
       }
 

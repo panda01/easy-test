@@ -19,11 +19,15 @@ const PLACEHOLDER_OPENING = "{{";
 /** The four kinds that act on an object (the server's `CRUD_ACTION_KINDS`). */
 export type CrudActionKindRecord = "create" | "read" | "update" | "delete";
 
+/** The kind of a Login action (the server's `LOGIN_ACTION_KIND`): it logs in, and has no steps. */
+export const LOGIN_ACTION_KIND = "login";
+
 /**
- * What an action does with an object: the special `parameters` kind (login-style
- * actions that only type values), or one of the four object kinds.
+ * What an action does with an object: the `parameters` kind (actions that
+ * only type values), one of the four object kinds, or the special `login`
+ * kind (it logs in as a credential; other actions and crawls log in with it).
  */
-export type ActionKindRecord = "parameters" | CrudActionKindRecord;
+export type ActionKindRecord = "parameters" | CrudActionKindRecord | typeof LOGIN_ACTION_KIND;
 
 /** How sure a detection is. */
 export type DetectionConfidenceRecord = "high" | "medium" | "low";

@@ -17,9 +17,11 @@ import {
   type ActionParameter,
   type CreatedObject,
   type AutoRefineJob,
+  type LoginRun,
 } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import type { CrawlButtonMode } from "../utils/crawlButtonModes.js";
+import { LOGIN_ACTION_KIND } from "../utils/scoreActionObjectRole.js";
 import { type ActionPlan, parseActionPlan } from "../utils/actionPlanSchema.js";
 import type {
   PagePatternRole,
@@ -63,6 +65,7 @@ export type {
   ActionParameter,
   CreatedObject,
   AutoRefineJob,
+  LoginRun,
 };
 
 /**
@@ -104,7 +107,7 @@ export interface WebsiteInput {
   networkIdleTimeoutMs?: number;
   /** The floor on the time from page load to screenshot; the column default applies when omitted on create. */
   screenshotMinimumWaitMs?: number;
-  /** The website's login page, or null when it does not require login. */
+  /** The website's default login page (its Login action inherits it), or null for none. */
   loginUrl?: string | null;
 }
 
@@ -119,9 +122,17 @@ export type UseCaseInput = TitleDescriptionInput;
 
 /** The fields a caller supplies when creating or replacing an action. */
 export interface ActionInput extends TitleDescriptionInput {
-  /** The credential the action logs in as before each run, or null to run logged out. */
+  /** The credential this action runs as (it logs in as it through the website's Login action first), or null to run logged out; always null for the Login action. */
   credentialId: string | null;
-  /** The user's kind (`parameters`, `create`, `read`, `update`, `delete`), or null to detect it. */
+  /** A Login action's own login page, or null to use the website's; always null for every other action. */
+  loginUrl: string | null;
+  /** A Login action's CSS selector for the username field, or null to find it automatically. */
+  usernameSelector: string | null;
+  /** A Login action's CSS selector for the password field, or null to find it automatically. */
+  passwordSelector: string | null;
+  /** A Login action's CSS selector for the submit button, or null to find it automatically. */
+  submitSelector: string | null;
+  /** The user's kind (`parameters`, `create`, `read`, `update`, `delete`, `login`), or null to detect it. */
   userActionKind: string | null;
   /** The user's object type (a web object's `instancePatternKey`), or null to detect it. */
   userObjectTypeKey: string | null;
@@ -129,9 +140,21 @@ export interface ActionInput extends TitleDescriptionInput {
   userNameParameterKey: string | null;
 }
 
-/** An action as the API returns it: the row plus the id and name of the credential it runs as. */
+/** The id and name of a credential, as an action read brings it along. */
+export interface ActionCredentialSummary {
+  /** The credential's cuid. */
+  id: string;
+  /** The credential's name. */
+  name: string;
+}
+
+/**
+ * An action as the API returns it: the row plus the id and name of the
+ * credential it runs as, or null when it runs logged out (the Login action
+ * never has one).
+ */
 export type ActionWithCredential = Action & {
-  credential: { id: string; name: string } | null;
+  credential: ActionCredentialSummary | null;
 };
 
 /**
@@ -463,7 +486,7 @@ export interface CrawlRunInput {
   startUrl: string;
   /** The most pages the crawl may visit. */
   pageLimit: number;
-  /** The credential the crawl logs in as, or null for a crawl as a logged-out visitor. */
+  /** The credential the crawl logs in as (through the website's Login action), or null for a crawl as a logged-out visitor. */
   credentialId: string | null;
   /** Which buttons the crawl clicks; the column default (`linksOnly`) applies when omitted. */
   buttonMode?: CrawlButtonMode;
@@ -479,8 +502,8 @@ export interface CrawlRunCredentialSummary {
 
 /**
  * A crawl run together with the id and name of the credential it was started
- * with (null for a logged-out crawl) - what the crawl run reads return, so the
- * UI can say who the crawl was logged in as.
+ * with (null for a logged-out crawl) - what the crawl run reads return, so
+ * the UI can say who the crawl was logged in as.
  */
 export type CrawlRunWithCredential = CrawlRun & {
   credential: CrawlRunCredentialSummary | null;
@@ -572,16 +595,8 @@ export interface CredentialInput {
   name: string;
   /** An optional longer note; null when there is none. */
   description: string | null;
-  /** What the crawler types into the username field. */
+  /** What a Login action types into the username field. */
   username: string;
-  /** The credential's own login page, or null to use its website's `loginUrl`. */
-  loginUrl: string | null;
-  /** A CSS selector for the username field, or null to let the crawler find it. */
-  usernameSelector: string | null;
-  /** A CSS selector for the password field, or null to let the crawler find it. */
-  passwordSelector: string | null;
-  /** A CSS selector for the submit button, or null to let the crawler find it. */
-  submitSelector: string | null;
 }
 
 /**
@@ -803,7 +818,7 @@ export async function findWebsiteById(websiteId: string): Promise<Website | null
 
 /**
  * Saves a login page URL the website LEARNED from a crawl that logged in
- * successfully with a credential's own login URL - but only while the website
+ * successfully with a Login action's own login URL - but only while the website
  * has none: the `loginUrl: null` condition is part of the update, so a URL
  * already set (by the user, or by an earlier crawl) is never overwritten.
  * @param websiteId - The website's cuid
@@ -852,9 +867,9 @@ export async function updateWebsite(
  * runs, action scripts, action script runs, action script run screenshots,
  * action script refinements, crawl runs, crawled pages, credentials, web
  * objects, page patterns, action parameters, created objects, auto-refine
- * jobs, and action cleanup links.
+ * jobs, action cleanup links, and login runs.
  *
- * All seventeen updates run in one transaction and share one `deletedAt`
+ * All eighteen updates run in one transaction and share one `deletedAt`
  * timestamp, so the batch can be identified (and restored) together later. A
  * running auto-refine job's next conditional write then matches no row, which
  * is what stops it.
@@ -944,6 +959,10 @@ export async function softDeleteWebsite(websiteId: string): Promise<boolean> {
       data: { deletedAt },
     });
     await transaction.actionCleanup.updateMany({
+      where: { websiteId, deletedAt: null },
+      data: { deletedAt },
+    });
+    await transaction.loginRun.updateMany({
       where: { websiteId, deletedAt: null },
       data: { deletedAt },
     });
@@ -1050,7 +1069,9 @@ export async function softDeleteUseCaseForWebsite(
  * credential it runs as. A deleted credential is unlinked from its actions
  * (see `softDeleteCredentialForWebsite`), so it never shows up here.
  */
-const ACTION_CREDENTIAL_INCLUDE = { credential: { select: { id: true, name: true } } } as const;
+const ACTION_CREDENTIAL_INCLUDE = {
+  credential: { select: { id: true, name: true } },
+} as const;
 
 /**
  * What the website's action list brings along on top of the credential: the
@@ -1143,10 +1164,10 @@ export async function findActionForWebsite(
 /**
  * Inserts an action belonging to the given website. The caller has already
  * checked that `credentialId` (when set) is an active credential of the same
- * website.
+ * website, and that a Login action would be the website's only one.
  * @param websiteId - The owning website's cuid
- * @param data - The action's title, description, and credential
- * @returns The created row with its credential's id and name
+ * @param data - The action's title, description, kind choices, and login settings
+ * @returns The created row with its credential
  */
 export async function createActionForWebsite(
   websiteId: string,
@@ -1160,13 +1181,14 @@ export async function createActionForWebsite(
 }
 
 /**
- * Replaces the title, description, and credential of an active action. The
- * caller has already checked that `credentialId` (when set) is an active
- * credential of the same website.
+ * Replaces the title, description, kind choices, and login settings of an
+ * active action. The caller has already checked that `credentialId` (when
+ * set) is an active credential of the same website, and that a Login action
+ * would be the website's only one.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
- * @param data - The new title, description, and credential (null unlinks it)
- * @returns The updated row with its credential's id and name, or null when no active action with that id belongs to the website
+ * @param data - The new fields (a null `credentialId` unlinks the credential)
+ * @returns The updated row with its credential, or null when no active action with that id belongs to the website
  */
 export async function updateActionForWebsite(
   websiteId: string,
@@ -1189,17 +1211,70 @@ export async function updateActionForWebsite(
 }
 
 /**
+ * Stamps `deletedAt` on everything that belongs to one action: its active
+ * scripts, script runs, script run screenshots, script refinements,
+ * parameters, auto-refine jobs, login runs, and cleanup links. Shared by
+ * `softDeleteActionForWebsite` and the one-time login conversion (which
+ * merges a website's extra Login actions into one).
+ * @param transaction - The transaction-scoped Prisma client
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The action's cuid
+ * @param deletedAt - The shared deletion timestamp
+ * @returns Resolves once every update has run
+ */
+async function softDeleteActionBelongings(
+  transaction: Prisma.TransactionClient,
+  websiteId: string,
+  actionId: string,
+  deletedAt: Date,
+): Promise<void> {
+  await transaction.actionScript.updateMany({
+    where: { actionId, websiteId, deletedAt: null },
+    data: { deletedAt },
+  });
+  await transaction.actionScriptRun.updateMany({
+    where: { actionId, websiteId, deletedAt: null },
+    data: { deletedAt },
+  });
+  await transaction.actionScriptRunScreenshot.updateMany({
+    where: { actionId, websiteId, deletedAt: null },
+    data: { deletedAt },
+  });
+  await transaction.actionScriptRefinement.updateMany({
+    where: { actionId, websiteId, deletedAt: null },
+    data: { deletedAt },
+  });
+  await transaction.actionParameter.updateMany({
+    where: { actionId, websiteId, deletedAt: null },
+    data: { deletedAt },
+  });
+  await transaction.autoRefineJob.updateMany({
+    where: { actionId, websiteId, deletedAt: null },
+    data: { deletedAt },
+  });
+  await transaction.actionCleanup.updateMany({
+    where: { websiteId, deletedAt: null, OR: [{ createActionId: actionId }, { deleteActionId: actionId }] },
+    data: { deletedAt },
+  });
+  await transaction.loginRun.updateMany({
+    where: { actionId, websiteId, deletedAt: null },
+    data: { deletedAt },
+  });
+}
+
+/**
  * Soft deletes one active action AND its active scripts, script runs, script
- * run screenshots, script refinements, parameters, auto-refine jobs, and
- * cleanup links. Its created objects are KEPT: they are still on the
- * website, and the record says what to clean up.
+ * run screenshots, script refinements, parameters, auto-refine jobs, login
+ * runs, and cleanup links. Its created objects are KEPT: they are still on
+ * the website, and the record says what to clean up. Deleting the website's
+ * Login action leaves the other actions' credentials alone: their logged-in
+ * runs then say the website has no Login action until it gets a new one.
  *
- * All eight updates run in one transaction and share one `deletedAt`
+ * All nine updates run in one transaction and share one `deletedAt`
  * timestamp, like `softDeleteWebsite`. When no active action matched, the
- * scripts, runs, screenshots, refinements, parameters, jobs, and links are
- * left untouched. A
- * running auto-refine job's next conditional write then matches no row, which
- * is what stops it.
+ * scripts, runs, screenshots, refinements, parameters, jobs, login runs, and
+ * links are left untouched. A running auto-refine job's next conditional
+ * write then matches no row, which is what stops it.
  * @param websiteId - The owning website's cuid
  * @param actionId - The action's cuid
  * @returns True when an active action was deleted; false when none matched
@@ -1228,40 +1303,351 @@ export async function softDeleteActionForWebsite(
     if (noActiveActionMatched) {
       return false;
     }
-
-    await transaction.actionScript.updateMany({
-      where: { actionId, websiteId, deletedAt: null },
-      data: { deletedAt },
-    });
-    await transaction.actionScriptRun.updateMany({
-      where: { actionId, websiteId, deletedAt: null },
-      data: { deletedAt },
-    });
-    await transaction.actionScriptRunScreenshot.updateMany({
-      where: { actionId, websiteId, deletedAt: null },
-      data: { deletedAt },
-    });
-    await transaction.actionScriptRefinement.updateMany({
-      where: { actionId, websiteId, deletedAt: null },
-      data: { deletedAt },
-    });
-    await transaction.actionParameter.updateMany({
-      where: { actionId, websiteId, deletedAt: null },
-      data: { deletedAt },
-    });
-    await transaction.autoRefineJob.updateMany({
-      where: { actionId, websiteId, deletedAt: null },
-      data: { deletedAt },
-    });
-    await transaction.actionCleanup.updateMany({
-      where: { websiteId, deletedAt: null, OR: [{ createActionId: actionId }, { deleteActionId: actionId }] },
-      data: { deletedAt },
-    });
+    await softDeleteActionBelongings(transaction, websiteId, actionId, deletedAt);
     return true;
   };
 
   const anActiveActionWasDeleted = await prisma.$transaction(softDeleteActionAndItsScripts);
   return anActiveActionWasDeleted;
+}
+
+// === The website's Login action ===
+
+/** The title the login-form check and the login conversion give a Login action they make. */
+export const DEFAULT_LOGIN_ACTION_TITLE = "Log in";
+
+/** The description the login-form check and the login conversion give a Login action they make. */
+export const DEFAULT_LOGIN_ACTION_DESCRIPTION =
+  "Logs in with the username and password of the credential each action or crawl picks.";
+
+/**
+ * Looks up the website's Login action - the one action every logged-in run,
+ * crawl, and "Run login" logs in through. A website has at most one active
+ * Login action (the actions API refuses a second); should two ever exist,
+ * the oldest is used.
+ * @param websiteId - The website's cuid
+ * @returns The active Login action, or null when the website has none
+ */
+export async function findLoginActionForWebsite(websiteId: string): Promise<Action | null> {
+  const loginAction = await prisma.action.findFirst({
+    where: { websiteId, userActionKind: LOGIN_ACTION_KIND, deletedAt: null },
+    orderBy: { createdAt: "asc" },
+  });
+  return loginAction;
+}
+
+/**
+ * Makes the website's Login action, titled "Log in", with no selectors (it
+ * finds the form's fields on its own). The caller has already checked that
+ * the website has no Login action.
+ * @param websiteId - The website's cuid
+ * @param loginUrl - Its own login page, or null to use the website's
+ * @returns The created Login action
+ */
+export async function createDefaultLoginActionForWebsite(
+  websiteId: string,
+  loginUrl: string | null,
+): Promise<Action> {
+  const loginAction = await prisma.action.create({
+    data: {
+      websiteId,
+      title: DEFAULT_LOGIN_ACTION_TITLE,
+      description: DEFAULT_LOGIN_ACTION_DESCRIPTION,
+      userActionKind: LOGIN_ACTION_KIND,
+      loginUrl,
+    },
+  });
+  return loginAction;
+}
+
+// === One-time login conversion ===
+// Logins have had three shapes:
+// 1. before Login actions: a credential held its own login page and form
+//    selectors, and an action ran "as" a credential (`credentialId`);
+// 2. an earlier design: one Login action PER credential, and other actions
+//    named the Login action they logged in with (`loginActionId`);
+// 3. now: ONE Login action per website holds the login page and selectors,
+//    and an action runs as a credential (`credentialId`) again.
+// The function below moves a database from shape 1 or 2 to shape 3. It
+// reads and writes the old columns with raw SQL, and only when they still
+// exist, so it works whatever the generated client knows - and still makes a
+// missing Login action once those columns are dropped.
+
+/** The login page and form selectors one source row (an old credential, or a Login action) holds. */
+interface LoginFormSettingsRow {
+  loginUrl: string | null;
+  usernameSelector: string | null;
+  passwordSelector: string | null;
+  submitSelector: string | null;
+}
+
+/** What the one-time login conversion did for one website. */
+export interface WebsiteLoginConversion {
+  /** The website's cuid. */
+  websiteId: string;
+  /** The website's name. */
+  websiteName: string;
+  /** The cuid of the website's one Login action (kept or made). */
+  loginActionId: string;
+  /** True when the website had no Login action, so one was made. */
+  loginActionWasCreated: boolean;
+  /** How many extra Login actions were merged into it (their login runs moved, then soft deleted). */
+  mergedLoginActionCount: number;
+  /** How many actions that logged in WITH a Login action were given that Login action's credential back. */
+  restoredCredentialActionCount: number;
+}
+
+/** Which old login columns the database still has. */
+interface OldLoginColumns {
+  /** True while `credentials` still has `loginUrl` and the three selectors. */
+  credentialsHaveLoginSettings: boolean;
+  /** True while `actions` still has `loginActionId`. */
+  actionsHaveLoginActionId: boolean;
+}
+
+/**
+ * Checks which old login columns still exist, so the conversion only reads
+ * the ones that do.
+ * @param transaction - The transaction-scoped Prisma client
+ * @returns Which old columns exist
+ */
+async function findOldLoginColumns(transaction: Prisma.TransactionClient): Promise<OldLoginColumns> {
+  const columns = await transaction.$queryRaw<{ table_name: string; column_name: string }[]>`
+    select table_name, column_name
+    from information_schema.columns
+    where table_schema = current_schema()
+      and ((table_name = 'credentials' and column_name = 'loginUrl')
+        or (table_name = 'actions' and column_name = 'loginActionId'))`;
+  const hasColumn = (tableName: string, columnName: string): boolean =>
+    columns.some((column) => column.table_name === tableName && column.column_name === columnName);
+  return {
+    credentialsHaveLoginSettings: hasColumn("credentials", "loginUrl"),
+    actionsHaveLoginActionId: hasColumn("actions", "loginActionId"),
+  };
+}
+
+/**
+ * Fills each blank login setting of the kept Login action from the first
+ * source that has it.
+ * @param kept - The kept Login action's own settings
+ * @param sources - Where blanks may be filled from, in order of preference
+ * @returns The settings to save (unchanged where the kept action had one)
+ */
+export function fillBlankLoginSettings(
+  kept: LoginFormSettingsRow,
+  sources: LoginFormSettingsRow[],
+): LoginFormSettingsRow {
+  const pickFirst = (fieldName: keyof LoginFormSettingsRow): string | null =>
+    kept[fieldName] ?? sources.find((source) => source[fieldName] !== null)?.[fieldName] ?? null;
+  return {
+    loginUrl: pickFirst("loginUrl"),
+    usernameSelector: pickFirst("usernameSelector"),
+    passwordSelector: pickFirst("passwordSelector"),
+    submitSelector: pickFirst("submitSelector"),
+  };
+}
+
+/**
+ * Tells whether a Login action was made by the earlier design's migration
+ * (one per credential, "Log in as <name>"), so the conversion can rename the
+ * one it keeps to the plain "Log in" - it no longer logs in as one account.
+ * @param action - The Login action's title and description
+ * @returns True for a generated "Log in as <name>" Login action
+ */
+export function wasMadePerCredential(action: Pick<Action, "title" | "description">): boolean {
+  const titleNamesACredential = /^Log in as .+$/.test(action.title);
+  const descriptionIsTheGeneratedOne = /^Logs in as the credential ".*" with its username and password\.$/.test(
+    action.description,
+  );
+  return titleNamesACredential && descriptionIsTheGeneratedOne;
+}
+
+/**
+ * Moves every website that logs in to ONE Login action, in one transaction.
+ * For each active website with an active credential or Login action (oldest
+ * first) it:
+ * 1. gives every non-login action that logged in WITH a Login action
+ *    (`loginActionId`, the earlier design) that Login action's credential
+ *    back as its own `credentialId`, and clears `loginActionId`;
+ * 2. keeps the website's oldest active Login action - or makes "Log in";
+ * 3. merges the other active Login actions into it: their login runs move to
+ *    it, then they are soft deleted with what belongs to them;
+ * 4. fills the kept Login action's blank login page and selectors from the
+ *    merged ones, then from the website's credentials' old columns (shape 1);
+ *    renames it to "Log in" when the earlier design generated it; and clears
+ *    its `credentialId` (a Login action never has one).
+ * Safe to run twice: the second run finds one Login action per website and
+ * nothing left to move.
+ * @returns What was done, one entry per website
+ * @throws When a query fails (the transaction is then rolled back)
+ */
+export async function convertLoginsToOneLoginActionPerWebsite(): Promise<WebsiteLoginConversion[]> {
+  /**
+   * The transaction body. Declared with an explicit parameter type because
+   * the overloaded `$transaction` signature does not contextually type an
+   * inline callback (tsc reports an implicit any).
+   * @param transaction - The transaction-scoped Prisma client
+   * @returns What was done for each website
+   */
+  const convertEveryWebsite = async (transaction: Prisma.TransactionClient): Promise<WebsiteLoginConversion[]> => {
+    const oldColumns = await findOldLoginColumns(transaction);
+    const websites = await transaction.website.findMany({
+      where: {
+        deletedAt: null,
+        OR: [
+          { credentials: { some: { deletedAt: null } } },
+          { actions: { some: { deletedAt: null, userActionKind: LOGIN_ACTION_KIND } } },
+        ],
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    const conversions: WebsiteLoginConversion[] = [];
+    for (const website of websites) {
+      const restoredCredentialActionCount = oldColumns.actionsHaveLoginActionId
+        ? await transaction.$executeRaw`
+            update actions as action
+            set "credentialId" = coalesce(action."credentialId", login_action."credentialId"),
+                "loginActionId" = null
+            from actions as login_action
+            where action."loginActionId" = login_action.id
+              and action."websiteId" = ${website.id}
+              and (action."userActionKind" is null or action."userActionKind" <> ${LOGIN_ACTION_KIND})`
+        : 0;
+
+      const activeLoginActions = await transaction.action.findMany({
+        where: { websiteId: website.id, userActionKind: LOGIN_ACTION_KIND, deletedAt: null },
+        orderBy: { createdAt: "asc" },
+      });
+      const existingLoginAction = activeLoginActions.at(0) ?? null;
+      const loginAction =
+        existingLoginAction ??
+        (await transaction.action.create({
+          data: {
+            websiteId: website.id,
+            title: DEFAULT_LOGIN_ACTION_TITLE,
+            description: DEFAULT_LOGIN_ACTION_DESCRIPTION,
+            userActionKind: LOGIN_ACTION_KIND,
+          },
+        }));
+
+      const mergedLoginActions = activeLoginActions.slice(1);
+      const deletedAt = new Date();
+      for (const mergedLoginAction of mergedLoginActions) {
+        await transaction.loginRun.updateMany({
+          where: { actionId: mergedLoginAction.id, websiteId: website.id, deletedAt: null },
+          data: { actionId: loginAction.id },
+        });
+        await transaction.action.update({
+          where: { id: mergedLoginAction.id },
+          data: { deletedAt },
+        });
+        await softDeleteActionBelongings(transaction, website.id, mergedLoginAction.id, deletedAt);
+      }
+
+      const oldCredentialSettings = oldColumns.credentialsHaveLoginSettings
+        ? await transaction.$queryRaw<LoginFormSettingsRow[]>`
+            select "loginUrl", "usernameSelector", "passwordSelector", "submitSelector"
+            from credentials
+            where "websiteId" = ${website.id} and "deletedAt" is null
+            order by "createdAt" asc`
+        : [];
+      const filledSettings = fillBlankLoginSettings(loginAction, [...mergedLoginActions, ...oldCredentialSettings]);
+      const renamedTexts = wasMadePerCredential(loginAction)
+        ? { title: DEFAULT_LOGIN_ACTION_TITLE, description: DEFAULT_LOGIN_ACTION_DESCRIPTION }
+        : {};
+      await transaction.action.update({
+        where: { id: loginAction.id },
+        data: { ...filledSettings, ...renamedTexts, credentialId: null },
+      });
+
+      conversions.push({
+        websiteId: website.id,
+        websiteName: website.name,
+        loginActionId: loginAction.id,
+        loginActionWasCreated: existingLoginAction === null,
+        mergedLoginActionCount: mergedLoginActions.length,
+        restoredCredentialActionCount,
+      });
+    }
+    return conversions;
+  };
+
+  const conversions = await prisma.$transaction(convertEveryWebsite);
+  return conversions;
+}
+
+// === Login runs ===
+// One "Run login" of a Login action. Create-only; soft deleted only through
+// `softDeleteActionForWebsite` and `softDeleteWebsite`.
+
+/** The fields a caller supplies when recording one login run. */
+export interface LoginRunInput {
+  /** The credential the run logged in as (its name, as a snapshot). */
+  credentialName: string;
+  /** The login page the run opened (a snapshot). */
+  loginUrl: string;
+  /** True when the login form was submitted and went away. */
+  succeeded: boolean;
+  /** Why it failed (scrubbed), or null when it passed. */
+  errorMessage: string | null;
+  /** The screenshot, relative to `ACTION_SCRIPT_DIR`, or null when none could be taken. */
+  screenshotFileName: string | null;
+  /** Where the browser was at the end (scrubbed), or null when it could not be read. */
+  finalPageUrl: string | null;
+  /** The run's log. */
+  output: string;
+  /** Milliseconds from browser launch to browser close. */
+  durationMs: number;
+}
+
+/**
+ * Records one login run of a Login action.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Login action's cuid
+ * @param data - What the run did
+ * @returns The created row
+ */
+export async function createLoginRunForAction(
+  websiteId: string,
+  actionId: string,
+  data: LoginRunInput,
+): Promise<LoginRun> {
+  const created = await prisma.loginRun.create({
+    data: { ...data, websiteId, actionId },
+  });
+  return created;
+}
+
+/**
+ * Lists a Login action's active login runs, newest first.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Login action's cuid
+ * @returns Its active login runs ordered by `createdAt` descending
+ */
+export async function listLoginRunsForAction(websiteId: string, actionId: string): Promise<LoginRun[]> {
+  const loginRuns = await prisma.loginRun.findMany({
+    where: { websiteId, actionId, deletedAt: null },
+    orderBy: { createdAt: "desc" },
+  });
+  return loginRuns;
+}
+
+/**
+ * Looks up one active login run, scoped to its Login action and website.
+ * @param websiteId - The owning website's cuid
+ * @param actionId - The Login action's cuid
+ * @param loginRunId - The login run's cuid
+ * @returns The active login run, or null when it does not exist, was soft deleted, or belongs to another action
+ */
+export async function findLoginRunForAction(
+  websiteId: string,
+  actionId: string,
+  loginRunId: string,
+): Promise<LoginRun | null> {
+  const loginRun = await prisma.loginRun.findFirst({
+    where: { id: loginRunId, websiteId, actionId, deletedAt: null },
+  });
+  return loginRun;
 }
 
 // === Action cleanups ===
@@ -1807,8 +2193,8 @@ export async function createActionScriptRunForScript(
 
 /**
  * What the crawl run reads include alongside each run: the id and name of the
- * credential it was started with. Deliberately NOT filtered by `deletedAt`, so
- * a run keeps naming a credential that was deleted after it ran.
+ * credential it was started with. Deliberately NOT filtered by `deletedAt`,
+ * so a run keeps naming a credential that was deleted after it ran.
  */
 const CRAWL_RUN_CREDENTIAL_INCLUDE = {
   credential: { select: { id: true, name: true } },
@@ -1854,7 +2240,7 @@ export async function findCrawlRunForWebsite(
  * progress counters at 0, and `isLoggedIn: false` (a crawl with a credential
  * turns it true through `markCrawlRunLoggedIn` once its login succeeds).
  * @param websiteId - The owning website's cuid
- * @param data - Where the crawl starts, its page limit, and the credential it logs in as (or null)
+ * @param data - Where the crawl starts, its page limit, the credential it logs in as (or null), and its button mode
  * @returns The created row, with the id and name of its credential (like the other crawl run reads)
  */
 export async function createCrawlRunForWebsite(
@@ -3376,8 +3762,8 @@ export async function findCredentialForWebsite(
 
 /**
  * Looks up one active credential WITH its encrypted password - the only read
- * that returns it. Used to start a crawl that logs in; never send its result
- * to a client.
+ * that returns it. Used to log in ("Run login", a run of an action that runs
+ * as a credential, or a crawl); never send its result to a client.
  * @param websiteId - The owning website's cuid
  * @param credentialId - The credential's cuid
  * @returns The active credential including `encryptedPassword`, or null when it does not exist, was soft deleted, or belongs to another website
@@ -3445,9 +3831,10 @@ export async function updateCredentialForWebsite(
 }
 
 /**
- * Soft deletes one active credential and unlinks it from the actions that run
- * as it (they go back to running logged out), in one transaction. Crawl runs
- * that used it keep their link to it, so their history still names it.
+ * Soft deletes one active credential and unlinks it from the actions that
+ * run as it (they run logged out until they are given another), in one
+ * transaction. Crawl runs that used it keep their link to it, so their
+ * history still names it.
  * @param websiteId - The owning website's cuid
  * @param credentialId - The credential's cuid
  * @returns True when an active credential was deleted; false when none matched

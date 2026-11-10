@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  LOGIN_ACTION_KIND,
   buildInheritedRunValues,
   buildInitialParameterValues,
   buildStepParameterTags,
@@ -12,6 +13,8 @@ import {
   readUsedParameterValues,
 } from "../../src/utils/actionParameters";
 import {
+  ACTION_KIND_HELP,
+  ACTION_KIND_LABELS,
   describeConfidence,
   describeDetectedKindChoice,
   describeDetectedObjectTypeChoice,
@@ -220,8 +223,26 @@ describe("object role helpers", () => {
     expect(describeObjectRole(createRole, noDetails)).toBe("Creates a Project (detected, High)");
   });
 
+  it("describes no object role for a Login action, which touches no object", () => {
+    const noDetails = { nameParameterLabel: null, confirmStepNumber: null };
+    const loginRole = buildActionObjectRoleRecord({ kind: LOGIN_ACTION_KIND, kindSource: "you" });
+
+    expect(describeObjectRole(loginRole, noDetails)).toBeNull();
+  });
+
+  it("labels and explains the Login kind, and no longer calls Parameters a login", () => {
+    expect(LOGIN_ACTION_KIND).toBe("login");
+    expect(ACTION_KIND_LABELS.login).toBe("Login");
+    expect(ACTION_KIND_HELP.login).toBe(
+      "The website's one login: it types the username and password of whichever credential an action or crawl runs as, before they start.",
+    );
+    expect(ACTION_KIND_HELP.parameters).toBe("The action only takes typed values; it touches no object.");
+    expect(Object.keys(ACTION_KIND_LABELS)).toEqual(["parameters", "create", "read", "update", "delete", "login"]);
+  });
+
   it("says which kinds take an object type", () => {
     expect(kindTakesAnObjectType("parameters")).toBe(false);
+    expect(kindTakesAnObjectType(LOGIN_ACTION_KIND)).toBe(false);
     expect(kindTakesAnObjectType(null)).toBe(true);
     for (const kind of ["create", "read", "update", "delete"] as const) {
       expect(kindTakesAnObjectType(kind)).toBe(true);

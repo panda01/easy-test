@@ -16,11 +16,20 @@ const mockDbService = vi.hoisted(() => ({
   isUniqueConstraintViolation: vi.fn<(error: unknown) => boolean>(() => false),
 }));
 
+/**
+ * The login-form check is replaced outright: no spec here ever launches a
+ * browser (its own spec covers what it looks for and makes).
+ */
+const mockLoginFormCheckService = vi.hoisted(() => ({
+  checkWebsiteForLoginForm: vi.fn(),
+}));
+
 // The real dbService builds a PrismaClient at load time; this spec is about
 // the HTTP contract of the routes, so the whole service is replaced.
 vi.mock("../../../server/services/dbService.js", () => mockDbService);
+vi.mock("../../../server/services/loginFormCheckService.js", () => mockLoginFormCheckService);
 
-import { registerWebsiteRoutes } from "../../../server/controllers/websites.js";
+import { registerWebsiteRoutes, WEBSITE_ALREADY_HAS_A_LOGIN_ACTION_MESSAGE } from "../../../server/controllers/websites.js";
 
 /**
  * Builds a minimal app carrying only the website routes, mounted the same way
@@ -63,9 +72,30 @@ const otherWebsite = {
 /** What Prisma rejects with when a write collides with the unique URL index. */
 const uniqueConstraintError = { code: "P2002", message: "Unique constraint failed" };
 
+/** A login-form check that found no login form. */
+const NOT_FOUND_LOGIN_CHECK = { outcome: "notFound", loginUrl: null, loginActionId: null, message: null };
+
+/** A login-form check that found a login form and made the website's Login action. */
+const FOUND_LOGIN_CHECK = {
+  outcome: "found",
+  loginUrl: "https://example.com/login",
+  loginActionId: "login-action-1",
+  message: null,
+};
+
+/** A login-form check that could not finish. */
+const FAILED_LOGIN_CHECK = {
+  outcome: "failed",
+  loginUrl: null,
+  loginActionId: null,
+  message: "page.goto: net::ERR_NAME_NOT_RESOLVED",
+};
+
 describe("website routes", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    // A created website's login-form check finds no form unless a test says otherwise.
+    mockLoginFormCheckService.checkWebsiteForLoginForm.mockResolvedValue(NOT_FOUND_LOGIN_CHECK);
   });
 
   describe("GET /api/websites", () => {
@@ -126,15 +156,16 @@ describe("website routes", () => {
   });
 
   describe("POST /api/websites", () => {
-    it("returns 201 with the created website and stores the normalized input", async () => {
+    it("returns 201 with the created website and its login-form check, and stores the normalized input", async () => {
       mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+      mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
 
       const res = await request(createWebsitesApp())
         .post("/api/websites")
         .send({ url: "  HTTPS://Example.COM ", name: "  Example  ", description: "   " });
 
       expect(res.status).toBe(201);
-      expect(res.body).toEqual(sampleWebsite);
+      expect(res.body).toEqual({ ...sampleWebsite, loginCheck: NOT_FOUND_LOGIN_CHECK });
       expect(mockDbService.createWebsite).toHaveBeenCalledTimes(1);
       expect(mockDbService.createWebsite).toHaveBeenCalledWith({
         url: "https://example.com/",
@@ -186,6 +217,7 @@ describe("website routes", () => {
     it("passes the normalized login page URL through to the service", async () => {
       const websiteWithLoginUrl = { ...sampleWebsite, loginUrl: "https://example.com/login" };
       mockDbService.createWebsite.mockResolvedValue(websiteWithLoginUrl);
+      mockDbService.findWebsiteById.mockResolvedValue(websiteWithLoginUrl);
 
       const res = await request(createWebsitesApp()).post("/api/websites").send({
         url: "https://example.com",
@@ -194,7 +226,7 @@ describe("website routes", () => {
       });
 
       expect(res.status).toBe(201);
-      expect(res.body).toEqual(websiteWithLoginUrl);
+      expect(res.body).toEqual({ ...websiteWithLoginUrl, loginCheck: NOT_FOUND_LOGIN_CHECK });
       expect(mockDbService.createWebsite).toHaveBeenCalledWith({
         url: "https://example.com/",
         name: "Example",
@@ -286,6 +318,149 @@ describe("website routes", () => {
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: "connection refused" });
       expect(mockDbService.isUniqueConstraintViolation).toHaveBeenCalledWith(connectionError);
+      expect(mockLoginFormCheckService.checkWebsiteForLoginForm).not.toHaveBeenCalled();
+    });
+
+    it("runs the login-form check on the created website, then answers the website as re-read after it, with the check", async () => {
+      const websiteThatLearnedItsLoginPage = { ...sampleWebsite, loginUrl: FOUND_LOGIN_CHECK.loginUrl };
+      mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+      mockLoginFormCheckService.checkWebsiteForLoginForm.mockResolvedValue(FOUND_LOGIN_CHECK);
+      mockDbService.findWebsiteById.mockResolvedValue(websiteThatLearnedItsLoginPage);
+
+      const res = await request(createWebsitesApp())
+        .post("/api/websites")
+        .send({ url: "https://example.com", name: "Example" });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual({ ...websiteThatLearnedItsLoginPage, loginCheck: FOUND_LOGIN_CHECK });
+      expect(mockLoginFormCheckService.checkWebsiteForLoginForm).toHaveBeenCalledWith(sampleWebsite);
+      expect(mockDbService.findWebsiteById).toHaveBeenCalledWith(sampleWebsite.id);
+      const checkOrder = mockLoginFormCheckService.checkWebsiteForLoginForm.mock.invocationCallOrder[0];
+      const reReadOrder = mockDbService.findWebsiteById.mock.invocationCallOrder[0];
+      expect(checkOrder).toBeLessThan(reReadOrder);
+    });
+
+    it("still answers 201 with a failed check when the login-form check could not finish", async () => {
+      mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+      mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+      mockLoginFormCheckService.checkWebsiteForLoginForm.mockResolvedValue(FAILED_LOGIN_CHECK);
+
+      const res = await request(createWebsitesApp())
+        .post("/api/websites")
+        .send({ url: "https://example.com", name: "Example" });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual({ ...sampleWebsite, loginCheck: FAILED_LOGIN_CHECK });
+    });
+
+    it.each([
+      ["an Error, with its message", new Error("deadlock detected"), "deadlock detected"],
+      ["a non-Error, stringified", "database offline", "database offline"],
+    ])("turns a login-form check that throws %s into a failed check, still creating the website (201)", async (_label, thrown, message) => {
+      mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+      mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+      mockLoginFormCheckService.checkWebsiteForLoginForm.mockRejectedValue(thrown);
+
+      const res = await request(createWebsitesApp())
+        .post("/api/websites")
+        .send({ url: "https://example.com", name: "Example" });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual({
+        ...sampleWebsite,
+        loginCheck: { outcome: "failed", loginUrl: null, loginActionId: null, message },
+      });
+      expect(mockDbService.isUniqueConstraintViolation).not.toHaveBeenCalled();
+    });
+
+    it("answers the website as created when the re-read finds it no longer (deleted meanwhile)", async () => {
+      mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+      mockDbService.findWebsiteById.mockResolvedValue(null);
+
+      const res = await request(createWebsitesApp())
+        .post("/api/websites")
+        .send({ url: "https://example.com", name: "Example" });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual({ ...sampleWebsite, loginCheck: NOT_FOUND_LOGIN_CHECK });
+    });
+
+    it("returns 500 with the error message when the re-read fails", async () => {
+      mockDbService.createWebsite.mockResolvedValue(sampleWebsite);
+      mockDbService.findWebsiteById.mockRejectedValue(new Error("query timed out"));
+
+      const res = await request(createWebsitesApp())
+        .post("/api/websites")
+        .send({ url: "https://example.com", name: "Example" });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "query timed out" });
+    });
+  });
+
+  describe("POST /api/websites/:websiteId/login-check", () => {
+    it.each([
+      ["found a login form", FOUND_LOGIN_CHECK],
+      ["found no login form", NOT_FOUND_LOGIN_CHECK],
+      ["could not finish", FAILED_LOGIN_CHECK],
+    ])("returns 200 with the check when it %s, run on the website looked up by the path id", async (_label, loginCheck) => {
+      mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+      mockLoginFormCheckService.checkWebsiteForLoginForm.mockResolvedValue(loginCheck);
+
+      const res = await request(createWebsitesApp()).post("/api/websites/cuid-1/login-check");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ loginCheck });
+      expect(mockDbService.findWebsiteById).toHaveBeenCalledWith("cuid-1");
+      expect(mockLoginFormCheckService.checkWebsiteForLoginForm).toHaveBeenCalledWith(sampleWebsite);
+    });
+
+    it("returns 404 and checks nothing when the website does not exist or was deleted", async () => {
+      mockDbService.findWebsiteById.mockResolvedValue(null);
+
+      const res = await request(createWebsitesApp()).post("/api/websites/deleted-or-unknown/login-check");
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: WEBSITE_NOT_FOUND_MESSAGE });
+      expect(mockLoginFormCheckService.checkWebsiteForLoginForm).not.toHaveBeenCalled();
+    });
+
+    it("returns 409 when the website already has its Login action", async () => {
+      mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+      mockLoginFormCheckService.checkWebsiteForLoginForm.mockResolvedValue({
+        outcome: "alreadyHasLoginAction",
+        loginUrl: "https://example.com/login",
+        loginActionId: "login-action-1",
+        message: null,
+      });
+
+      const res = await request(createWebsitesApp()).post("/api/websites/cuid-1/login-check");
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: WEBSITE_ALREADY_HAS_A_LOGIN_ACTION_MESSAGE });
+      expect(WEBSITE_ALREADY_HAS_A_LOGIN_ACTION_MESSAGE).toBe(
+        "This website already has its login action, so there is no login form to look for",
+      );
+    });
+
+    it("returns 500 with the error message when the check's query fails", async () => {
+      mockDbService.findWebsiteById.mockResolvedValue(sampleWebsite);
+      mockLoginFormCheckService.checkWebsiteForLoginForm.mockRejectedValue(new Error("deadlock detected"));
+
+      const res = await request(createWebsitesApp()).post("/api/websites/cuid-1/login-check");
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "deadlock detected" });
+    });
+
+    it("returns 500 with the error message when the website lookup fails", async () => {
+      mockDbService.findWebsiteById.mockRejectedValue(new Error("connection refused"));
+
+      const res = await request(createWebsitesApp()).post("/api/websites/cuid-1/login-check");
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "connection refused" });
+      expect(mockLoginFormCheckService.checkWebsiteForLoginForm).not.toHaveBeenCalled();
     });
   });
 

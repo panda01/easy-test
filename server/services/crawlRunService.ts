@@ -21,7 +21,11 @@ import {
   type CrawlLogin,
   type CrawlStopReason,
 } from "./crawlerService.js";
-import { buildCrawlLoginDetails, type CrawlLoginDetails } from "./crawlerLoginService.js";
+import {
+  buildLoginDetails,
+  type CrawlLoginDetails,
+  type LoginActionSettings,
+} from "./crawlerLoginService.js";
 import { measureElapsedMs } from "./playwrightService.js";
 import { describeError } from "../utils/describeError.js";
 import { DEFAULT_CRAWL_BUTTON_MODE, type CrawlButtonMode } from "../utils/crawlButtonModes.js";
@@ -42,11 +46,25 @@ const BROWSER_CLOSED_MESSAGE =
   "The browser closed mid-crawl - most likely the server restarted.";
 
 /**
- * A credential's login, ready for the crawler: the decrypted login details,
- * the credential's name for the failure message, and where a screenshot of a
- * failed login goes.
+ * The website's Login action a crawl logs in with, and the credential it
+ * logs in as (with its encrypted password) - what the "start a crawl" route
+ * hands to `startCrawlRun`.
+ */
+export interface CrawlLoginChoice {
+  /** The website's Login action: its title, login page, and form-field selectors. */
+  loginAction: LoginActionSettings;
+  /** The credential the crawl logs in as, with its encrypted password. */
+  credential: Credential;
+}
+
+/**
+ * A Login action's login, ready for the crawler: the decrypted login
+ * details, the Login action's title and credential's name for the failure
+ * message, and where a screenshot of a failed login goes.
  */
 interface CredentialLogin {
+  /** The Login action's title, as the run's error message names it. */
+  loginActionTitle: string;
   /** The credential's name, as the run's error message names it. */
   credentialName: string;
   /** Where and as whom to log in, with the password decrypted. */
@@ -112,26 +130,27 @@ async function recordCrawlFailure(
 }
 
 /**
- * Gathers what the crawler needs to log in with a credential (see
- * `buildCrawlLoginDetails`, which decrypts the password and picks the
- * EFFECTIVE login URL), plus where a screenshot of a failed login would go:
- * like the screenshot runs' PNGs, `<websiteId>/<uuid>.png` in the screenshot
+ * Gathers what the crawler needs to log in with a Login action (see
+ * `buildLoginDetails`, which decrypts the password and picks the EFFECTIVE
+ * login URL), plus where a screenshot of a failed login would go: like the
+ * screenshot runs' PNGs, `<websiteId>/<uuid>.png` in the screenshot
  * directory. Nothing is written unless the login fails.
- * @param credential - The credential the crawl logs in as, with its encrypted password
+ * @param loginChoice - The website's Login action the crawl logs in with, and the credential it logs in as with its encrypted password
  * @param website - The crawled website, for its login URL and the screenshot's folder
  * @param screenshotDirectory - Absolute path of the screenshot directory (`SCREENSHOT_DIR`)
- * @returns The credential's name, its login details, and the failure screenshot's name and path
- * @throws When neither the credential nor the website has a login URL; when the password cannot be decrypted (no key configured, or the key changed since it was saved)
+ * @returns The Login action's title, the credential's name, the login details, and the failure screenshot's name and path
+ * @throws When neither the Login action nor the website has a login URL; when the password cannot be decrypted (no key configured, or the key changed since it was saved)
  */
-function buildCredentialLogin(
-  credential: Credential,
+function buildLoginActionLogin(
+  loginChoice: CrawlLoginChoice,
   website: Website,
   screenshotDirectory: string,
 ): CredentialLogin {
-  const details = buildCrawlLoginDetails(credential, website);
+  const details = buildLoginDetails(loginChoice.loginAction, loginChoice.credential, website);
   const failureScreenshotFileName = `${website.id}/${randomUUID()}.png`;
   return {
-    credentialName: credential.name,
+    loginActionTitle: loginChoice.loginAction.title,
+    credentialName: loginChoice.credential.name,
     failureScreenshotFileName,
     failureScreenshotPath: path.join(screenshotDirectory, failureScreenshotFileName),
     details,
@@ -160,12 +179,12 @@ async function learnWebsiteLoginUrl(websiteId: string, loginUrl: string): Promis
 }
 
 /**
- * Turns a credential's login into the login the crawler performs: where and
- * as whom to log in, where a failed login's screenshot goes, and what to do
- * once the login succeeded.
+ * Turns a Login action's login into the login the crawler performs: where
+ * and as whom to log in, where a failed login's screenshot goes, and what to
+ * do once the login succeeded.
  * @param website - The website being crawled, as read when the crawl started
  * @param crawlRun - Its run, created `running`
- * @param credentialLogin - The credential's decrypted login details and failure screenshot location
+ * @param credentialLogin - The Login action's decrypted login details and failure screenshot location
  * @returns The login to hand to `crawlWebsite`
  */
 function buildCrawlLogin(
@@ -176,7 +195,7 @@ function buildCrawlLogin(
   /**
    * Marks the run logged in once the crawler's login succeeded, before it
    * records the first page. When the website has no login URL of its own yet,
-   * it then LEARNS the one that just worked (the credential's own URL) - a
+   * it then LEARNS the one that just worked (the Login action's own URL) - a
    * failure to save it is only logged.
    * @returns True to crawl on; false when the run is no longer active
    */
@@ -201,10 +220,10 @@ function buildCrawlLogin(
  * Turns how the crawler stopped into the status (and error message) the run
  * is finished with. The crawler's normal stop reasons are spelled exactly
  * like the statuses; a closed browser is an `interrupted` run, and a failed
- * login is a `failed` one naming the credential.
+ * login is a `failed` one naming the Login action and its credential.
  * @param stopReason - Why the crawler stopped (never `stoppedBecauseRunWasDeleted`, which finishes nothing)
  * @param loginErrorMessage - Why the login failed, when it did
- * @param credentialLogin - The credential the crawl logged in as, or null
+ * @param credentialLogin - The Login action's login the crawl used, or null
  * @returns The run's final status and error message
  */
 function describeCrawlRunEnding(
@@ -216,9 +235,13 @@ function describeCrawlRunEnding(
     case "stoppedBecauseBrowserClosed":
       return { status: "interrupted", errorMessage: BROWSER_CLOSED_MESSAGE };
     case "loginFailed": {
+      const loginActionTitle = credentialLogin?.loginActionTitle ?? "the login action";
       const credentialName = credentialLogin?.credentialName ?? "the credential";
       const reason = loginErrorMessage ?? "no reason was given";
-      return { status: "failed", errorMessage: `Login as "${credentialName}" failed: ${reason}` };
+      return {
+        status: "failed",
+        errorMessage: `Login with "${loginActionTitle}" as "${credentialName}" failed: ${reason}`,
+      };
     }
     case "finished":
     case "stoppedAtPageLimit":
@@ -229,7 +252,7 @@ function describeCrawlRunEnding(
 
 /**
  * Runs one crawl to the end in the background and records it: the login
- * (when it has a credential), each page as it is visited - and the structure
+ * (when it has a Login action), each page as it is visited - and the structure
  * skeletons its slug detection builds for recorded pages - then how the crawl
  * ended - with the links its sampling skipped - and, when it recorded at
  * least one page, the web objects it found, which replace the website's
@@ -250,7 +273,7 @@ function describeCrawlRunEnding(
  * `websiteIdsBeingCrawled` when it ends, whatever happened.
  * @param website - The website being crawled
  * @param crawlRun - Its run, created `running`
- * @param credentialLogin - The credential to log in as first, or null to crawl logged out
+ * @param credentialLogin - The Login action's login to do first, or null to crawl logged out
  * @param buttonMode - Which buttons the crawl clicks on each page, on top of following its links
  * @returns Resolves once the crawl has ended and been recorded
  */
@@ -345,10 +368,10 @@ async function runCrawlInBackground(
  * Starts crawling a website in the background, unless a crawl of it is
  * already running in this process.
  *
- * With a credential, its password is decrypted FIRST - before the website is
- * claimed or a run is created - so a password that cannot be decrypted
- * rejects with nothing started. The crawler then logs in before it records
- * any page.
+ * With a credential, its password is decrypted FIRST - before the website
+ * is claimed or a run is created - so a password that cannot be decrypted
+ * rejects with nothing started. The crawler then logs in as it the way the
+ * website's Login action does before it records any page.
  *
  * The website's id is claimed synchronously, before anything is awaited, so
  * two simultaneous requests cannot both start one. The run is then created
@@ -356,20 +379,20 @@ async function runCrawlInBackground(
  * the button mode) and the crawl starts WITHOUT being awaited: the caller
  * answers at once, and the UI polls the run for progress.
  * @param website - The active website to crawl
- * @param credential - The website's active credential to log in as (with its encrypted password), or null to crawl as a logged-out visitor
+ * @param loginChoice - The website's active Login action to log in with and the credential to log in as (with its encrypted password), or null to crawl as a logged-out visitor
  * @param screenshotDirectory - Absolute path of the screenshot directory (`SCREENSHOT_DIR`), where a failed login's screenshot is written
  * @param buttonMode - Which buttons the crawl clicks on each page, on top of following its links; stored on the run. Defaults to `DEFAULT_CRAWL_BUTTON_MODE` (links only)
  * @returns Whether a crawl was started; when it was, the new run and a promise for the crawl's end (for tests - production ignores it)
- * @throws When neither the credential nor the website has a login URL; when the credential's password cannot be decrypted; or when the run cannot be created (the claim is released first)
+ * @throws When neither the Login action nor the website has a login URL; when the credential's password cannot be decrypted; or when the run cannot be created (the claim is released first)
  */
 export async function startCrawlRun(
   website: Website,
-  credential: Credential | null,
+  loginChoice: CrawlLoginChoice | null,
   screenshotDirectory: string,
   buttonMode: CrawlButtonMode = DEFAULT_CRAWL_BUTTON_MODE,
 ): Promise<CrawlRunStart> {
   const credentialLogin =
-    credential === null ? null : buildCredentialLogin(credential, website, screenshotDirectory);
+    loginChoice === null ? null : buildLoginActionLogin(loginChoice, website, screenshotDirectory);
 
   const crawlIsAlreadyRunning = websiteIdsBeingCrawled.has(website.id);
   if (crawlIsAlreadyRunning) {
@@ -382,7 +405,7 @@ export async function startCrawlRun(
     crawlRun = await createCrawlRunForWebsite(website.id, {
       startUrl: website.url,
       pageLimit: CRAWL_PAGE_LIMIT,
-      credentialId: credential?.id ?? null,
+      credentialId: loginChoice?.credential.id ?? null,
       buttonMode,
     });
   } catch (error: unknown) {

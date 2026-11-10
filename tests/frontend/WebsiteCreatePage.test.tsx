@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, screen, within, type RenderResult } from "@testing-library/react";
 import { userEvent, type UserEvent } from "@testing-library/user-event";
 import { Route } from "react-router-dom";
+import { type CreatedWebsiteRecord, type LoginCheckRecord } from "../../src/hooks/useWebsites";
 import WebsiteCreatePage from "../../src/pages/WebsiteCreatePage";
 import {
   buildJsonResponse,
@@ -26,6 +27,23 @@ const OPENED_FROM_LIST: RouterStart = {
 
 /** History after opening the form directly (deep link or reload): no state. */
 const OPENED_BY_DEEP_LINK: RouterStart = { initialEntries: [LIST_PATH, CREATE_PATH] };
+
+/**
+ * Builds a just-created website as `POST /api/websites` returns it: the
+ * website plus its login-form check, by default one that found no login form.
+ * @param websiteId - The created website's cuid
+ * @param loginCheckOverrides - Fields to replace in the default login-form check
+ * @returns The created website record
+ */
+function buildCreatedWebsiteRecord(
+  websiteId: string,
+  loginCheckOverrides: Partial<LoginCheckRecord> = {},
+): CreatedWebsiteRecord {
+  return {
+    ...buildWebsiteRecord({ id: websiteId, loginUrl: null }),
+    loginCheck: { outcome: "notFound", loginUrl: null, loginActionId: null, message: null, ...loginCheckOverrides },
+  };
+}
 
 /**
  * Renders the create page on its real route (`/websites/new`).
@@ -91,7 +109,7 @@ describe("WebsiteCreatePage", () => {
   it("POSTs the form values and replaces the form with the new website's page, keeping the return state", async () => {
     const user = userEvent.setup();
     const fetchStub = stubFetchRoutes({
-      "POST /api/websites": { status: 201, body: buildWebsiteRecord({ id: "website-9" }) },
+      "POST /api/websites": { status: 201, body: buildCreatedWebsiteRecord("website-9") },
     });
     renderWebsiteCreatePage(OPENED_FROM_LIST);
 
@@ -120,10 +138,53 @@ describe("WebsiteCreatePage", () => {
     await readProbeAfterLanding(LIST_PATH);
   });
 
+  it.each([
+    { outcome: "notFound" as const, label: "found no login form" },
+    { outcome: "failed" as const, label: "could not look" },
+  ])("opens the new website's page itself when the login-form check $label", async ({ outcome }) => {
+    const user = userEvent.setup();
+    stubFetchRoutes({
+      "POST /api/websites": {
+        status: 201,
+        body: buildCreatedWebsiteRecord("website-9", { outcome, message: outcome === "failed" ? "Timeout" : null }),
+      },
+    });
+    renderWebsiteCreatePage(OPENED_FROM_LIST);
+
+    await fillRequiredFields(user);
+    await user.click(screen.getByRole("button", { name: "Create website" }));
+
+    const landing = await readProbeAfterLanding("/websites/website-9");
+    expect(landing.search).toBe("");
+  });
+
+  it("opens the new website's Credentials tab, saying the form was found, when the login-form check found a login form", async () => {
+    const user = userEvent.setup();
+    stubFetchRoutes({
+      "POST /api/websites": {
+        status: 201,
+        body: buildCreatedWebsiteRecord("website-9", {
+          outcome: "found",
+          loginUrl: "https://example.com/login",
+          loginActionId: "login-action-1",
+        }),
+      },
+    });
+    renderWebsiteCreatePage(OPENED_FROM_LIST);
+
+    await fillRequiredFields(user);
+    await user.click(screen.getByRole("button", { name: "Create website" }));
+
+    const landing = await readProbeAfterLanding("/websites/website-9");
+    expect(landing.search).toBe("?tab=credentials&loginForm=found");
+    expect(landing.navigationType).toBe("REPLACE");
+    expect(landing.state).toBe(JSON.stringify({ returnTo: LIST_PATH }));
+  });
+
   it("POSTs the typed login page URL with the new website", async () => {
     const user = userEvent.setup();
     const fetchStub = stubFetchRoutes({
-      "POST /api/websites": { status: 201, body: buildWebsiteRecord({ id: "website-9" }) },
+      "POST /api/websites": { status: 201, body: buildCreatedWebsiteRecord("website-9") },
     });
     renderWebsiteCreatePage(OPENED_FROM_LIST);
 
@@ -149,7 +210,7 @@ describe("WebsiteCreatePage", () => {
     });
   });
 
-  it("disables submit while the create request is in flight", async () => {
+  it("disables submit, saying it is looking for a login form, while the create request is in flight", async () => {
     const user = userEvent.setup();
     const pendingCreate = createDeferred<Response>();
     stubFetchRoutes({ "POST /api/websites": () => pendingCreate.promise });
@@ -157,10 +218,10 @@ describe("WebsiteCreatePage", () => {
 
     await fillRequiredFields(user);
     await user.click(screen.getByRole("button", { name: "Create website" }));
-    expect(screen.getByRole("button", { name: "Create website" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Creating… looking for a login form" })).toBeDisabled();
 
     await act(async () => {
-      pendingCreate.resolve(buildJsonResponse(201, buildWebsiteRecord({ id: "website-9" })));
+      pendingCreate.resolve(buildJsonResponse(201, buildCreatedWebsiteRecord("website-9")));
       await pendingCreate.promise;
     });
     await readProbeAfterLanding("/websites/website-9");

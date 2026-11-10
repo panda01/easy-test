@@ -20,6 +20,7 @@ import { findScriptRunStatus } from "../utils/describeScriptRunStatus";
 import { findChangedActionFields } from "../utils/describeScriptStaleness";
 import { newWebsiteItemPath, websiteItemDetailPath } from "../utils/routePaths";
 import { ACTION_KIND, type WebsiteItemKind } from "../utils/websiteItemKinds";
+import { describeActionLoginShort } from "../utils/describeActionLogin";
 
 /** The desktop action row's columns: status, title and description, runs as, version, and status label. */
 const DESKTOP_ACTION_ROW_COLUMNS = "20px minmax(0,1fr) 150px 64px 96px";
@@ -54,7 +55,7 @@ interface ActionRowProps {
 
 /**
  * Tells whether an action's newest version was generated from different
- * text (or a different credential) than the action has now.
+ * text (or a different credential to log in as) than the action has now.
  * @param action - The action, with its newest version
  * @returns True when the action has a version and it is out of date
  */
@@ -74,8 +75,9 @@ function newestVersionIsOutOfDate(action: WebsiteItemRecord): boolean {
  * status icon; its title, with an "Out of date" tag when its newest version
  * was generated from different text; and its status in words ("12 min ago",
  * "Failed at step 9", "Not run yet") in the status color. Desktop rows also
- * show the description, who it runs as, and its version ("v6"); phone rows
- * show who it runs as after the status, and a chevron.
+ * show the description, how it logs in ("As Admin", "Logged out", or "Login"
+ * for the Login action), and its version ("v6"); phone rows
+ * show how it logs in after the status, and a chevron.
  * @param props - The action, its link, the layout, and the current moment
  * @returns The rendered row
  */
@@ -84,7 +86,7 @@ function ActionRow(props: ActionRowProps): ReactElement {
   const latestRun = action.newestScript?.latestRun ?? null;
   const statusColor = runStatusColors[findScriptRunStatus(latestRun)];
   const statusLabel = describeLatestRunLabel(latestRun, now);
-  const runsAsText = action.credential?.name ?? "Logged out";
+  const runsAsText = describeActionLoginShort(action);
   const versionText =
     action.newestScript === undefined || action.newestScript === null
       ? "—"

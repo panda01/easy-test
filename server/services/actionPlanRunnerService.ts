@@ -98,7 +98,7 @@ export function buildStepScreenshotFileName(stepNumber: number): string {
 const SCRUBBED_SECRET = "••••••";
 
 /** The 1280x720 viewport every browser in the app uses. */
-const PLAN_RUN_VIEWPORT = { width: 1280, height: 720 };
+export const PLAN_RUN_VIEWPORT = { width: 1280, height: 720 };
 
 /** How long the runner reads the fields around a step it typed into, before giving up on the reading. */
 export const FIELD_READ_TIMEOUT_MS = 2000;
@@ -147,11 +147,13 @@ export const NO_PARAMETER_RUN: PlanParameterRun = {
   confirmStepNumber: null,
 };
 
-/** The credential a run logs in as, already decrypted. */
+/** The website's Login action a run logs in with, and the credential it logs in as, already decrypted. */
 export interface PlanRunLogin {
+  /** The Login action's title, for the log. */
+  loginActionTitle: string;
   /** The credential's name, for the log. */
   credentialName: string;
-  /** Where and as whom to log in (see `buildCrawlLoginDetails`). */
+  /** Where and as whom to log in (see `buildLoginDetails`). */
   details: CrawlLoginDetails;
 }
 
@@ -159,7 +161,7 @@ export interface PlanRunLogin {
 export interface ActionPlanRunRequest {
   /** The plan to run, already validated (`validateActionPlan`). */
   plan: ActionPlan;
-  /** The credential to log in as before the first step, or null to run logged out. */
+  /** How to log in (the website's Login action, as the action's credential) before the first step, or null to run logged out. */
   login: PlanRunLogin | null;
   /** The website's network idle cap and minimum wait, which the login waits by. */
   timingSettings: ScreenshotTimingSettings;
@@ -892,12 +894,12 @@ async function walkPlan(
     captureStepScreenshot(page, runDirectory, screenshotRequest, context, secrets, observations);
 
   if (login !== null) {
-    context.log(`Log in as "${login.credentialName}"`);
+    context.log(`Log in with "${login.loginActionTitle}" as "${login.credentialName}"`);
     const loginAttempt = await logInWithCredential(page, login.details, request.timingSettings);
     if (!loginAttempt.loggedIn) {
       return {
         failedStepNumber: null,
-        errorMessage: `Could not log in as "${login.credentialName}": ${loginAttempt.errorMessage}`,
+        errorMessage: `Could not log in with "${login.loginActionTitle}" as "${login.credentialName}": ${loginAttempt.errorMessage}`,
       };
     }
     context.log("✔ Logged in");
@@ -973,7 +975,7 @@ async function captureFailureScreenshot(page: Page, screenshotPath: string): Pro
  * @param secrets - The credential values to scrub from the address
  * @returns The scrubbed address, or null when it is blank or could not be read
  */
-function readScrubbedPageUrl(page: Page, secrets: string[]): string | null {
+export function readScrubbedPageUrl(page: Page, secrets: string[]): string | null {
   try {
     const pageUrl = page.url();
     const pageHasNoAddress = pageUrl === "" || pageUrl === BLANK_PAGE_URL;

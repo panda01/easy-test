@@ -4,7 +4,6 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
-import Typography from "@mui/material/Typography";
 import { AddIcon } from "./icons";
 import { type CredentialRequestBody } from "../hooks/useCredentials";
 
@@ -12,16 +11,9 @@ import { type CredentialRequestBody } from "../hooks/useCredentials";
 export interface CredentialFormProps {
   /**
    * The values the fields start with: blank for create, the saved credential
-   * for edit (its own login page URL, or blank when it uses the website's).
-   * The password always starts blank - the server never sends it.
+   * for edit. The password always starts blank - the server never sends it.
    */
   initialValues: CredentialRequestBody;
-  /**
-   * The owning website's login page URL, or null when the website has none.
-   * With one, the credential's own login page URL is optional (blank uses the
-   * website's); without one, it is required.
-   */
-  websiteLoginUrl: string | null;
   /**
    * True on the edit page, where a password is already saved: the password
    * field may then be left blank to keep it. False on create, where it is
@@ -50,34 +42,27 @@ export interface CredentialFormProps {
 type CredentialFieldName = keyof CredentialRequestBody;
 
 /**
- * The form shared by the create and edit credential pages: name, description,
- * login page URL, username, password, and the three optional login form
- * selectors. It owns only the field values; saving and navigation belong to
- * the page.
- *
- * The login page URL overrides the website's own. When the website has one,
- * the field is optional - blank uses the website's, which the field shows as
- * its placeholder. When the website has none, the field is required (a
- * successful login with it also saves it to the website, on the server).
+ * The form shared by the create and edit credential pages: name,
+ * description, username, and password - the account a Login action logs in
+ * as. Where and how it logs in (the login page and form selectors) belongs
+ * to the Login action, not here. It owns only the field values; saving and
+ * navigation belong to the page.
  *
  * Field state is seeded from `initialValues` once, on mount, so the edit page
  * mounts this form only after the credential has loaded, keyed by its id.
  *
- * Submit is disabled until name, username, - when the website has no login
- * page - the login page URL, and - on create - password are non-blank. On
- * edit, a blank password keeps the saved one. The server still validates
- * everything (e.g. the URL format) and its message is shown via
- * `errorMessage`.
+ * Submit is disabled until name, username, and - on create - password are
+ * non-blank. On edit, a blank password keeps the saved one. The server still
+ * validates everything and its message is shown via `errorMessage`.
  *
  * On the create page the submit button carries a plus
  * (`submitButtonShowsPlus`), like every button that creates something.
- * @param props - Initial values, the website's login page URL, whether a password is saved, labels (and whether submit shows a plus), request state, and callbacks
+ * @param props - Initial values, whether a password is saved, labels (and whether submit shows a plus), request state, and callbacks
  * @returns The credential form
  */
 export default function CredentialForm(props: CredentialFormProps): ReactElement {
   const {
     initialValues,
-    websiteLoginUrl,
     passwordIsSaved,
     submitLabel,
     submitButtonShowsPlus = false,
@@ -90,20 +75,11 @@ export default function CredentialForm(props: CredentialFormProps): ReactElement
 
   const nameIsFilled = values.name.trim() !== "";
   const usernameIsFilled = values.username.trim() !== "";
-  const loginUrlIsFilled = values.loginUrl.trim() !== "";
-  const websiteHasLoginUrl = websiteLoginUrl !== null;
-  const loginUrlIsRequired = !websiteHasLoginUrl;
-  const loginUrlRequirementIsMet = websiteHasLoginUrl || loginUrlIsFilled;
   const passwordIsFilled = values.password.trim() !== "";
   const passwordRequirementIsMet = passwordIsSaved || passwordIsFilled;
-  const requiredFieldsAreFilled =
-    nameIsFilled && usernameIsFilled && loginUrlRequirementIsMet && passwordRequirementIsMet;
+  const requiredFieldsAreFilled = nameIsFilled && usernameIsFilled && passwordRequirementIsMet;
   const submitIsBlocked = !requiredFieldsAreFilled || isSubmitting;
   const saveFailed = errorMessage !== null;
-  const loginUrlPlaceholder = websiteHasLoginUrl ? websiteLoginUrl : "https://example.com/login";
-  const loginUrlHelperText = websiteHasLoginUrl
-    ? `Leave blank to use the website's login page (${websiteLoginUrl})`
-    : "This website has no login page URL yet - enter it here (a successful login will also save it to the website)";
   const passwordHelperText = passwordIsSaved
     ? "A password is saved. Leave this blank to keep it, or type a new one to replace it."
     : "Stored encrypted. It is never shown again after you save.";
@@ -152,15 +128,6 @@ export default function CredentialForm(props: CredentialFormProps): ReactElement
           fullWidth
         />
         <TextField
-          label="Login page URL"
-          value={values.loginUrl}
-          onChange={handleFieldChange("loginUrl")}
-          placeholder={loginUrlPlaceholder}
-          helperText={loginUrlHelperText}
-          required={loginUrlIsRequired}
-          fullWidth
-        />
-        <TextField
           label="Username"
           value={values.username}
           onChange={handleFieldChange("username")}
@@ -176,33 +143,6 @@ export default function CredentialForm(props: CredentialFormProps): ReactElement
           helperText={passwordHelperText}
           autoComplete="new-password"
           required={!passwordIsSaved}
-          fullWidth
-        />
-
-        <Typography variant="subtitle1" component="h2">
-          Login form selectors (optional)
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          The crawler finds the username field, password field, and submit button on its own.
-          Fill these in only when it picks the wrong one: each is a CSS selector, such as
-          #email or button.sign-in.
-        </Typography>
-        <TextField
-          label="Username field selector"
-          value={values.usernameSelector}
-          onChange={handleFieldChange("usernameSelector")}
-          fullWidth
-        />
-        <TextField
-          label="Password field selector"
-          value={values.passwordSelector}
-          onChange={handleFieldChange("passwordSelector")}
-          fullWidth
-        />
-        <TextField
-          label="Submit button selector"
-          value={values.submitSelector}
-          onChange={handleFieldChange("submitSelector")}
           fullWidth
         />
 

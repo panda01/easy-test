@@ -25,6 +25,12 @@ export interface WebsiteFormProps {
   submitButtonShowsPlus?: boolean;
   /** True while the save request is in flight; disables submit. */
   isSubmitting: boolean;
+  /**
+   * The submit button's text while the save request is in flight, e.g.
+   * "Creating… looking for a login form" (website create waits for the
+   * login-form check); the usual text when omitted.
+   */
+  submittingLabel?: string;
   /** Why the last save failed (shown above the buttons), or null. */
   errorMessage: string | null;
   /** Called with the field values when the form is submitted. */
@@ -35,8 +41,8 @@ export interface WebsiteFormProps {
 
 /**
  * The URL / name / description form shared by the create and edit website
- * pages, plus the optional login page URL (blank = the website doesn't
- * require login; its credentials inherit it otherwise) and the website's two
+ * pages, plus the optional login page URL (blank = none yet; its Login
+ * action uses it unless it has its own) and the website's two
  * screenshot timing settings (network idle cap and minimum wait, in
  * milliseconds). It owns only the field values; saving and navigation belong
  * to the page.
@@ -52,7 +58,8 @@ export interface WebsiteFormProps {
  * than the minimum) and its message is shown via `errorMessage`.
  *
  * On the create page the submit button carries a plus
- * (`submitButtonShowsPlus`), like every button that creates something.
+ * (`submitButtonShowsPlus`), like every button that creates something, and
+ * reads `submittingLabel` while the request (and its login-form check) runs.
  * @param props - Initial values, labels (and whether submit shows a plus), request state, and callbacks
  * @returns The website form
  */
@@ -62,6 +69,7 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
     submitLabel,
     submitButtonShowsPlus = false,
     isSubmitting,
+    submittingLabel,
     errorMessage,
     onSubmit,
     onCancel,
@@ -185,7 +193,7 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
           value={loginUrl}
           onChange={handleLoginUrlChange}
           placeholder="https://example.com/login"
-          helperText="Leave blank if the website doesn't require login"
+          helperText="Where the website logs in, if you know it; otherwise leave it blank - a new website is checked for a login form"
           fullWidth
         />
         <Typography variant="subtitle1" component="h2">
@@ -219,7 +227,7 @@ export default function WebsiteForm(props: WebsiteFormProps): ReactElement {
             disabled={submitIsBlocked}
             startIcon={submitButtonShowsPlus ? <AddIcon /> : undefined}
           >
-            {submitLabel}
+            {isSubmitting && submittingLabel !== undefined ? submittingLabel : submitLabel}
           </Button>
           <Button onClick={onCancel}>Cancel</Button>
         </Stack>

@@ -15,12 +15,27 @@ export interface WebsiteRecord {
   networkIdleTimeoutMs: number;
   /** A screenshot is never taken sooner than this after the page loads, in ms. */
   screenshotMinimumWaitMs: number;
-  /** The website's login page, or null when it does not require login. Credentials inherit it. */
+  /** The website's login page, or null when it has none. Its Login action uses it unless it has its own. */
   loginUrl: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
 }
+
+/** What a website's login-form check did, as the API returns it (`loginCheck`). */
+export interface LoginCheckRecord {
+  /** `found` (the Login action was made), `notFound`, or `failed` - see the server's `LoginCheck`. */
+  outcome: "found" | "notFound" | "failed" | "alreadyHasLoginAction";
+  /** Where the login form is, or null when none was found. */
+  loginUrl: string | null;
+  /** The website's Login action, or null when it has none. */
+  loginActionId: string | null;
+  /** Why the check failed, or null. */
+  message: string | null;
+}
+
+/** A just-created website, as `POST /api/websites` returns it: the row plus its login-form check. */
+export type CreatedWebsiteRecord = WebsiteRecord & { loginCheck: LoginCheckRecord };
 
 /** The parts of a website's newest crawl run the dashboard shows. */
 export interface WebsiteLatestCrawlRunRecord {

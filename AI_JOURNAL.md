@@ -3,6 +3,333 @@
 Newest entry at the top.
 
 ---
+## 2026-11-09 21:16 EST — One login action per website, logging in as any of its credentials
+
+**Intent:**
+- The user corrected the previous entry's design: "a login shouldn't be tied to 1 credential, it should be 1 action per website that can use whatever credentials have been saved for that website".
+- A website now has at most ONE Login action. It holds HOW the website logs in (its login page and the three optional selectors) and has no credential. Whatever logs in picks the account: an action ("Log in as"), a crawl ("Crawl as"), or "Run login".
+- This follows the approved plan v4 (`~/.plannotator/plans/one-login-action-per-website-l-2026-11-10-approved.md`).
+
+### Decisions
+- **Made by the user:**
+  - When configuring an action, it picks only "Log in as" (Logged out or a credential); the website's Login action does the logging in.
+  - A website gets its Login action by itself: "when a user enters the url we should check and see if there is a login box, and then if so make a login action for that website and ask for credentials".
+  - Drop the unused columns once the conversion ran. The user ran `npx prisma db push --accept-data-loss` themselves; Prisma refuses to run it for an AI agent without a fresh "yes".
+- **Made by me (approved in the plan):**
+  - A login box is a visible password field. The check looks on the website's login page URL (else its URL), and follows one visible "Log in" / "Login" / "Sign in" / "Sign on" link or button when that page has none. It is capped at 20 s.
+  - The check runs on website create (create waits for it; a failed check never fails the create) and on demand through "Look for a login form" on the Credentials tab. It does not run on website edit.
+  - A found form makes a Login action "Log in". A website with no login page adopts the form's page; a website whose page is not where the form was keeps its page and the Login action gets the form's page as its own.
+  - After a find, create opens the website on `?tab=credentials&loginForm=found`, which asks for the accounts ("Found a login form at …"). The Credentials tab now always shows.
+  - A second Login action is refused (409), and the Kind select disables Login while the website has one. Deleting the Login action or changing its kind is allowed: the other actions keep their credentials, and their logged-in runs answer 409 "This website has no login action yet …" until there is one again. This replaces v2's "in use" 409.
+- **Made after the plan:**
+  - A run whose credential no longer exists answers 409 `ACTION_CREDENTIAL_MISSING_MESSAGE` again, as it did before v2. My rewrite had dropped that check, so such a run went ahead logged out; the backend test agent noticed it.
+  - On the Login action's page, Run login says "Loading the website and its credentials" while the website loads, instead of briefly saying it has no login page. The frontend test agent noticed this.
+  - Both fixes came after the manual check and are covered by unit tests only.
+
+### Database
+- **Push 1:** `npx prisma db push` removed only the `loginActionId` foreign keys and indexes. `npx prisma generate`.
+- **Conversion:** ran `npx tsx server/scripts/migrateLoginsToLoginActions.ts` on the dev database.
+  - "Forge Gym management" kept one Login action (renamed "Log in"); the other 2 were merged into it.
+  - "Login fixture" kept its Login action (renamed "Log in").
+  - 3 actions got their credential back.
+  - A second run changed nothing.
+- **Push 2:** the user ran `npx prisma db push --accept-data-loss`. It dropped `credentials.loginUrl` / `usernameSelector` / `passwordSelector` / `submitSelector`, `actions.loginActionId` and `crawl_runs.loginActionId`. I checked that the columns are gone and the schema is in sync, and ran `npx prisma generate`.
+- **Manual-check data changes:**
+  - The verifier found that the "Login fixture" Admin credential's stored password was not `correct-horse-1`, and set it to that through the credential form.
+  - Deleting and re-finding the Login action left "Login fixture" with a new "Log in" row.
+  - The 4 websites and the "Wrong" credential it created were soft deleted.
+
+### Files changed
+**Schema and docs**
+- `server/prisma/schema.prisma`:
+  - **Removed:** `Action.loginActionId` and its `ActionLogin` self-relation (`loginAction` / `actionsThatLogInWithThis`), `Action.crawlRunsLoggedIn`, `CrawlRun.loginActionId` and its relation, and `Credential.loginUrl` / `usernameSelector` / `passwordSelector` / `submitSelector`.
+  - **Rewritten doc comments:** `Website.loginUrl` (the check), `Action` (the one Login action; other actions run as a credential), `CrawlRun`, `LoginRun`, `Credential`.
+- READMEs: `README.md` (one Login action, the check, and the conversion before the column drop), `server/prisma/README.md`, `server/utils/README.md`, `server/services/README.md`, `server/controllers/README.md` (including a new "login-form check" section), `src/components/README.md`, `src/hooks/README.md`, `src/pages/README.md`.
+
+**Server**
+- `server/services/dbService.ts`:
+  - **Removed:** `ActionLoginActionSummary`, `CrawlRunLoginActionSummary`, `readEffectiveCredential`, `readLoginSettings`, `countActionsThatLogInWith`, `migrateCredentialLoginsToLoginActions`, `CredentialLoginMigration`, `CredentialWithOldLoginColumns`.
+  - **Added:**
+    - `softDeleteActionBelongings`, the cascade shared with the conversion;
+    - `DEFAULT_LOGIN_ACTION_TITLE`, `DEFAULT_LOGIN_ACTION_DESCRIPTION`, `findLoginActionForWebsite`, `createDefaultLoginActionForWebsite(websiteId, loginUrl)`;
+    - `convertLoginsToOneLoginActionPerWebsite`, `WebsiteLoginConversion`, `LoginFormSettingsRow`, `OldLoginColumns`, `findOldLoginColumns`, `fillBlankLoginSettings`, `wasMadePerCredential`.
+  - **Changed:**
+    - `ActionInput`: no `loginActionId`; `credentialId` means "runs as".
+    - `ActionWithCredential`: no `loginAction`. `CrawlRunInput` and `CrawlRunWithCredential`: no `loginActionId` / `loginAction`.
+    - `ACTION_CREDENTIAL_INCLUDE` and `CRAWL_RUN_CREDENTIAL_INCLUDE` include only `credential`.
+    - `softDeleteActionForWebsite` no longer unlinks `loginActionId`.
+    - Doc comments: create/update action, crawl run create, credential reads and soft delete.
+- `server/utils/validateRequestBodies.ts`:
+  - **Added:** `LOGIN_ACTION_HAS_NO_CREDENTIAL_MESSAGE`, `LoginRunStartInput`, `validateLoginRunStartInput`.
+  - **Changed:**
+    - `readLoginActionChoices` refuses a credential.
+    - `readOtherActionLoginChoices` takes `credentialId`.
+    - `ActionLoginChoices` / `NO_LOGIN_CHOICES` have no `loginActionId`.
+    - `CrawlRunStartInput` / `validateCrawlRunStartInput` take `credentialId`.
+    - Doc comments updated.
+- `server/services/crawlerLoginService.ts`: **Removed** `describeLoginActionWithoutCredential`; **added** `WEBSITE_HAS_NO_LOGIN_ACTION_MESSAGE`; doc comments.
+- **New** `server/services/loginFormCheckService.ts`: `LOGIN_FORM_CHECK_TIME_LIMIT_MS`, `LOGIN_LINK_NAME_PATTERN`, `LoginFormSearch`, `LoginCheck`, `locateVisiblePasswordFields`, `pageShowsAPasswordField`, `findLoginLink`, `settlePage`, `searchPageForLoginForm`, `findLoginForm`, `checkWebsiteForLoginForm`.
+- `server/services/actionScriptExecutionService.ts`:
+  - **Added back:** `ACTION_CREDENTIAL_MISSING_MESSAGE`.
+  - **Changed:**
+    - `findActionCredential` reads `action.credentialId`.
+    - `allowedOriginsFor(website, loginAction)`.
+    - `performActionScriptRun`: the credential, then `findLoginActionForWebsite`; 409 for a missing credential or no Login action.
+    - `performRefinement` gets its origins from the website's Login action.
+    - `PLAN_NEEDS_A_CREDENTIAL_MESSAGE` wording.
+- `server/services/actionParameterService.ts`: the crawl read and object choices use `action.credentialId`; doc comment.
+- `server/services/actionPlanRunnerService.ts`: doc comments of `PlanRunLogin` / `ActionPlanRunRequest.login`.
+- `server/services/crawlRunService.ts`: `CrawlLoginChoice.loginAction` has no `id`; the run is created with only `credentialId`; doc comments.
+- `server/services/loginRunService.ts`: **added** `LOGIN_RUN_CREDENTIAL_NOT_FOUND_MESSAGE`; `performLoginRun(..., credentialId)` logs in as the picked credential (400 when it is not the website's).
+- `server/controllers/actions.ts`:
+  - **Removed:** `LOGIN_ACTION_NOT_ON_WEBSITE_MESSAGE`, `LOGIN_ACTION_IS_IN_USE_MESSAGE`.
+  - **Added:** `describeWebsiteAlreadyHasALoginAction`.
+  - **Changed:**
+    - `findLoginChoiceProblem`: a second Login action gets 409; another action's credential must be the website's.
+    - The Delete proposal inherits `credentialId`.
+    - Route JSDoc updated.
+- `server/controllers/actionScripts.ts`: origins via `findLoginActionForWebsite`; the run route's JSDoc.
+- `server/controllers/crawlRuns.ts`: body `{ credentialId }`; 404 "Credential not found", 409 no Login action; JSDoc.
+- `server/controllers/loginRuns.ts`: validates `{ credentialId }` and passes it on; JSDoc.
+- `server/controllers/websites.ts`:
+  - **Added:** `WEBSITE_ALREADY_HAS_A_LOGIN_ACTION_MESSAGE`, `checkNewWebsiteForLoginForm`, and the route `POST /api/websites/:websiteId/login-check`.
+  - **Changed:** create runs the check and answers `{ ...website, loginCheck }`.
+- `server/controllers/credentials.ts`: doc comments.
+- `server/scripts/migrateLoginsToLoginActions.ts`: `describeCredentialLoginMigration` → `describeWebsiteLoginConversion`; `runLoginMigration` calls `convertLoginsToOneLoginActionPerWebsite`.
+
+**Client**
+- `src/hooks/useWebsiteItems.ts`: **removed** `ActionLoginActionRecord`, and `loginActionId` / `loginAction` from `WebsiteItemRecord` / `WebsiteItemRequestBody`.
+- `src/hooks/useWebsites.ts`: **added** `LoginCheckRecord`, `CreatedWebsiteRecord`.
+- `src/hooks/useLoginChoices.ts`: `listLoginActionOptions` → `findLoginActionOption`; `useLoginChoices` returns `loginAction`.
+- `src/hooks/useCrawlRuns.ts`: back to the committed version (no `loginActionId` / `loginAction`).
+- `src/utils/describeActionLogin.ts`: **removed** `readEffectiveCredential`; `describeActionLoginShort` reads "Login" / "As X" / "Logged out".
+- `src/utils/actionObjectRole.ts`: `ACTION_KIND_HELP.login` wording.
+- `src/utils/routePaths.ts`: **added** `websiteLoginCheckApiUrl`, `LOGIN_FORM_FOUND_QUERY_PARAMETER`, `websiteCredentialsAfterLoginFormFoundPath`.
+- `src/components/TitleDescriptionForm.tsx`:
+  - **Removed:** `LOGGED_OUT_LOGIN_ACTION_VALUE`, `NO_CREDENTIAL_PICKED_VALUE`, `describeLogInWithHelp`, `handleLoginActionChange`.
+  - **Added:** `LOGGED_OUT_CREDENTIAL_VALUE`, `describeLogInAsHelp`.
+  - **Changed:**
+    - `LoginChoices`: `loginAction` instead of `loginActions`.
+    - The Login kind has no credential select.
+    - Other kinds get "Log in as".
+    - Login is disabled in Kind while the website has its Login action.
+    - `buildLoginValues`.
+- `src/components/CredentialsSection.tsx`:
+  - **Added:** `CredentialsLoginAction`, `describeLoginCheckWithoutLoginAction`, `describeCredentialsNeeded`, and props for the Login action and the check.
+  - **Changed:** shows how the website logs in (Look for a login form / ask for credentials / a link line).
+- `src/components/LoginActionSection.tsx`: new props `credentials`, `selectedCredentialId`, `onSelectedCredentialChange`; a "Log in as" select.
+- `src/components/CrawlRunsSection.tsx`: back to the committed credential-based version; doc comments for when "Crawl as" shows.
+- `src/components/WebsiteForm.tsx`: new `submittingLabel` prop; login URL helper text.
+- `src/components/WebsiteItemListSection.tsx`: staleness uses `action.credentialId`; doc comment.
+- `src/pages/ActionDetailPage.tsx`:
+  - **Added:** `ActionLoginContext`, the `ActionHeaderProps.loginContext` prop, and the Run login credential pick.
+  - **Changed:**
+    - `describeActionLoginLine(action, context)`.
+    - `runLogin` sends `{ credentialId }`.
+    - New blocked reasons, including the website-loading one.
+    - `useLoginChoices` is used for the header and the select.
+- `src/pages/WebsiteDetailPage.tsx`:
+  - **Added:** `lookForLoginForm` / `handleLookForLoginForm`.
+  - **Changed:**
+    - The Credentials tab always shows, with the Login action and `?loginForm=found` passed to it.
+    - "Crawl as" needs a credential and a Login action; the crawl body is `{ credentialId }`.
+- `src/pages/WebsiteCreatePage.tsx`: the `submittingLabel`; opens `?tab=credentials&loginForm=found` after a find.
+- `src/pages/WebsiteItemCreatePage.tsx`, `src/pages/WebsiteItemEditPage.tsx`: no `loginActionId`; doc comments.
+
+**Tests**
+- **New:** `tests/backend/services/loginFormCheckService.test.ts`, `tests/frontend/CredentialsSection.test.tsx`.
+- **Rewritten or updated:**
+  - `tests/backend/scripts/migrateLoginsToLoginActions.test.ts`, `tests/backend/services/dbService.test.ts` (the conversion from all three starting points, the new helpers);
+  - backend API, service and util specs: actions, actionScripts, autoRefineJobs, crawlRuns, credentials, loginRuns, websites, server, actionParameterService, actionPlanRunnerService, actionScriptExecutionService, autoRefineService, crawlRunService, crawlerLoginService, loginRunService, validateRequestBodies;
+  - frontend specs: ActionDetailPage, CrawlRunsSection (back to the committed version), describeActionLogin, LoginActionSection, routePaths, TitleDescriptionForm, useLoginChoices, WebsiteCreatePage, WebsiteDetailPage, WebsiteForm, WebsiteItemCreatePage, WebsiteItemEditPage, WebsiteItemListSection, actionParameters, `support/frontendTestHelpers.tsx`.
+- **Removed, only for removed features:**
+  - `loginActionId` linking;
+  - the Login action's own credential;
+  - `readEffectiveCredential` / `readLoginSettings` / `countActionsThatLogInWith`;
+  - the in-use 409;
+  - `migrateCredentialLoginsToLoginActions`;
+  - `listLoginActionOptions` / `describeLogInWithHelp`;
+  - the old Credentials-tab show/hide rule.
+- The fixture `claude_tmp/login-fixture/server.mts` gained a public `/welcome` page with a "Sign in" link.
+
+### Verification
+- **Manual (manual-verifier, Playwright scripts):** all 10 checks passed.
+  - The check on create: found directly, and found behind "Sign in".
+  - No form on this app's own page.
+  - "Look for a login form".
+  - One Login action per website, in the UI and the API.
+  - Both kind forms.
+  - Run login as Admin (passes) and as a wrong password (fails).
+  - An action that logs in through the Login action.
+  - Crawls as Admin and logged out.
+  - The no-Login-action 409, and recovering with the button.
+  - The credential form.
+  - No secrets in logs or responses.
+  - No regressions.
+  - The action's own plan still fails at a step Claude guessed; that is a plan problem, not the login.
+- `npm run test:coverage`: 156 files, 3501 tests passed. Statements 99.05%, branches 97.4%, functions 99.22%, lines 99.53%.
+- `npm run lint`, `npm run tsc` and `npm run tsc:client` are clean.
+
+---
+## 2026-11-09 17:10 EST — Login actions: a special action type that every login goes through
+
+**Intent:**
+- The user asked for a special action type for login. Every login (action runs and crawls) now goes through it, and for now it only types a username and a password.
+- When the user configures any other action, they pick the login action it runs first ("Log in with"), instead of a credential.
+- This follows the approved plan v2 (`~/.plannotator/plans/login-actions-a-special-action-2026-11-09-approved.md`).
+
+### Decisions
+- **Made by the user:**
+  - A Login action runs the existing built-in login routine (`logInWithCredential`). It has no steps, versions, or Refine.
+  - A Login action is tied to one credential.
+  - The website's login page URL stays, as the default page for login actions. The credential's own login URL and its three CSS selectors are removed from credentials; the selectors moved to the Login action.
+  - Existing data is converted automatically by a one-time script.
+- **Made by me:**
+  - A Login action's blank "Login page URL" means "use the website's", as credentials used to inherit it. `adoptWebsiteLoginUrl` still teaches the website a Login action's own URL after a successful crawl login.
+  - The Login kind is never detected; only the user picks it.
+  - "Run login" results are stored in a new `LoginRun` table. The logins other runs and crawls do first are part of those runs, as before.
+  - The credential stays the key for crawled-page matching and "Out of date": an action's effective credential is its Login action's (`readEffectiveCredential`).
+  - Deleting a Login action unlinks the actions that use it. Deleting a credential unlinks it from its Login actions. A Login action that others log in with cannot change kind (409).
+  - Convert, run, refine, step-editor edits, and auto-refine all answer 409 for a Login action. That includes one that kept versions from before its kind changed.
+  - The selector fields on the Login action form use the credential form's old layout (a heading and a note), not a disclosure as the plan said.
+  - Crawl history rows still name the credential ("Logged in as “Admin”"), not the Login action as the plan said; the crawl runs API does return `loginAction`.
+- **Not done yet (waiting on the user):** dropping the four old credential columns (`loginUrl`, `usernameSelector`, `passwordSelector`, `submitSelector`) with `prisma db push --accept-data-loss`. They are still in the schema and the database, unused.
+
+### Database
+- `npx prisma db push` (additive: new `Action` columns `loginActionId`, `loginUrl`, `usernameSelector`, `passwordSelector`, `submitSelector`; new `CrawlRun.loginActionId`; new table `login_runs`) and `npx prisma generate`.
+- Ran `npx tsx server/scripts/migrateLoginsToLoginActions.ts` on the dev database. It created 4 Login actions ("Log in as Gym teacher", "Log in as Gym Owner", "Log in as Owner with a school", "Log in as Admin"), relinked 3 actions, and filled in 21 crawl runs. A second run changed nothing.
+
+### Files changed
+**Schema and docs**
+- `server/prisma/schema.prisma` — `Action`: the five new columns, the `ActionLogin` self-relation (`loginAction` / `actionsThatLogInWithThis`), `loginRuns`, `crawlRunsLoggedIn`, and an index on `loginActionId`. `CrawlRun.loginActionId` with its relation and index. New model `LoginRun`. `Website.loginRuns`. Doc comments on `Website`, `Action`, `CrawlRun`, and `Credential` rewritten.
+- READMEs: `README.md` (Login actions, and the migration step before the column drop), `server/prisma/README.md`, `server/utils/README.md`, `server/services/README.md`, `server/controllers/README.md`, `src/components/README.md`, `src/hooks/README.md`, `src/pages/README.md`.
+
+**Server**
+- `server/utils/scoreActionObjectRole.ts`:
+  - **Added:** `LOGIN_ACTION_KIND` and `isLoginAction`.
+  - **Changed:** `ACTION_KINDS` now ends with `login`; `kindTakesAnObjectType` is false for `login`.
+- `server/utils/validateRequestBodies.ts`:
+  - **Added:** `LOGIN_SELECTOR_FIELDS`, `ActionLoginChoices`, `NO_LOGIN_CHOICES`, `readOptionalId`, `readLoginActionChoices`, `readOtherActionLoginChoices`.
+  - **Changed:** `validateActionInput`; `validateCredentialInput` (no login URL or selectors); `CrawlRunStartInput` / `validateCrawlRunStartInput` (`loginActionId`).
+  - **Removed:** `CREDENTIAL_SELECTOR_FIELDS`.
+- `server/services/crawlerLoginService.ts`:
+  - **Added:** `LoginActionSettings`, `findEffectiveLoginUrl`, `describeLoginActionWithoutCredential`, `describeLoginActionWithoutLoginPage`.
+  - `buildCrawlLoginDetails(credential, website)` → `buildLoginDetails(loginAction, credential, website)`.
+  - **Changed:** comments now name the Login action's selectors.
+- `server/services/dbService.ts`:
+  - **Changed types:** `ActionInput` has the login fields; `ActionWithCredential` has `loginAction`; `CrawlRunInput` has `loginActionId`; `CrawlRunWithCredential` has `loginAction`; `CredentialInput` lost the login URL and selectors.
+  - **Added types:** `ActionCredentialSummary`, `ActionLoginActionSummary`, `CrawlRunLoginActionSummary`, `LoginRunInput`, `CredentialLoginMigration`.
+  - **Added functions:** `readEffectiveCredential`, `readLoginSettings`, `countActionsThatLogInWith`, `createLoginRunForAction`, `listLoginRunsForAction`, `findLoginRunForAction`, `migrateCredentialLoginsToLoginActions`.
+  - **Changed:** `ACTION_CREDENTIAL_INCLUDE` and `CRAWL_RUN_CREDENTIAL_INCLUDE`. `softDeleteActionForWebsite` also deletes login runs and unlinks `loginActionId`. `softDeleteWebsite` also deletes login runs. Doc comments updated, including `softDeleteCredentialForWebsite`.
+- `server/services/actionScriptExecutionService.ts`:
+  - **Added:** `LOGIN_ACTION_HAS_NO_STEPS_MESSAGE`.
+  - **Removed:** `ACTION_CREDENTIAL_MISSING_MESSAGE`.
+  - **Changed:** `findActionCredential` goes through the Login action. `allowedOriginsFor(website, loginSettings)`. `performActionScriptRun` logs in with the Login action. `performRefinement` refuses a Login action. `PLAN_NEEDS_A_CREDENTIAL_MESSAGE` wording.
+- `server/services/actionPlanRunnerService.ts`: `PlanRunLogin.loginActionTitle`; the `walkPlan` log and failure lines name the Login action; `PLAN_RUN_VIEWPORT` and `readScrubbedPageUrl` are now exported.
+- `server/services/actionParameterService.ts`: `syncActionParameters` saves no rows for a Login action and uses the effective credential's crawl; `loadVersionParameters` object choices use the effective credential.
+- `server/services/crawlRunService.ts`:
+  - **Added:** `CrawlLoginChoice`.
+  - `buildCredentialLogin` → `buildLoginActionLogin`.
+  - **Changed:** `CredentialLogin.loginActionTitle`; `describeCrawlRunEnding` wording; `startCrawlRun(website, loginChoice, ...)` stores `loginActionId` and `credentialId`.
+- **New** `server/services/loginRunService.ts`: `LoginRunRequest`, `LoginRunResult`, `ONLY_A_LOGIN_ACTION_RUNS_A_LOGIN_MESSAGE`, `takeLoginRunScreenshot`, `runLoginAlone`, `performLoginRun`.
+- `server/controllers/actions.ts`:
+  - **Added:** `LOGIN_ACTION_NOT_ON_WEBSITE_MESSAGE`, `LOGIN_ACTION_NEEDS_A_LOGIN_PAGE_MESSAGE`, `LOGIN_ACTION_IS_IN_USE_MESSAGE`, `LoginChoiceProblem`, `findLoginChoiceProblem`.
+  - `credentialBelongsToWebsite` → `findLoginChoiceProblem`.
+  - **Changed:** the Delete action inherits `loginActionId`; the proposal uses `readEffectiveCredential`; route JSDoc updated.
+- `server/controllers/actionScripts.ts`: convert and edits answer 409 for a Login action; allowed origins via `readLoginSettings`.
+- `server/controllers/autoRefineJobs.ts`: starting a job answers 409 for a Login action.
+- `server/controllers/crawlRuns.ts`: the start route takes `loginActionId`. `LOGIN_ACTION_NOT_FOUND_MESSAGE` replaces `CREDENTIAL_NOT_FOUND_MESSAGE` and `CREDENTIAL_HAS_NO_EFFECTIVE_LOGIN_URL_MESSAGE`.
+- `server/controllers/credentials.ts`: **Removed** `NO_LOGIN_URL_ANYWHERE_MESSAGE` and `credentialHasNoEffectiveLoginUrl`; docs updated.
+- `server/controllers/websites.ts`: JSDoc for `loginUrl`.
+- **New** `server/controllers/loginRuns.ts`: `registerLoginRunRoutes` (GET/POST `.../login-runs`, GET `.../login-runs/:loginRunId/screenshot`). `server/server.ts` registers it.
+- **New** `server/scripts/migrateLoginsToLoginActions.ts`: `describeCredentialLoginMigration`, `runLoginMigration`.
+
+**Client**
+- `src/utils/actionParameters.ts`: `LOGIN_ACTION_KIND`; `ActionKindRecord` includes `login`.
+- `src/utils/actionObjectRole.ts`: the Login label and help, the new Parameters help, `kindTakesAnObjectType`, `describeObjectRole`.
+- **New** `src/utils/describeActionLogin.ts`: `ActionLoginFields`, `isLoginActionRecord`, `readEffectiveCredential`, `describeActionLoginShort`.
+- `src/utils/routePaths.ts`: **Added** `loginRunsApiUrl` and `loginRunScreenshotApiUrl`.
+- `src/hooks/useWebsiteItems.ts`: **Added** `ActionLoginActionRecord`; login fields on `WebsiteItemRecord` and `WebsiteItemRequestBody`.
+- `src/hooks/useCredentials.ts`: types trimmed.
+- `src/hooks/useCrawlRuns.ts`: **Added** `CrawlRunLoginActionRecord`; `loginActionId` and `loginAction` on `CrawlRunRecord`.
+- **New** `src/hooks/useLoginChoices.ts`: `LoginChoicesState`, `listLoginActionOptions`, `useLoginChoices`.
+- **New** `src/hooks/useLoginRuns.ts`: `LoginRunRecord`, `useLoginRuns`.
+- `src/components/TitleDescriptionForm.tsx`:
+  - `LOGGED_OUT_CREDENTIAL_VALUE` → `LOGGED_OUT_LOGIN_ACTION_VALUE`.
+  - **Added:** `NO_CREDENTIAL_PICKED_VALUE`, `LoginActionOption`, `LoginChoices`, `LOGIN_SELECTOR_FIELDS`, `readOptionalText`, `describeLoginPageHelp`, `describeLogInWithHelp`.
+  - Prop `credentialOptions` → `loginChoices`.
+  - **Changed:** the Login-kind fields versus "Log in with"; the Kind select now comes before the login fields.
+- `src/components/CredentialForm.tsx`: the login URL and selectors are removed, and so is the `websiteLoginUrl` prop.
+- `src/components/CredentialsSection.tsx`: hint text.
+- `src/components/CrawlRunsSection.tsx`: the props are now `loginActions` / `selectedLoginActionId` / `onSelectedLoginActionChange`; the History filter matches by `loginActionId`; `describeNoCrawlsForPicks` wording.
+- `src/components/WebsiteItemListSection.tsx`: rows show `describeActionLoginShort`; staleness uses the effective credential.
+- `src/components/WebsiteForm.tsx`: login URL helper text.
+- **New** `src/components/LoginActionSection.tsx`: `LoginActionSectionProps`, `describeLoginRunOutcome`, `LoginActionSection`.
+- `src/pages/ActionDetailPage.tsx`:
+  - **Added:** `describeActionLoginLine`.
+  - **Changed:** the login runs hooks and `runLogin`; a Login action's page shows `LoginActionSection`; the `changeNameParameter` body carries the login fields; `currentAction.credentialId` is the effective credential.
+- `src/pages/WebsiteItemCreatePage.tsx`, `src/pages/WebsiteItemEditPage.tsx`: use `useLoginChoices`.
+- `src/pages/CredentialCreatePage.tsx`, `src/pages/CredentialEditPage.tsx`: no login fields.
+- `src/pages/WebsiteDetailPage.tsx`: Login action options; the Credentials tab and "Crawl as" visibility rules; the crawl POST body; "No default login page".
+
+**Tests** (written by two agents after the manual check, plus my two guard tests). No test was skipped. The ones for the removed credential fields were rewritten as Login action tests.
+- **New:**
+  - backend: `tests/backend/services/loginRunService.test.ts`, `tests/backend/api/loginRuns.test.ts`, `tests/backend/scripts/migrateLoginsToLoginActions.test.ts`;
+  - frontend: `tests/frontend/LoginActionSection.test.tsx`, `tests/frontend/useLoginChoices.test.tsx`, `tests/frontend/useLoginRuns.test.tsx`, `tests/frontend/describeActionLogin.test.tsx`.
+- **Updated:**
+  - backend API: `tests/backend/api/` `actionScripts`, `actions`, `autoRefineJobs`, `crawlRuns`, `credentials`;
+  - backend: `tests/backend/server.test.ts`;
+  - backend services: `tests/backend/services/` `actionParameterService`, `actionPlanRunnerService`, `actionScriptExecutionService`, `autoRefineService`, `crawlRunService`, `crawlerLoginService`, `dbService`;
+  - backend utils: `tests/backend/utils/` `scoreActionObjectRole`, `validateRequestBodies`;
+  - frontend pages: `ActionDetailPage`, `CredentialCreatePage`, `CredentialEditPage`, `WebsiteDetailPage`, `WebsiteItemCreatePage`, `WebsiteItemEditPage`;
+  - frontend components: `CrawlRunsSection`, `CredentialForm`, `TitleDescriptionForm`, `WebsiteForm`, `WebsiteItemListSection`;
+  - frontend utils: `actionParameters`, `routePaths`;
+  - frontend helpers: `tests/frontend/support/frontendTestHelpers.tsx` (**Added** `buildActionLoginActionRecord`, `buildLoginActionItemRecord`, `buildLoginRunRecord`).
+
+### Verification
+- **Manual check by the manual-verifier**, all 9 items passed. It drove a headless browser with the project's `playwright` package against the dev server and a new login fixture (`claude_tmp/login-fixture/server.mts`), on a throwaway website that was soft deleted afterwards:
+  - **Forms:** the credential form has only name, description, username, and password. A Login action form has "Log in as", a login page, and selectors.
+  - **Run login:** it passed with the dashboard screenshot. With a wrong password it failed with the still-on-the-login-form message and a failure screenshot. No secrets appeared in the log, error, or URLs.
+  - **Action using it:** an action that logs in with the Login action logged in before its steps. Its own plan then failed at step 1 because Claude guessed a link name ("Account settings") the fixture doesn't have; the login part worked.
+  - **Crawls:** a crawl with the Login action recorded logged-in pages; a logged-out crawl saw only `/login`.
+  - **API rules:** 400s and 409s as designed.
+  - **Deleting:** deleting the Login action set the other action back to logged out.
+  - **Regression:** use cases and existing pages still work, with no console errors.
+- **After the check:**
+  - I changed the "Log in with" helper text, which now says "Each run starts logged out" when Logged out is picked.
+  - I encoded the login run id in `loginRunScreenshotApiUrl`.
+  - I added the edits and auto-refine 409 guards for Login actions.
+  
+  These are covered by unit tests only; they were not driven by hand.
+- **Results:**
+  - `npm run test:coverage`: 154 files and 3381 tests passed. Coverage is 99% statements, 97.33% branches, 99.21% functions, and 99.47% lines.
+  - `npm run lint`, `npm run tsc`, and `npm run tsc:client` are clean.
+- **Left running:** a `tsx watch server/server.ts` watcher (pid 24387, no port) that the dev server run left behind; I was not allowed to stop it. Four older watchers from earlier sessions are untouched.
+
+---
+## 2026-11-09 15:16 EST — Allow any Node 26 release instead of pinning 26.12.0
+
+**Intent:**
+- The user asked to change the engine to Node 26, less strict than `=26.12.0`. Local Node is now v26.13.0, which the exact pin didn't allow.
+
+### Decisions
+- **Made by the user:** accept any Node 26 release.
+- **Made by me:** wrote it as `26.x`, which reads as "any 26 release" (the same range as `>=26.0.0 <27.0.0`).
+
+### Files changed
+| File | Change |
+|---|---|
+| `package.json` | **Changed:** `engines.node` from `=26.12.0` to `26.x`. |
+| `package-lock.json` | **Changed:** the root package's copy of `engines.node`, to `26.x`. |
+| `README.md` | **Changed:** "First-time setup" now says it requires Node 26 (any 26.x release). |
+| `.github/workflows/tests.yml` | **Changed:** the comment on the "Set up Node from package.json engines" step now names `26.x` and says setup-node installs the newest 26.x. No step changed. |
+
+### Verification
+- `semver.satisfies` with `26.x`: true for v26.13.0 (local), 26.0.0 and 26.12.0; false for 25.9.0 and 27.0.0.
+- `npm ci --dry-run --ignore-scripts` exits 0 with no EBADENGINE warning, so the lockfile still matches `package.json`.
+- The newest stable 26 release in `actions/node-versions/versions-manifest.json` is 26.13.0, which has a linux-x64 build. CI will now get 26.13.0 instead of 26.12.0.
+
+---
 ## 2026-11-09 12:08 EST — Split the parameters test that kept timing out in CI
 
 **Intent:**

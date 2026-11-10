@@ -27,6 +27,7 @@ const mockActionScriptExecutionService = vi.hoisted(() => ({
   ACTION_ALREADY_RUNNING_MESSAGE: "This action is already running (test message)",
   EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE:
     "This version was saved from the step editor (test message)",
+  LOGIN_ACTION_HAS_NO_STEPS_MESSAGE: "A login action has no steps (test message)",
 }));
 
 // The real dbService builds a PrismaClient at load time; this spec is about
@@ -271,6 +272,18 @@ describe("Auto-refine job routes", () => {
       expect(res.status).toBe(409);
       expect(res.body).toEqual({
         error: mockActionScriptExecutionService.EDITED_VERSION_CANNOT_BE_REFINED_MESSAGE,
+      });
+      expect(mockAutoRefineService.startAutoRefineJob).not.toHaveBeenCalled();
+    });
+
+    it("answers 409 and starts nothing for a Login action, even one that kept a version from before its kind changed", async () => {
+      mockDbService.findActionForWebsite.mockResolvedValue({ ...foundAction, userActionKind: "login" });
+
+      const res = await request(createAutoRefineJobsApp()).post(START_PATH);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        error: mockActionScriptExecutionService.LOGIN_ACTION_HAS_NO_STEPS_MESSAGE,
       });
       expect(mockAutoRefineService.startAutoRefineJob).not.toHaveBeenCalled();
     });
